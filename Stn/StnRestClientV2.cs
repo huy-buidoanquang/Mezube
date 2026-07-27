@@ -1,9 +1,9 @@
+using Mezube.Bot;
+using Microsoft.Extensions.Logging;
 using System.Buffers;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Microsoft.Extensions.Logging;
-using Mezube.Bot;
 
 namespace Mezube.Stn;
 
