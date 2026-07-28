@@ -2,7 +2,7 @@ using Mezon.Net.Sdk.Commands;
 using Mezube.Music;
 using Mezube.Ui;
 
-namespace Mezube.Commands;
+namespace Mezube.Helpers;
 
 public sealed class MusicCommandModule
 {

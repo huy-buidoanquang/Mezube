@@ -1,5 +1,6 @@
 using Mezube.Domain.Entities;
 using Mezube.Domain.Persistence;
+using Mezube.Helpers;
 using Mezube.Media;
 using Microsoft.Extensions.Logging;
 
@@ -48,10 +49,10 @@ public sealed class YoutubeTrackResolver : ITrackResolver
     {
         var trimmed = query.Trim();
 
-        if (TrackIdentity.TryParseYoutubeId(trimmed, out var videoId))
+        if (TrackIdentityHelper.TryParseYoutubeId(trimmed, out var videoId))
         {
             var cached = await _store.TryGetAsync(
-                    TrackIdentity.SourceYoutube,
+                    TrackIdentityHelper.SourceYoutube,
                     videoId,
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -66,7 +67,7 @@ public sealed class YoutubeTrackResolver : ITrackResolver
         }
         else
         {
-            var aliasKey = TrackIdentity.NormalizeQueryAlias(trimmed);
+            var aliasKey = TrackIdentityHelper.NormalizeQueryAlias(trimmed);
             var byAlias = await _store.TryGetByAliasAsync(aliasKey, cancellationToken).ConfigureAwait(false);
             if (byAlias is not null)
             {
@@ -86,7 +87,7 @@ public sealed class YoutubeTrackResolver : ITrackResolver
 
         var externalId = resolved.ExternalId;
         if (string.IsNullOrWhiteSpace(externalId)
-            && TrackIdentity.TryParseYoutubeId(resolved.WebpageUrl ?? trimmed, out var parsedId))
+            && TrackIdentityHelper.TryParseYoutubeId(resolved.WebpageUrl ?? trimmed, out var parsedId))
         {
             externalId = parsedId;
             resolved = new TrackInfoEntity
@@ -106,17 +107,17 @@ public sealed class YoutubeTrackResolver : ITrackResolver
         {
             // Prefer existing playable_url if another path already prepared this id.
             var existing = await _store.TryGetAsync(
-                    TrackIdentity.SourceYoutube,
+                    TrackIdentityHelper.SourceYoutube,
                     externalId,
                     cancellationToken)
                 .ConfigureAwait(false);
             if (existing?.HasPlayableUrl == true)
             {
-                if (!TrackIdentity.TryParseYoutubeId(trimmed, out _))
+                if (!TrackIdentityHelper.TryParseYoutubeId(trimmed, out _))
                 {
                     await _store.SetAliasAsync(
-                            TrackIdentity.NormalizeQueryAlias(trimmed),
-                            TrackIdentity.SourceYoutube,
+                            TrackIdentityHelper.NormalizeQueryAlias(trimmed),
+                            TrackIdentityHelper.SourceYoutube,
                             externalId,
                             cancellationToken)
                         .ConfigureAwait(false);
@@ -128,7 +129,7 @@ public sealed class YoutubeTrackResolver : ITrackResolver
             await _store.UpsertMetadataAsync(
                     new TrackEntity
                     {
-                        Source = TrackIdentity.SourceYoutube,
+                        Source = TrackIdentityHelper.SourceYoutube,
                         ExternalId = externalId,
                         Title = resolved.Title,
                         WebpageUrl = resolved.WebpageUrl,
@@ -139,11 +140,11 @@ public sealed class YoutubeTrackResolver : ITrackResolver
                     cancellationToken)
                 .ConfigureAwait(false);
 
-            if (!TrackIdentity.TryParseYoutubeId(trimmed, out _))
+            if (!TrackIdentityHelper.TryParseYoutubeId(trimmed, out _))
             {
                 await _store.SetAliasAsync(
-                        TrackIdentity.NormalizeQueryAlias(trimmed),
-                        TrackIdentity.SourceYoutube,
+                        TrackIdentityHelper.NormalizeQueryAlias(trimmed),
+                        TrackIdentityHelper.SourceYoutube,
                         externalId,
                         cancellationToken)
                     .ConfigureAwait(false);

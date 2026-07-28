@@ -1,6 +1,6 @@
 using Mezon.Net.Sdk.Commands;
 
-namespace Mezube.Commands;
+namespace Mezube.Helpers;
 
 /// <summary>
 /// Resolves a target channel from Mezon hashtag tokens (<c>hg</c> in message content)

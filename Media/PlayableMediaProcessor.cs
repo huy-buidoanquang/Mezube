@@ -4,6 +4,7 @@ using Mezube.Domain.Persistence;
 using Mezon.Net.Sdk;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics;
+using Mezube.Helpers;
 
 namespace Mezube.Media;
 
@@ -204,15 +205,15 @@ public sealed class PlayableMediaProcessor
             return (track.Source, track.ExternalId);
         }
 
-        if (TrackIdentity.TryParseYoutubeId(track.WebpageUrl ?? track.MediaUrl, out var ytId))
+        if (TrackIdentityHelper.TryParseYoutubeId(track.WebpageUrl ?? track.MediaUrl, out var ytId))
         {
-            return (TrackIdentity.SourceYoutube, ytId);
+            return (TrackIdentityHelper.SourceYoutube, ytId);
         }
 
-        if (string.Equals(track.Source, TrackIdentity.SourceUrl, StringComparison.OrdinalIgnoreCase)
+        if (string.Equals(track.Source, TrackIdentityHelper.SourceUrl, StringComparison.OrdinalIgnoreCase)
             && !string.IsNullOrWhiteSpace(track.MediaUrl))
         {
-            return (TrackIdentity.SourceUrl, TrackIdentity.ForDirectUrl(track.MediaUrl));
+            return (TrackIdentityHelper.SourceUrl, TrackIdentityHelper.ForDirectUrl(track.MediaUrl));
         }
 
         return null;

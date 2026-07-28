@@ -2,9 +2,9 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 
-namespace Mezube.Domain.Entities;
+namespace Mezube.Helpers;
 
-public static class TrackIdentity
+public static class TrackIdentityHelper
 {
     public const string SourceYoutube = "youtube";
     public const string SourceUrl = "url";

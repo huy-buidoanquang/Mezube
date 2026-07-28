@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Mezube.Bot;
 using Mezube.Domain.Entities;
+using Mezube.Helpers;
 
 namespace Mezube.Media;
 
@@ -65,13 +66,13 @@ public sealed class YtDlpProcessor
         }
 
         if (string.IsNullOrWhiteSpace(externalId)
-            && TrackIdentity.TryParseYoutubeId(webpageUrl, out var fromWeb))
+            && TrackIdentityHelper.TryParseYoutubeId(webpageUrl, out var fromWeb))
         {
             externalId = fromWeb;
         }
 
         if (string.IsNullOrWhiteSpace(externalId)
-            && TrackIdentity.TryParseYoutubeId(query, out var fromQuery))
+            && TrackIdentityHelper.TryParseYoutubeId(query, out var fromQuery))
         {
             externalId = fromQuery;
         }
@@ -89,7 +90,7 @@ public sealed class YtDlpProcessor
             ThumbnailUrl = thumbnail,
             RequestedBy = requestedBy,
             Duration = duration,
-            Source = TrackIdentity.SourceYoutube,
+            Source = TrackIdentityHelper.SourceYoutube,
             ExternalId = string.IsNullOrWhiteSpace(externalId) ? null : externalId,
         };
     }

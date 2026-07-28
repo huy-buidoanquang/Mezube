@@ -1,5 +1,6 @@
 using Mezube.Domain.Entities;
 using Mezube.Domain.Persistence;
+using Mezube.Helpers;
 using Microsoft.Extensions.Logging;
 
 namespace Mezube.Music;
@@ -55,8 +56,8 @@ public sealed class DirectUrlTrackResolver : ITrackResolver
             ? url[..^4] + ".ogg"
             : url;
 
-        var externalId = TrackIdentity.ForDirectUrl(mediaUrl);
-        var cached = await _store.TryGetAsync(TrackIdentity.SourceUrl, externalId, cancellationToken)
+        var externalId = TrackIdentityHelper.ForDirectUrl(mediaUrl);
+        var cached = await _store.TryGetAsync(TrackIdentityHelper.SourceUrl, externalId, cancellationToken)
             .ConfigureAwait(false);
         if (cached is not null)
         {
@@ -76,14 +77,14 @@ public sealed class DirectUrlTrackResolver : ITrackResolver
             MediaUrl = mediaUrl,
             WebpageUrl = url,
             RequestedBy = requestedBy,
-            Source = TrackIdentity.SourceUrl,
+            Source = TrackIdentityHelper.SourceUrl,
             ExternalId = externalId,
         };
 
         await _store.UpsertMetadataAsync(
                 new TrackEntity
                 {
-                    Source = TrackIdentity.SourceUrl,
+                    Source = TrackIdentityHelper.SourceUrl,
                     ExternalId = externalId,
                     Title = title,
                     WebpageUrl = url,

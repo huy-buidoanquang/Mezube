@@ -3,7 +3,7 @@ using Mezon.Net.Models;
 using Mezon.Net.Sdk;
 using Mezon.Net.Sdk.Commands;
 using Mezon.Net.Sdk.Interactions;
-using Mezube.Commands;
+using Mezube.Helpers;
 using Mezube.Music;
 using Mezube.Ui;
 using Microsoft.Extensions.Hosting;
