@@ -8,6 +8,9 @@ namespace Mezube.Media;
 
 /// <summary>
 /// Pushes Opus audio to a LiveKit WHIP endpoint via ffmpeg's <c>whip</c> muxer.
+/// Information = publish-ready milestone only.
+/// Debug = ffmpeg config, handshake fallback, and normal process teardown.
+/// Warning = actionable ffmpeg stderr or abnormal process exit.
 /// </summary>
 public sealed class WhipFfmpegPublisher
 {
@@ -50,6 +53,7 @@ public sealed class WhipFfmpegPublisher
         await StopAsync(roomName).ConfigureAwait(false);
 
         var endpoint = NormalizeLiveKitWhipUrl(whipUrl);
+        var settings = ResolvedWhipSettings.FromOptions(_options, endpoint, mediaUrl);
         var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var publishing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var ended = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -62,31 +66,24 @@ public sealed class WhipFfmpegPublisher
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        // Real-time pace from CDN/local Ogg → Opus RTP over WHIP.
-        psi.ArgumentList.Add("-hide_banner");
-        psi.ArgumentList.Add("-loglevel");
-        psi.ArgumentList.Add("info");
-        psi.ArgumentList.Add("-re");
-        psi.ArgumentList.Add("-i");
-        psi.ArgumentList.Add(mediaUrl);
-        psi.ArgumentList.Add("-vn");
-        psi.ArgumentList.Add("-c:a");
-        psi.ArgumentList.Add("libopus");
-        psi.ArgumentList.Add("-b:a");
-        psi.ArgumentList.Add("96k");
-        psi.ArgumentList.Add("-ar");
-        psi.ArgumentList.Add("48000");
-        psi.ArgumentList.Add("-ac");
-        psi.ArgumentList.Add("2");
-        psi.ArgumentList.Add("-application");
-        psi.ArgumentList.Add("audio");
-        psi.ArgumentList.Add("-f");
-        psi.ArgumentList.Add("whip");
-        psi.ArgumentList.Add("-authorization");
-        psi.ArgumentList.Add(authorizationToken);
-        psi.ArgumentList.Add("-handshake_timeout");
-        psi.ArgumentList.Add("10000");
-        psi.ArgumentList.Add(endpoint);
+        AddFfmpegArgs(psi, settings, authorizationToken);
+
+        _logger.LogDebug(
+            "WHIP publish config room={Room} endpoint={Endpoint} mediaUrl={MediaUrl} encoderDisabled={EncoderDisabled} codecMode={CodecMode} bitrateKbps={BitrateKbps} sampleRate={SampleRate} channels={Channels} opusApplication={Application} vbr={Vbr} complexity={Complexity} fec={Fec} packetLossPercent={PacketLossPercent} handshakeTimeoutMs={HandshakeTimeoutMs}",
+            roomName,
+            settings.Endpoint,
+            settings.MediaUrl,
+            settings.EncoderDisabled,
+            settings.EncoderDisabled ? "copy" : "libopus",
+            settings.BitrateKbps,
+            settings.SampleRate,
+            settings.Channels,
+            settings.OpusApplication,
+            settings.OpusVbr,
+            settings.OpusComplexity,
+            settings.EnableInbandFec,
+            settings.PacketLossPercent,
+            settings.HandshakeTimeoutMs);
 
         Process process;
         try
@@ -100,14 +97,14 @@ public sealed class WhipFfmpegPublisher
             throw new InvalidOperationException($"ffmpeg not found at {_options.FfmpegPath}", ex);
         }
 
-        var active = new ActivePublish(process, lifetime, publishing, ended);
+        var active = new ActivePublish(process, lifetime, publishing, ended, settings);
         _byRoom[roomName] = active;
 
         _ = Task.Run(() => PumpStderrAsync(roomName, process, publishing, lifetime.Token), CancellationToken.None);
         _ = Task.Run(() => AwaitExitAsync(roomName, process, publishing, ended, lifetime), CancellationToken.None);
 
         using var readyTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        readyTimeout.CancelAfter(TimeSpan.FromSeconds(15));
+        readyTimeout.CancelAfter(TimeSpan.FromMilliseconds(settings.HandshakeTimeoutMs + 5000));
         try
         {
             var ready = publishing.Task;
@@ -121,7 +118,11 @@ public sealed class WhipFfmpegPublisher
             }
 
             await ready.ConfigureAwait(false);
-            _logger.LogDebug("WHIP publishing ready room={Room} endpoint={Endpoint}", roomName, endpoint);
+            _logger.LogInformation(
+                "WHIP publishing ready room={Room} endpoint={Endpoint} codecMode={CodecMode}",
+                roomName,
+                endpoint,
+                settings.EncoderDisabled ? "copy" : "libopus");
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -135,9 +136,10 @@ public sealed class WhipFfmpegPublisher
 
             publishing.TrySetResult();
             _logger.LogDebug(
-                "WHIP publishing assumed ready after handshake wait room={Room} endpoint={Endpoint}",
+                "WHIP publishing assumed ready after handshake wait room={Room} endpoint={Endpoint} handshakeTimeoutMs={HandshakeTimeoutMs}",
                 roomName,
-                endpoint);
+                endpoint,
+                settings.HandshakeTimeoutMs);
         }
         catch
         {
@@ -212,6 +214,15 @@ public sealed class WhipFfmpegPublisher
         active.Lifetime.Dispose();
     }
 
+    public async Task StopAllAsync()
+    {
+        var rooms = _byRoom.Keys.ToArray();
+        foreach (var room in rooms)
+        {
+            await StopAsync(room).ConfigureAwait(false);
+        }
+    }
+
     /// <summary>
     /// STN may return <c>.../whip</c>; LiveKit server WHIP is <c>.../whip/v1</c>.
     /// </summary>
@@ -247,14 +258,9 @@ public sealed class WhipFfmpegPublisher
                     break;
                 }
 
-                if (line.Contains("error", StringComparison.OrdinalIgnoreCase)
-                    || line.Contains("fail", StringComparison.OrdinalIgnoreCase))
+                if (LooksActionableWarning(line))
                 {
                     _logger.LogWarning("WHIP ffmpeg room={Room}: {Line}", roomName, line);
-                }
-                else
-                {
-                    _logger.LogTrace("WHIP ffmpeg room={Room}: {Line}", roomName, line);
                 }
 
                 if (!publishing.Task.IsCompleted && LooksPublishing(line))
@@ -291,7 +297,14 @@ public sealed class WhipFfmpegPublisher
             }
 
             ended.TrySetResult(code);
-            _logger.LogDebug("WHIP ffmpeg exited room={Room} code={Code}", roomName, code);
+            if (code == 0)
+            {
+                _logger.LogDebug("WHIP ffmpeg exited room={Room} code={Code}", roomName, code);
+            }
+            else
+            {
+                _logger.LogWarning("WHIP ffmpeg exited room={Room} code={Code}", roomName, code);
+            }
         }
         catch (Exception ex)
         {
@@ -318,6 +331,17 @@ public sealed class WhipFfmpegPublisher
                    || line.Contains("established", StringComparison.OrdinalIgnoreCase)
                    || line.Contains("DTLS", StringComparison.OrdinalIgnoreCase)
                    || line.Contains("ICE", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool LooksActionableWarning(string line)
+    {
+        return line.Contains("error", StringComparison.OrdinalIgnoreCase)
+               || line.Contains("fail", StringComparison.OrdinalIgnoreCase)
+               || line.Contains("invalid", StringComparison.OrdinalIgnoreCase)
+               || line.Contains("timed out", StringComparison.OrdinalIgnoreCase)
+               || line.Contains("403", StringComparison.OrdinalIgnoreCase)
+               || line.Contains("404", StringComparison.OrdinalIgnoreCase)
+               || line.Contains("401", StringComparison.OrdinalIgnoreCase);
     }
 
     private bool ProbeWhipMuxer()
@@ -358,9 +382,80 @@ public sealed class WhipFfmpegPublisher
         }
     }
 
+    private static void AddFfmpegArgs(ProcessStartInfo psi, ResolvedWhipSettings settings, string authorizationToken)
+    {
+        // Real-time pace from CDN/local audio into WHIP, either by Opus re-encode or stream copy.
+        psi.ArgumentList.Add("-hide_banner");
+        psi.ArgumentList.Add("-loglevel");
+        psi.ArgumentList.Add("info");
+        psi.ArgumentList.Add("-re");
+        psi.ArgumentList.Add("-i");
+        psi.ArgumentList.Add(settings.MediaUrl);
+        psi.ArgumentList.Add("-vn");
+        psi.ArgumentList.Add("-c:a");
+        psi.ArgumentList.Add(settings.EncoderDisabled ? "copy" : "libopus");
+        if (!settings.EncoderDisabled)
+        {
+            psi.ArgumentList.Add("-b:a");
+            psi.ArgumentList.Add($"{settings.BitrateKbps}k");
+            psi.ArgumentList.Add("-ar");
+            psi.ArgumentList.Add(settings.SampleRate.ToString());
+            psi.ArgumentList.Add("-ac");
+            psi.ArgumentList.Add(settings.Channels.ToString());
+            psi.ArgumentList.Add("-application");
+            psi.ArgumentList.Add(settings.OpusApplication);
+            psi.ArgumentList.Add("-vbr");
+            psi.ArgumentList.Add(settings.OpusVbr);
+            psi.ArgumentList.Add("-compression_level");
+            psi.ArgumentList.Add(settings.OpusComplexity.ToString());
+            psi.ArgumentList.Add("-packet_loss");
+            psi.ArgumentList.Add(settings.PacketLossPercent.ToString());
+            psi.ArgumentList.Add("-fec");
+            psi.ArgumentList.Add(settings.EnableInbandFec ? "1" : "0");
+        }
+        psi.ArgumentList.Add("-f");
+        psi.ArgumentList.Add("whip");
+        psi.ArgumentList.Add("-authorization");
+        psi.ArgumentList.Add(authorizationToken);
+        psi.ArgumentList.Add("-handshake_timeout");
+        psi.ArgumentList.Add(settings.HandshakeTimeoutMs.ToString());
+        psi.ArgumentList.Add(settings.Endpoint);
+    }
+
+    private sealed record ResolvedWhipSettings(
+        string Endpoint,
+        string MediaUrl,
+        bool EncoderDisabled,
+        int BitrateKbps,
+        int SampleRate,
+        int Channels,
+        string OpusApplication,
+        string OpusVbr,
+        int OpusComplexity,
+        int PacketLossPercent,
+        bool EnableInbandFec,
+        int HandshakeTimeoutMs)
+    {
+        public static ResolvedWhipSettings FromOptions(BotOptions options, string endpoint, string mediaUrl) =>
+            new(
+                endpoint,
+                mediaUrl,
+                options.WhipEncoderDisabled,
+                options.WhipAudioBitrateKbps,
+                options.WhipAudioSampleRate,
+                options.WhipAudioChannels,
+                options.WhipOpusApplication.ToLowerInvariant(),
+                options.WhipOpusVbr.ToLowerInvariant(),
+                options.WhipOpusComplexity,
+                options.WhipPacketLossPercent,
+                options.WhipEnableInbandFec,
+                options.WhipHandshakeTimeoutMs);
+    }
+
     private sealed record ActivePublish(
         Process Process,
         CancellationTokenSource Lifetime,
         TaskCompletionSource Publishing,
-        TaskCompletionSource<int> Ended);
+        TaskCompletionSource<int> Ended,
+        ResolvedWhipSettings Settings);
 }

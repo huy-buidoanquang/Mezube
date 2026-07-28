@@ -7,12 +7,12 @@ namespace Mezube.Music;
 
 public sealed class YoutubeTrackResolver : ITrackResolver
 {
-    private readonly YtDlpRunner _ytDlp;
+    private readonly YtDlpProcessor _ytDlp;
     private readonly ITrackDb _store;
     private readonly ILogger<YoutubeTrackResolver> _logger;
 
     public YoutubeTrackResolver(
-        YtDlpRunner ytDlp,
+        YtDlpProcessor ytDlp,
         ITrackDb store,
         ILogger<YoutubeTrackResolver> logger)
     {
@@ -78,7 +78,7 @@ public sealed class YoutubeTrackResolver : ITrackResolver
             }
         }
 
-        var resolved = await _ytDlp.ResolveAsync(trimmed, requestedBy, cancellationToken).ConfigureAwait(false);
+        var resolved = await _ytDlp.ResolveTrackAsync(trimmed, requestedBy, cancellationToken).ConfigureAwait(false);
         if (resolved is null)
         {
             return null;

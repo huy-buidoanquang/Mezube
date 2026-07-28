@@ -11,18 +11,18 @@ public sealed class StreamingChannelSink : IPlaybackSink
 {
     private readonly StnSocketClient _stn;
     private readonly StreamingChannelSinkHolder _holder;
-    private readonly PlayableMediaPreparer _preparer;
+    private readonly PlayableMediaProcessor _processor;
     private readonly ILogger<StreamingChannelSink> _logger;
 
     public StreamingChannelSink(
         StnSocketClient stn,
         StreamingChannelSinkHolder holder,
-        PlayableMediaPreparer preparer,
+        PlayableMediaProcessor processor,
         ILogger<StreamingChannelSink> logger)
     {
         _stn = stn;
         _holder = holder;
-        _preparer = preparer;
+        _processor = processor;
         _logger = logger;
     }
 
@@ -32,14 +32,14 @@ public sealed class StreamingChannelSink : IPlaybackSink
     {
         var client = _holder.GetClient();
         var total = Stopwatch.StartNew();
-        var prepare = Stopwatch.StartNew();
-        var playable = await _preparer.EnsurePlayableAsync(client, track, cancellationToken).ConfigureAwait(false);
+        var process = Stopwatch.StartNew();
+        var playable = await _processor.ProcessTrackAsync(client, track, cancellationToken).ConfigureAwait(false);
         _logger.LogDebug(
-            "Streaming media prepared title={Title} clan={ClanId} channel={ChannelId} elapsedMs={ElapsedMs} url={Url}",
+            "Streaming media processed title={Title} clan={ClanId} channel={ChannelId} elapsedMs={ElapsedMs} url={Url}",
             track.Title,
             target.ClanId,
             target.ChannelId,
-            prepare.ElapsedMilliseconds,
+            process.ElapsedMilliseconds,
             playable.MediaUrl);
         var auth = Stopwatch.StartNew();
         var authToken = await client.GetAuthTokenAsync().ConfigureAwait(false);

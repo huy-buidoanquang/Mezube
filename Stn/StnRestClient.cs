@@ -57,7 +57,7 @@ public sealed class StnRestClient
         request.Content = content;
         var stopwatch = Stopwatch.StartNew();
 
-        _logger.LogInformation(
+        _logger.LogDebug(
             "playMedia POST {Endpoint} room={Room} identity={Identity} name={Name} url={Url}",
             _playUri,
             roomName,
@@ -81,7 +81,7 @@ public sealed class StnRestClient
             _activeIngressId = ingressId;
         }
 
-        _logger.LogInformation(
+        _logger.LogDebug(
             "playMedia ok room={Room} ingressId={IngressId} elapsedMs={ElapsedMs}",
             roomName,
             ingressId ?? "(none)",
@@ -117,7 +117,7 @@ public sealed class StnRestClient
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", authToken);
         request.Content = content;
 
-        _logger.LogInformation(
+        _logger.LogDebug(
             "stopMedia POST {Endpoint} room={Room} identity={Identity} ingressId={IngressId}",
             _stopUri,
             roomName,
@@ -132,7 +132,7 @@ public sealed class StnRestClient
                 DescribeFailure("stopMedia", _stopUri.ToString(), (int)response.StatusCode, body));
         }
 
-        _logger.LogInformation("stopMedia ok room={Room}", roomName);
+        _logger.LogDebug("stopMedia ok room={Room}", roomName);
     }
 
     private static ByteArrayContent CreatePlayContent(

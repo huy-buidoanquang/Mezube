@@ -49,10 +49,23 @@ dotnet run --project Mezube.csproj
 | `Mezon:Host` / `Mezon:Port` | Dev `dev-mezon.nccsoft.vn:8088`, Prod `gw.mezon.ai:443` |
 | `Mezube:StnBaseUrl` | STN origin (vd. `https://stn.mezon.ai`) — derive `/api/v2/voice/*` + `/ws` |
 | `Mezube:StnWhipEnabled` | Voice via WHIP (ffmpeg → LiveKit). Default `false` (v2 CDN). Needs ffmpeg `whip` muxer; otherwise falls back to v2 |
+| `Mezube:PreparedAudioBitrateKbps` / `PreparedAudioChannels` / `PreparedAudioSampleRate` | Preset cho file CDN “master” trước khi publish |
+| `Mezube:WhipAudioBitrateKbps` / `WhipAudioChannels` / `WhipAudioSampleRate` | Preset audio đầu ra WHIP |
+| `Mezube:WhipOpusApplication` / `WhipOpusVbr` / `WhipOpusComplexity` | Tune encoder libopus cho quality vs stability |
+| `Mezube:WhipPacketLossPercent` / `WhipEnableInbandFec` | Preset resilience khi mạng không hoàn hảo |
+| `Mezube:WhipHandshakeTimeoutMs` | Timeout chờ WHIP handshake/publish ready |
 | `Mezube:CdnBaseUrl` | Public CDN sau upload |
 | `Mezube:BotAvatarUrl` | Avatar bot — embed author + thumbnail fallback |
 | `Mezube:VizImageUrl` / `Mezube:VizPositionUrl` | Equalizer sprite + JSON cho `!np` |
 | `Mezube:TracksDbPath` | SQLite track library (mặc định `data/tracks.db`) |
+
+### Preset gợi ý
+
+- `quality-first`: `PreparedAudioBitrateKbps=128`, `WhipAudioBitrateKbps=128`, `WhipOpusVbr=on`
+- `stable-first`: `WhipAudioBitrateKbps=128`, `WhipEnableInbandFec=true`, `WhipPacketLossPercent=3..5`, cân nhắc `WhipOpusVbr=constrained`
+- `160k` là tùy chọn nếu muốn dày hơn, nhưng CPU/bandwidth tăng và khác biệt có thể không đáng kể trong voice room
+
+WHIP hiện vẫn là `ffmpeg -> LiveKit`, nên khi shutdown bot Mezube sẽ cleanup toàn bộ publisher còn sống để không để sót nhạc đang phát.
 
 ## Chạy
 

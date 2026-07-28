@@ -5,6 +5,10 @@ namespace Mezube.Bot;
 
 public sealed class BotOptions
 {
+    private const int DefaultAudioBitrateKbps = 128;
+    private const int DefaultAudioChannels = 2;
+    private const int DefaultAudioSampleRate = 48000;
+
     public long BotId { get; set; }
     public string Token { get; set; } = string.Empty;
     /// <summary>Gateway Basic-Auth server key (dev: defaultkey, prod: HTTP3m3zonPr0dkey).</summary>
@@ -30,6 +34,19 @@ public sealed class BotOptions
     public string FfmpegPath { get; set; } = "ffmpeg";
     public string TempDir { get; set; } = "temp";
     public string TracksDbPath { get; set; } = "data/tracks.db";
+    public int PreparedAudioBitrateKbps { get; set; } = DefaultAudioBitrateKbps;
+    public int PreparedAudioChannels { get; set; } = DefaultAudioChannels;
+    public int PreparedAudioSampleRate { get; set; } = DefaultAudioSampleRate;
+    public int WhipAudioBitrateKbps { get; set; } = DefaultAudioBitrateKbps;
+    public int WhipAudioChannels { get; set; } = DefaultAudioChannels;
+    public int WhipAudioSampleRate { get; set; } = DefaultAudioSampleRate;
+    public bool WhipEncoderDisabled { get; set; }
+    public string WhipOpusApplication { get; set; } = "audio";
+    public string WhipOpusVbr { get; set; } = "on";
+    public int WhipOpusComplexity { get; set; } = 10;
+    public int WhipPacketLossPercent { get; set; } = 3;
+    public bool WhipEnableInbandFec { get; set; } = true;
+    public int WhipHandshakeTimeoutMs { get; set; } = 10000;
     public string BotDisplayName { get; set; } = "Mezube";
     /// <summary>Bot avatar used for embed author icon and as thumbnail fallback.</summary>
     public string BotAvatarUrl { get; set; } = string.Empty;
@@ -80,5 +97,71 @@ public sealed class BotOptions
         {
             throw new InvalidOperationException("Mezube:CdnBaseUrl is required.");
         }
+
+        ValidateAudioSettings();
+    }
+
+    private void ValidateAudioSettings()
+    {
+        ValidateBitrate(nameof(PreparedAudioBitrateKbps), PreparedAudioBitrateKbps);
+        ValidateBitrate(nameof(WhipAudioBitrateKbps), WhipAudioBitrateKbps);
+        ValidateChannels(nameof(PreparedAudioChannels), PreparedAudioChannels);
+        ValidateChannels(nameof(WhipAudioChannels), WhipAudioChannels);
+        ValidateSampleRate(nameof(PreparedAudioSampleRate), PreparedAudioSampleRate);
+        ValidateSampleRate(nameof(WhipAudioSampleRate), WhipAudioSampleRate);
+
+        if (WhipOpusComplexity is < 0 or > 10)
+        {
+            throw new InvalidOperationException("Mezube:WhipOpusComplexity must be between 0 and 10.");
+        }
+
+        if (WhipPacketLossPercent is < 0 or > 100)
+        {
+            throw new InvalidOperationException("Mezube:WhipPacketLossPercent must be between 0 and 100.");
+        }
+
+        if (WhipHandshakeTimeoutMs < 1000)
+        {
+            throw new InvalidOperationException("Mezube:WhipHandshakeTimeoutMs must be >= 1000.");
+        }
+
+        if (!IsAllowed(WhipOpusApplication, "audio", "voip", "lowdelay"))
+        {
+            throw new InvalidOperationException("Mezube:WhipOpusApplication must be audio, voip, or lowdelay.");
+        }
+
+        if (!IsAllowed(WhipOpusVbr, "on", "off", "constrained"))
+        {
+            throw new InvalidOperationException("Mezube:WhipOpusVbr must be on, off, or constrained.");
+        }
+    }
+
+    private static void ValidateBitrate(string name, int value)
+    {
+        if (value is < 32 or > 512)
+        {
+            throw new InvalidOperationException($"Mezube:{name} must be between 32 and 512 kb/s.");
+        }
+    }
+
+    private static void ValidateChannels(string name, int value)
+    {
+        if (value is < 1 or > 2)
+        {
+            throw new InvalidOperationException($"Mezube:{name} must be 1 or 2.");
+        }
+    }
+
+    private static void ValidateSampleRate(string name, int value)
+    {
+        if (value is < 8000 or > 48000)
+        {
+            throw new InvalidOperationException($"Mezube:{name} must be between 8000 and 48000.");
+        }
+    }
+
+    private static bool IsAllowed(string value, params string[] allowed)
+    {
+        return allowed.Any(x => string.Equals(x, value, StringComparison.OrdinalIgnoreCase));
     }
 }

@@ -51,13 +51,13 @@ internal static class Program
         builder.Services.AddSingleton<StnSocketClient>();
         builder.Services.AddSingleton<StreamingChannelSinkHolder>();
         builder.Services.AddSingleton<VoiceChannelSinkHolder>();
-        builder.Services.AddSingleton<YtDlpRunner>();
-        builder.Services.AddSingleton<FfmpegRunner>();
+        builder.Services.AddSingleton<YtDlpProcessor>();
+        builder.Services.AddSingleton<FfmpegProcessor>();
         builder.Services.AddSingleton<WhipFfmpegPublisher>();
         builder.Services.AddSingleton<MezonCdnUploader>();
         builder.Services.AddSingleton<MusicVizAssets>();
         builder.Services.AddSingleton<ITrackDb, SqliteTrackDb>();
-        builder.Services.AddSingleton<PlayableMediaPreparer>();
+        builder.Services.AddSingleton<PlayableMediaProcessor>();
         builder.Services.AddSingleton<YoutubeTrackResolver>();
         builder.Services.AddSingleton<DirectUrlTrackResolver>();
         builder.Services.AddSingleton<ITrackResolver>(sp =>
@@ -73,6 +73,27 @@ internal static class Program
         builder.Services.AddHostedService<MezubeBot>();
 
         var host = builder.Build();
+        RegisterWhipCleanup(host);
         await host.RunAsync().ConfigureAwait(false);
+    }
+
+    private static void RegisterWhipCleanup(IHost host)
+    {
+        var lifetime = host.Services.GetRequiredService<IHostApplicationLifetime>();
+        var publisher = host.Services.GetRequiredService<WhipFfmpegPublisher>();
+        var logger = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Mezube.WhipCleanup");
+
+        lifetime.ApplicationStopping.Register(() =>
+        {
+            try
+            {
+                logger.LogDebug("Stopping all active WHIP publishers during host shutdown");
+                publisher.StopAllAsync().GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to stop all WHIP publishers during shutdown");
+            }
+        });
     }
 }

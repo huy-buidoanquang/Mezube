@@ -9,23 +9,25 @@ namespace Mezube.Media;
 
 /// <summary>
 /// Ensures STN gets a stable HTTP URL (Mezon CDN), not an ephemeral googlevideo link.
+/// Information = only when a new playable CDN asset is actually prepared.
+/// Debug = cache hits and per-step download/convert/upload detail.
 /// </summary>
-public sealed class PlayableMediaPreparer
+public sealed class PlayableMediaProcessor
 {
     private readonly BotOptions _options;
-    private readonly YtDlpRunner _ytDlp;
-    private readonly FfmpegRunner _ffmpeg;
+    private readonly YtDlpProcessor _ytDlp;
+    private readonly FfmpegProcessor _ffmpeg;
     private readonly MezonCdnUploader _uploader;
     private readonly ITrackDb _store;
-    private readonly ILogger<PlayableMediaPreparer> _logger;
+    private readonly ILogger<PlayableMediaProcessor> _logger;
 
-    public PlayableMediaPreparer(
+    public PlayableMediaProcessor(
         BotOptions options,
-        YtDlpRunner ytDlp,
-        FfmpegRunner ffmpeg,
+        YtDlpProcessor ytDlp,
+        FfmpegProcessor ffmpeg,
         MezonCdnUploader uploader,
         ITrackDb store,
-        ILogger<PlayableMediaPreparer> logger)
+        ILogger<PlayableMediaProcessor> logger)
     {
         _options = options;
         _ytDlp = ytDlp;
@@ -35,12 +37,13 @@ public sealed class PlayableMediaPreparer
         _logger = logger;
     }
 
-    public async Task<TrackInfoEntity> EnsurePlayableAsync(
+    public async Task<TrackInfoEntity> ProcessTrackAsync(
         MezonClient client,
         TrackInfoEntity track,
         CancellationToken cancellationToken = default)
     {
         var stopwatch = Stopwatch.StartNew();
+        var pipelineStopwatch = Stopwatch.StartNew();
         var identity = ResolveIdentity(track);
 
         if (identity is { } id)
@@ -51,7 +54,7 @@ public sealed class PlayableMediaPreparer
             {
                 if (await _uploader.IsReachableAsync(stored.PlayableUrl!, cancellationToken).ConfigureAwait(false))
                 {
-                    _logger.LogInformation(
+                    _logger.LogDebug(
                         "Using cached CDN media for {Source}/{Id}: {Url} elapsedMs={ElapsedMs}",
                         id.Source,
                         id.ExternalId,
@@ -63,10 +66,9 @@ public sealed class PlayableMediaPreparer
                 }
 
                 _logger.LogWarning(
-                    "Cached CDN media unreachable (will re-upload) {Source}/{Id}: {Url}",
+                    "Cached CDN media unreachable (will re-upload) {Source}/{Id}",
                     id.Source,
-                    id.ExternalId,
-                    stored.PlayableUrl);
+                    id.ExternalId);
             }
         }
 
@@ -84,7 +86,7 @@ public sealed class PlayableMediaPreparer
                     .ConfigureAwait(false);
             }
 
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "Playable media already direct for {Title} elapsedMs={ElapsedMs} url={Url}",
                 track.Title,
                 stopwatch.ElapsedMilliseconds,
@@ -92,7 +94,7 @@ public sealed class PlayableMediaPreparer
             return track;
         }
 
-        _logger.LogInformation("Preparing CDN media for {Title}", track.Title);
+        _logger.LogDebug("Preparing CDN media for {Title}", track.Title);
         Directory.CreateDirectory(_options.TempDir);
         var workId = Guid.NewGuid().ToString("N");
         var rawPath = Path.Combine(_options.TempDir, $"mezube_{workId}");
@@ -100,22 +102,42 @@ public sealed class PlayableMediaPreparer
 
         try
         {
-            var downloaded = await _ytDlp.DownloadAudioAsync(source, rawPath, cancellationToken).ConfigureAwait(false);
+            var downloadStopwatch = Stopwatch.StartNew();
+            var downloaded = await _ytDlp.DownloadTrackAudioAsync(source, rawPath, cancellationToken).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(downloaded) || !File.Exists(downloaded))
             {
                 throw new InvalidOperationException("yt-dlp download returned no file.");
             }
+            _logger.LogDebug(
+                "Prepare download completed title={Title} inputExt={InputExt} elapsedMs={ElapsedMs}",
+                track.Title,
+                Path.GetExtension(downloaded),
+                downloadStopwatch.ElapsedMilliseconds);
 
             // STN voice/stream reliably plays Ogg (Komu NCC8 always converts to .ogg).
             // m4a/webm can make the bot appear in voice with playMedia ok but silence.
+            var convertStopwatch = Stopwatch.StartNew();
             var uploadPath = await EnsureOggAsync(downloaded, cancellationToken).ConfigureAwait(false);
+            _logger.LogDebug(
+                "Prepare convert resolved title={Title} inputExt={InputExt} outputExt={OutputExt} elapsedMs={ElapsedMs}",
+                track.Title,
+                Path.GetExtension(downloaded),
+                Path.GetExtension(uploadPath),
+                convertStopwatch.ElapsedMilliseconds);
             const string contentType = "audio/ogg";
 
             string cdnUrl;
             try
             {
+                var uploadStopwatch = Stopwatch.StartNew();
                 cdnUrl = await _uploader.UploadAsync(client, uploadPath, contentType, cancellationToken)
                     .ConfigureAwait(false);
+                _logger.LogDebug(
+                    "Prepare upload completed title={Title} outputExt={OutputExt} cdnUrl={Url} elapsedMs={ElapsedMs}",
+                    track.Title,
+                    Path.GetExtension(uploadPath),
+                    cdnUrl,
+                    uploadStopwatch.ElapsedMilliseconds);
             }
             catch (Exception ex)
             {
@@ -126,10 +148,10 @@ public sealed class PlayableMediaPreparer
             }
 
             _logger.LogInformation(
-                "Playable CDN url ready for {Title}: {Url} elapsedMs={ElapsedMs}",
+                "Playable CDN media ready for {Title} elapsedMs={ElapsedMs} totalPrepareMs={TotalPrepareMs}",
                 track.Title,
-                cdnUrl,
-                stopwatch.ElapsedMilliseconds);
+                stopwatch.ElapsedMilliseconds,
+                pipelineStopwatch.ElapsedMilliseconds);
 
             if (identity is { } saveId)
             {
@@ -211,7 +233,7 @@ public sealed class PlayableMediaPreparer
                 "Cài ffmpeg rồi restart bot, hoặc set MEZUBE_FFMPEG_PATH.");
         }
 
-        var oggPath = await _ffmpeg.ConvertToOggAsync(inputPath, cancellationToken).ConfigureAwait(false);
+        var oggPath = await _ffmpeg.TranscodeToOggAsync(inputPath, cancellationToken).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(oggPath) || !File.Exists(oggPath))
         {
             throw new InvalidOperationException("ffmpeg convert → ogg thất bại; không upload m4a/webm cho STN.");

@@ -7,18 +7,18 @@ using Mezube.Domain.Entities;
 
 namespace Mezube.Media;
 
-public sealed class YtDlpRunner
+public sealed class YtDlpProcessor
 {
     private readonly BotOptions _options;
-    private readonly ILogger<YtDlpRunner> _logger;
+    private readonly ILogger<YtDlpProcessor> _logger;
 
-    public YtDlpRunner(BotOptions options, ILogger<YtDlpRunner> logger)
+    public YtDlpProcessor(BotOptions options, ILogger<YtDlpProcessor> logger)
     {
         _options = options;
         _logger = logger;
     }
 
-    public async Task<TrackInfoEntity?> ResolveAsync(string query, string? requestedBy, CancellationToken cancellationToken = default)
+    public async Task<TrackInfoEntity?> ResolveTrackAsync(string query, string? requestedBy, CancellationToken cancellationToken = default)
     {
         var input = LooksLikeUrl(query) ? query : $"ytsearch1:{query}";
         var json = await RunAsync(
@@ -94,7 +94,7 @@ public sealed class YtDlpRunner
         };
     }
 
-    public async Task<string?> DownloadAudioAsync(string source, string outputPathWithoutExt, CancellationToken cancellationToken = default)
+    public async Task<string?> DownloadTrackAudioAsync(string source, string outputPathWithoutExt, CancellationToken cancellationToken = default)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(outputPathWithoutExt) ?? _options.TempDir);
         var template = outputPathWithoutExt + ".%(ext)s";

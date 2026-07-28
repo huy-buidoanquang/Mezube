@@ -49,14 +49,14 @@ public sealed class StnSocketClient : IAsyncDisposable
         var displayName = string.IsNullOrWhiteSpace(username) ? _options.BotDisplayName : username;
         var uri = BuildWsUri(_wsBase, authToken, displayName);
         var socket = CreateSocket();
-        _logger.LogInformation("Connecting STN publisher WS {Uri}", RedactToken(uri));
+        _logger.LogDebug("Connecting STN publisher WS {Uri}", RedactToken(uri));
         try
         {
             await socket.ConnectAsync(uri, cancellationToken).ConfigureAwait(false);
             _socket = socket;
             _receiveCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             _receiveTask = ReceiveLoopAsync(_receiveCts.Token);
-            _logger.LogInformation("STN connected via {Base}", _wsBase);
+            _logger.LogInformation("STN publisher WS connected via {Base}", _wsBase);
         }
         catch (Exception ex)
         {
@@ -155,7 +155,7 @@ public sealed class StnSocketClient : IAsyncDisposable
                 writer.WriteEndObject();
             }
 
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "STN send key={Key} channel={ChannelId} via={Base}",
                 key,
                 streamChannelId,
@@ -185,7 +185,7 @@ public sealed class StnSocketClient : IAsyncDisposable
                 if (result.Count > 0 && _logger.IsEnabled(LogLevel.Debug))
                 {
                     var text = Encoding.UTF8.GetString(_receiveBuffer, 0, result.Count);
-                    _logger.LogDebug("STN WS message: {Message}", text);
+                    _logger.LogTrace("STN WS message: {Message}", text);
                 }
             }
         }

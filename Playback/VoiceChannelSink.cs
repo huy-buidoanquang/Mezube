@@ -8,6 +8,12 @@ using Microsoft.Extensions.Logging;
 
 namespace Mezube.Playback;
 
+/// <summary>
+/// Voice pipeline log contract:
+/// Information = transport/lifecycle milestones visible in normal operations.
+/// Debug = timings, URLs, cleanup attempts, and other investigation detail.
+/// Warning/Error = degraded behavior or failed playback actions.
+/// </summary>
 public sealed class VoiceChannelSink : IPlaybackSink
 {
     private readonly StnRestClientV2 _voiceV2;
@@ -15,7 +21,7 @@ public sealed class VoiceChannelSink : IPlaybackSink
     private readonly WhipFfmpegPublisher _whipPublisher;
     private readonly BotOptions _options;
     private readonly VoiceChannelSinkHolder _holder;
-    private readonly PlayableMediaPreparer _preparer;
+    private readonly PlayableMediaProcessor _processor;
     private readonly ILogger<VoiceChannelSink> _logger;
     private readonly ConcurrentDictionary<string, VoiceTransport> _roomTransport = new(StringComparer.Ordinal);
 
@@ -25,7 +31,7 @@ public sealed class VoiceChannelSink : IPlaybackSink
         WhipFfmpegPublisher whipPublisher,
         BotOptions options,
         VoiceChannelSinkHolder holder,
-        PlayableMediaPreparer preparer,
+        PlayableMediaProcessor processor,
         ILogger<VoiceChannelSink> logger)
     {
         _voiceV2 = voiceV2;
@@ -33,7 +39,7 @@ public sealed class VoiceChannelSink : IPlaybackSink
         _whipPublisher = whipPublisher;
         _options = options;
         _holder = holder;
-        _preparer = preparer;
+        _processor = processor;
         _logger = logger;
     }
 
@@ -59,13 +65,13 @@ public sealed class VoiceChannelSink : IPlaybackSink
             _logger.LogWarning(ex, "Pre-play voice stop failed; continuing");
         }
 
-        var prepare = Stopwatch.StartNew();
-        var playable = await _preparer.EnsurePlayableAsync(client, track, cancellationToken).ConfigureAwait(false);
+        var process = Stopwatch.StartNew();
+        var playable = await _processor.ProcessTrackAsync(client, track, cancellationToken).ConfigureAwait(false);
         _logger.LogDebug(
-            "Voice media prepared title={Title} room={Room} elapsedMs={ElapsedMs} url={Url}",
+            "Voice media processed title={Title} room={Room} elapsedMs={ElapsedMs} url={Url}",
             track.Title,
             roomName,
-            prepare.ElapsedMilliseconds,
+            process.ElapsedMilliseconds,
             playable.MediaUrl);
         if (!playable.MediaUrl.Contains(".ogg", StringComparison.OrdinalIgnoreCase)
             && !playable.MediaUrl.Contains(".opus", StringComparison.OrdinalIgnoreCase))
@@ -91,6 +97,11 @@ public sealed class VoiceChannelSink : IPlaybackSink
 
         if (useWhip)
         {
+            _logger.LogInformation(
+                "Voice transport selected transport=whip room={Room} title={Title} codecMode={CodecMode}",
+                roomName,
+                playable.Title,
+                _options.WhipEncoderDisabled ? "copy" : "libopus");
             await PlayWhipAsync(
                     authToken,
                     roomName,
@@ -102,6 +113,10 @@ public sealed class VoiceChannelSink : IPlaybackSink
         }
         else
         {
+            _logger.LogInformation(
+                "Voice transport selected transport=v2 room={Room} title={Title}",
+                roomName,
+                playable.Title);
             await _voiceV2.PlayUntilPublishingAsync(
                     authToken,
                     roomName,
@@ -147,6 +162,7 @@ public sealed class VoiceChannelSink : IPlaybackSink
         var authToken = await client.GetAuthTokenAsync().ConfigureAwait(false);
 
         _roomTransport.TryRemove(roomName, out var transport);
+        _logger.LogDebug("Voice stop requested room={Room} transport={Transport}", roomName, transport);
 
         try
         {
