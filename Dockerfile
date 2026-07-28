@@ -24,9 +24,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /app/publish .
-ENV MEZUBE_YTDLP_PATH=yt-dlp \
-    MEZUBE_FFMPEG_PATH=ffmpeg \
-    MEZUBE_TEMP_DIR=/app/temp \
+ENV DOTNET_ENVIRONMENT=prod \
+    Mezube__YtDlpPath=yt-dlp \
+    Mezube__FfmpegPath=ffmpeg \
+    Mezube__TempDir=/app/temp
 
 RUN mkdir -p /app/temp /app/data
 ENTRYPOINT ["dotnet", "Mezube.dll"]

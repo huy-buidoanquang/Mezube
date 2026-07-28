@@ -1,11 +1,11 @@
-﻿using DotNetEnv;
-using Mezube.Bot;
+﻿using Mezube.Bot;
 using Mezube.Domain.Persistence;
 using Mezube.Media;
 using Mezube.Music;
 using Mezube.Playback;
 using Mezube.Stn;
 using Mezube.Ui;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -16,11 +16,21 @@ internal static class Program
 {
     private static async Task Main(string[] args)
     {
-        LoadEnvFiles();
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT"))
+            && string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")))
+        {
+            Environment.SetEnvironmentVariable("DOTNET_ENVIRONMENT", "prod");
+        }
 
         var builder = Host.CreateApplicationBuilder(args);
+        builder.Configuration.AddJsonFile("appsettings.local.json", optional: true, reloadOnChange: true);
+        builder.Configuration.AddJsonFile(
+            $"appsettings.{builder.Environment.EnvironmentName}.local.json",
+            optional: true,
+            reloadOnChange: true);
 
         var options = BotOptions.FromConfiguration(builder.Configuration);
+        options.Validate();
         builder.Services.AddSingleton(options);
         PlayerMessageBuilder.Configure(options);
         builder.Logging.ClearProviders();
@@ -36,12 +46,14 @@ internal static class Program
         });
 
         builder.Services.AddHttpClient<StnRestClientV2>();
+        builder.Services.AddHttpClient<StnWhipClient>();
         builder.Services.AddHttpClient(nameof(MezonCdnUploader));
         builder.Services.AddSingleton<StnSocketClient>();
         builder.Services.AddSingleton<StreamingChannelSinkHolder>();
         builder.Services.AddSingleton<VoiceChannelSinkHolder>();
         builder.Services.AddSingleton<YtDlpRunner>();
         builder.Services.AddSingleton<FfmpegRunner>();
+        builder.Services.AddSingleton<WhipFfmpegPublisher>();
         builder.Services.AddSingleton<MezonCdnUploader>();
         builder.Services.AddSingleton<MusicVizAssets>();
         builder.Services.AddSingleton<ITrackDb, SqliteTrackDb>();
@@ -62,51 +74,5 @@ internal static class Program
 
         var host = builder.Build();
         await host.RunAsync().ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Loads <c>.env</c> (selector) then <c>.env.{MEZUBE_ENV}</c>, then optional <c>.env.local</c>.
-    /// Default profile is <c>prod</c>. Switch with <c>MEZUBE_ENV=dev</c> in <c>.env</c>.
-    /// </summary>
-    private static void LoadEnvFiles()
-    {
-        var searchRoots = new[] { AppContext.BaseDirectory, Directory.GetCurrentDirectory() }
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-
-        TryLoadEnv(searchRoots, ".env");
-
-        var profile = Environment.GetEnvironmentVariable("MEZUBE_ENV")?.Trim();
-        if (string.IsNullOrWhiteSpace(profile))
-        {
-            profile = "prod";
-        }
-
-        Environment.SetEnvironmentVariable("MEZUBE_ENV", profile);
-        if (!TryLoadEnv(searchRoots, $".env.{profile}"))
-        {
-            Console.Error.WriteLine(
-                $"Warning: .env.{profile} not found (MEZUBE_ENV={profile}). Falling back to process env only.");
-        }
-
-        TryLoadEnv(searchRoots, ".env.local");
-        Console.WriteLine($"Loaded env profile: {profile}");
-    }
-
-    private static bool TryLoadEnv(IEnumerable<string> roots, string fileName)
-    {
-        foreach (var root in roots)
-        {
-            var path = Path.Combine(root, fileName);
-            if (!File.Exists(path))
-            {
-                continue;
-            }
-
-            Env.Load(path);
-            return true;
-        }
-
-        return false;
     }
 }

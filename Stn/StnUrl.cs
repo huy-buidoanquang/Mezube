@@ -17,6 +17,9 @@ public static class StnUrl
         const string playV2 = "/api/v2/voice/play";
         const string stopV2 = "/api/v2/voice/stop";
         const string statusV2 = "/api/v2/voice/status";
+        const string whipStart = "/api/v2/voice/whip/start";
+        const string whipStop = "/api/v2/voice/whip/stop";
+        const string whipStatus = "/api/v2/voice/whip/status";
         if (baseUrl.EndsWith(play, StringComparison.OrdinalIgnoreCase))
         {
             baseUrl = baseUrl[..^play.Length].TrimEnd('/');
@@ -36,6 +39,18 @@ public static class StnUrl
         else if (baseUrl.EndsWith(statusV2, StringComparison.OrdinalIgnoreCase))
         {
             baseUrl = baseUrl[..^statusV2.Length].TrimEnd('/');
+        }
+        else if (baseUrl.EndsWith(whipStart, StringComparison.OrdinalIgnoreCase))
+        {
+            baseUrl = baseUrl[..^whipStart.Length].TrimEnd('/');
+        }
+        else if (baseUrl.EndsWith(whipStop, StringComparison.OrdinalIgnoreCase))
+        {
+            baseUrl = baseUrl[..^whipStop.Length].TrimEnd('/');
+        }
+        else if (baseUrl.EndsWith(whipStatus, StringComparison.OrdinalIgnoreCase))
+        {
+            baseUrl = baseUrl[..^whipStatus.Length].TrimEnd('/');
         }
 
         return baseUrl;
@@ -57,6 +72,15 @@ public static class StnUrl
 
     public static Uri VoiceV2StatusUri(string baseUrl)
         => new(NormalizeBase(baseUrl) + "/api/v2/voice/status", UriKind.Absolute);
+
+    public static Uri VoiceWhipStartUri(string baseUrl)
+        => new(NormalizeBase(baseUrl) + "/api/v2/voice/whip/start", UriKind.Absolute);
+
+    public static Uri VoiceWhipStopUri(string baseUrl)
+        => new(NormalizeBase(baseUrl) + "/api/v2/voice/whip/stop", UriKind.Absolute);
+
+    public static Uri VoiceWhipStatusUri(string baseUrl)
+        => new(NormalizeBase(baseUrl) + "/api/v2/voice/whip/status", UriKind.Absolute);
 
     public static string WebSocketBase(string baseUrl)
     {

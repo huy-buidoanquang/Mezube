@@ -1,6 +1,9 @@
 **/.classpath
 **/.dockerignore
 **/.env
+**/.env.*
+**/appsettings.*.local.json
+**/appsettings.local.json
 **/.git
 **/.gitignore
 **/.project

@@ -172,7 +172,7 @@ public sealed class MezubeBot : BackgroundService
                 joined.VoiceChannelId,
                 joined.ClanId,
                 joined.VoiceChannelLabel);
-            _binds.SetUserVoiceChannel(joined.UserId, joined.VoiceChannelId);
+            _binds.SetUserVoiceChannel(joined.ClanId, joined.UserId, joined.VoiceChannelId);
             return Task.CompletedTask;
         };
 
@@ -184,7 +184,7 @@ public sealed class MezubeBot : BackgroundService
                 left.VoiceUserId,
                 left.VoiceChannelId,
                 left.ClanId);
-            _binds.ClearUserVoiceChannel(left.VoiceUserId);
+            _binds.ClearUserVoiceChannel(left.ClanId, left.VoiceUserId);
             return Task.CompletedTask;
         };
 

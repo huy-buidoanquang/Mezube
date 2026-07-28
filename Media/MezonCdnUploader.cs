@@ -59,8 +59,8 @@ public sealed class MezonCdnUploader
                 }
 
                 await PutFileAsync(upload.Url, localPath, cancellationToken).ConfigureAwait(false);
-
-                var publicUrl = BuildPublicUrl(upload.Filename);
+                var publicUrl = ToPublicCdnUrl(upload.Url, upload.Filename);
+                await EnsureReachableAsync(publicUrl, cancellationToken).ConfigureAwait(false);
                 _logger.LogInformation("Uploaded media to CDN {Url} ({Bytes} bytes)", publicUrl, fileInfo.Length);
                 return publicUrl;
             }
@@ -75,12 +75,26 @@ public sealed class MezonCdnUploader
         throw last ?? new InvalidOperationException("CDN upload failed.");
     }
 
+    /// <summary>True if a previously cached playable URL still responds (STN will download it).</summary>
+    public async Task<bool> IsReachableAsync(string url, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await EnsureReachableAsync(url, cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private async Task PutFileAsync(string presignedUrl, string localPath, CancellationToken cancellationToken)
     {
         var http = _httpClientFactory.CreateClient(nameof(MezonCdnUploader));
         await using var stream = File.OpenRead(localPath);
         using var content = new StreamContent(stream);
-        // MinIO/R2 presigned PUTs often expect empty/no content-type.
+        // MinIO/R2 S3-compatible presigned PUTs often expect empty/no content-type.
         content.Headers.ContentType = null;
 
         using var request = new HttpRequestMessage(HttpMethod.Put, presignedUrl) { Content = content };
@@ -93,18 +107,70 @@ public sealed class MezonCdnUploader
         }
     }
 
-    private string BuildPublicUrl(string objectKey)
+    private async Task EnsureReachableAsync(string publicUrl, CancellationToken cancellationToken)
     {
-        var cdnBase = string.IsNullOrWhiteSpace(_options.CdnBaseUrl)
-            ? "https://cdn.komu.vn"
-            : _options.CdnBaseUrl.TrimEnd('/');
-        return $"{cdnBase}/{objectKey.TrimStart('/')}";
+        var http = _httpClientFactory.CreateClient(nameof(MezonCdnUploader));
+        using var head = new HttpRequestMessage(HttpMethod.Head, publicUrl);
+        using var headResponse = await http.SendAsync(
+                head,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (headResponse.IsSuccessStatusCode)
+        {
+            return;
+        }
+
+        // Public CDN may reject HEAD / return 400; probe with a 1-byte ranged GET.
+        using var get = new HttpRequestMessage(HttpMethod.Get, publicUrl);
+        get.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 0);
+        using var getResponse = await http.SendAsync(
+                get,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (getResponse.IsSuccessStatusCode
+            || getResponse.StatusCode == System.Net.HttpStatusCode.PartialContent)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"CDN object not reachable after upload head={(int)headResponse.StatusCode} get={(int)getResponse.StatusCode}: {publicUrl}");
+    }
+
+    /// <summary>
+    /// Presigned PUT hosts (R2 S3 API) are not publicly fetchable.
+    /// Map object key onto <see cref="BotOptions.CdnBaseUrl"/> (e.g. pub-*.r2.dev).
+    /// </summary>
+    internal string ToPublicCdnUrl(string presignedUrl, string objectKey)
+    {
+        var key = ResolveObjectKey(presignedUrl, objectKey);
+        return $"{_options.CdnBaseUrl.TrimEnd('/')}/{key.TrimStart('/')}";
+    }
+
+    private static string ResolveObjectKey(string presignedUrl, string objectKey)
+    {
+        if (!string.IsNullOrWhiteSpace(objectKey)
+            && objectKey.Contains('/', StringComparison.Ordinal)
+            && !objectKey.Contains('\\', StringComparison.Ordinal))
+        {
+            return objectKey.TrimStart('/');
+        }
+
+        if (Uri.TryCreate(presignedUrl, UriKind.Absolute, out var uri))
+        {
+            return uri.AbsolutePath.TrimStart('/');
+        }
+
+        return objectKey.TrimStart('/');
     }
 
     private static bool IsRetryable(Exception ex)
         => ex is TimeoutException
            || ex.GetType().Name.Contains("Timeout", StringComparison.OrdinalIgnoreCase)
-           || ex.Message.Contains("timed out", StringComparison.OrdinalIgnoreCase);
+           || ex.Message.Contains("timed out", StringComparison.OrdinalIgnoreCase)
+           || ex.Message.Contains("CDN PUT failed", StringComparison.OrdinalIgnoreCase);
 
     private static string SanitizeFilename(string name)
     {

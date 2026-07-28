@@ -1,10 +1,15 @@
 {
   "profiles": {
-    "Mezube": {
+    "Mezube (dev)": {
       "commandName": "Project",
       "environmentVariables": {
-        "DOTNET_ENVIRONMENT": "Development",
-        "Logging__LogLevel__Default": "Trace"
+        "DOTNET_ENVIRONMENT": "dev"
+      }
+    },
+    "Mezube (prod)": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "prod"
       }
     },
     "Container (Dockerfile)": {

@@ -2,6 +2,10 @@ using Mezon.Net.Client;
 using Mezon.Net.Sdk.Builders;
 using Mezube.Bot;
 using Mezube.Domain.Entities;
+using Mezube.Music;
+using Mezube.Stn;
+using System.Buffers;
+using System.Net;
 using System.Text.Json;
 
 namespace Mezube.Ui;
@@ -14,9 +18,89 @@ public static class PlayerMessageBuilder
     private const string ColorError = "#dc2626";
 
     private static BotOptions _options = new();
+    private static readonly Lazy<JsonElement> EqualizerPoolInputs = new(BuildEqualizerPoolInputs, LazyThreadSafetyMode.ExecutionAndPublication);
+    private static readonly ThreadLocal<ArrayBufferWriter<byte>> EmbedBuffer =
+        new(() => new ArrayBufferWriter<byte>(1024));
 
     public static void Configure(BotOptions options)
         => _options = options ?? throw new ArgumentNullException(nameof(options));
+
+    /// <summary>Map STN HTTP conflict/capacity (and known bodies) to a clear user-facing embed.</summary>
+    public static MessageContent? FromStnFailure(Exception ex)
+    {
+        if (ex is StnVoiceException stn)
+        {
+            var body = stn.Body;
+            if (stn.IsCapacityExceeded
+                || Contains(body, "max concurrent voice rooms reached")
+                || Contains(body, "max concurrent whip"))
+            {
+                return Error(
+                    "Voice capacity full",
+                    "STN has no free voice rooms right now. Try again in a moment.");
+            }
+
+            if (stn.IsConflict || stn.StatusCode == HttpStatusCode.Conflict)
+            {
+                if (Contains(body, "whip room already active")
+                    || Contains(body, "whip voice publisher active"))
+                {
+                    return Error(
+                        "Room busy",
+                        "This voice room already has a WHIP publisher. Stop it first, then try again.");
+                }
+
+                if (Contains(body, "voice v2 publisher active")
+                    || Contains(body, "voice v2 room already active"))
+                {
+                    return Error(
+                        "Room busy",
+                        "This voice room already has an active v2 job. Use !stop, then try again.");
+                }
+
+                if (Contains(body, "legacy voice publisher active"))
+                {
+                    return Error(
+                        "Room busy",
+                        "This voice room is used by a legacy publisher. Stop it first, then try again.");
+                }
+
+                return Error(
+                    "Room conflict",
+                    "Another publisher already owns this voice room. Stop it first, then try again.");
+            }
+
+            if (Contains(body, "download") || Contains(body, "publisher failed") || Contains(body, "failed"))
+            {
+                return Error(
+                    "Playback failed",
+                    "STN could not fetch or publish that track. Try another URL or try again shortly.");
+            }
+
+            return null;
+        }
+
+        // WaitForPublishingAsync throws InvalidOperationException with STN status codes.
+        var message = ex.Message ?? string.Empty;
+        if (Contains(message, "download_failed") || Contains(message, "404"))
+        {
+            return Error(
+                "Media unavailable",
+                "The audio file was not reachable on CDN. Re-queue the track to re-upload.");
+        }
+
+        if (Contains(message, "publish failed") || Contains(message, "publisher"))
+        {
+            return Error(
+                "Playback failed",
+                "STN could not publish that track. Try another URL or try again shortly.");
+        }
+
+        return null;
+
+        static bool Contains(string haystack, string needle)
+            => haystack.Contains(needle, StringComparison.OrdinalIgnoreCase);
+    }
 
     public static MessageContent NowPlaying(
         TrackInfoEntity track,
@@ -26,7 +110,8 @@ public static class PlayerMessageBuilder
         long? controlMessageId = null,
         long? controlUserId = null,
         long? clanId = null,
-        bool includeMusicViz = false)
+        bool includeMusicViz = false,
+        long? channelId = null)
     {
         var fields = new List<MessageEmbedField>
         {
@@ -35,6 +120,11 @@ public static class PlayerMessageBuilder
             new("Source", track.Source, inline: true),
             new("Queued next", queueCount.ToString(), inline: true),
         };
+
+        if (channelId is long ch)
+        {
+            fields.Add(new("Channel", $"{ch}", inline: true));
+        }
 
         if (position is { } p)
         {
@@ -80,7 +170,7 @@ public static class PlayerMessageBuilder
             stopButtonId: stopId);
     }
 
-    public static MessageContent Queued(TrackInfoEntity track, int position)
+    public static MessageContent Queued(TrackInfoEntity track, int position, long? channelId = null)
     {
         var fields = new List<MessageEmbedField>
         {
@@ -88,6 +178,10 @@ public static class PlayerMessageBuilder
             new("Duration", track.DisplayDuration, inline: true),
             new("Source", track.Source, inline: true),
         };
+        if (channelId is long ch)
+        {
+            fields.Add(new("Channel", $"{ch}", inline: true));
+        }
 
         return Build(
             "Queued",
@@ -99,7 +193,7 @@ public static class PlayerMessageBuilder
             fields);
     }
 
-    public static MessageContent UpNext(TrackInfoEntity track, int secondsRemaining = 10)
+    public static MessageContent UpNext(TrackInfoEntity track, int secondsRemaining = 10, long? channelId = null)
     {
         var fields = new List<MessageEmbedField>
         {
@@ -107,6 +201,11 @@ public static class PlayerMessageBuilder
             new("Duration", track.DisplayDuration, inline: true),
             new("Source", track.Source, inline: true),
         };
+        if (channelId is long ch)
+        {
+            fields.Add(new("Channel", $"{ch}", inline: true));
+        }
+
         if (!string.IsNullOrWhiteSpace(track.RequestedBy))
         {
             fields.Add(new("Requested by", Escape(track.RequestedBy), inline: true));
@@ -122,7 +221,7 @@ public static class PlayerMessageBuilder
             fields);
     }
 
-    public static MessageContent QueueList(TrackInfoEntity? current, IReadOnlyList<TrackInfoEntity> upcoming)
+    public static MessageContent QueueList(QueuedPlay? current, IReadOnlyList<QueuedPlay> upcoming)
     {
         if (current is null && upcoming.Count == 0)
         {
@@ -132,17 +231,17 @@ public static class PlayerMessageBuilder
         var fields = new List<MessageEmbedField>();
         if (current is not null)
         {
-            fields.Add(new("Now", Escape(current.Title), inline: true));
-            fields.Add(new("Duration", current.DisplayDuration, inline: true));
-            fields.Add(new("Source", current.Source, inline: true));
+            fields.Add(new("Now", Escape(current.Track.Title), inline: true));
+            fields.Add(new("Duration", current.Track.DisplayDuration, inline: true));
+            fields.Add(new("Channel", $"{current.Target.ChannelId}", inline: true));
         }
 
         for (var i = 0; i < upcoming.Count; i++)
         {
-            var track = upcoming[i];
-            fields.Add(new($"#{i + 1}", Escape(track.Title), inline: true));
-            fields.Add(new("Duration", track.DisplayDuration, inline: true));
-            fields.Add(new("Source", track.Source, inline: true));
+            var item = upcoming[i];
+            fields.Add(new($"#{i + 1}", Escape(item.Track.Title), inline: true));
+            fields.Add(new("Duration", item.Track.DisplayDuration, inline: true));
+            fields.Add(new("Channel", $"{item.Target.ChannelId}", inline: true));
         }
 
         var description = current is null
@@ -153,8 +252,8 @@ public static class PlayerMessageBuilder
             "Queue",
             description,
             ColorInfo,
-            current?.ThumbnailUrl,
-            current?.WebpageUrl,
+            current?.Track.ThumbnailUrl,
+            current?.Track.WebpageUrl,
             includeControls: false,
             fields);
     }
@@ -275,8 +374,9 @@ public static class PlayerMessageBuilder
         var displayName = string.IsNullOrWhiteSpace(_options.BotDisplayName) ? "Mezube" : _options.BotDisplayName;
         var resolvedThumbnail = string.IsNullOrWhiteSpace(thumbnailUrl) ? avatarUrl : thumbnailUrl;
 
-        using var stream = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(stream))
+        var buffer = EmbedBuffer.Value!;
+        buffer.Clear();
+        using (var writer = new Utf8JsonWriter(buffer))
         {
             writer.WriteStartObject();
             writer.WriteStartArray("embed");
@@ -349,7 +449,7 @@ public static class PlayerMessageBuilder
             writer.WriteEndObject();
         }
 
-        var json = System.Text.Encoding.UTF8.GetString(stream.ToArray());
+        var json = System.Text.Encoding.UTF8.GetString(buffer.WrittenSpan);
         return MessageContent.Parse(json);
     }
 
@@ -366,7 +466,7 @@ public static class PlayerMessageBuilder
             return null;
         }
 
-        var pool = BuildEqualizerPool();
+        // Clone cached pool + inject current CDN URLs (URLs may be filled after viz warm-up).
         using var stream = new MemoryStream();
         using (var writer = new Utf8JsonWriter(stream))
         {
@@ -376,7 +476,25 @@ public static class PlayerMessageBuilder
             writer.WriteStartObject("component");
             writer.WriteString("url_image", imageUrl);
             writer.WriteString("url_position", positionUrl);
-            writer.WriteStartArray("pool");
+            writer.WritePropertyName("pool");
+            EqualizerPoolInputs.Value.WriteTo(writer);
+            writer.WriteNumber("duration", 1.6);
+            writer.WriteEndObject();
+            writer.WriteEndObject();
+        }
+
+        using var doc = JsonDocument.Parse(stream.ToArray());
+        return new MessageEmbedField(string.Empty, string.Empty, inline: false, inputs: doc.RootElement.Clone());
+    }
+
+    /// <summary>Cached equalizer pool frames (UTF-8 JSON array) — built once.</summary>
+    private static JsonElement BuildEqualizerPoolInputs()
+    {
+        var pool = BuildEqualizerPool();
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartArray();
             foreach (var column in pool)
             {
                 writer.WriteStartArray();
@@ -389,14 +507,10 @@ public static class PlayerMessageBuilder
             }
 
             writer.WriteEndArray();
-            // Multi-column reels; duration for one height cycle.
-            writer.WriteNumber("duration", 1.6);
-            writer.WriteEndObject();
-            writer.WriteEndObject();
         }
 
         using var doc = JsonDocument.Parse(stream.ToArray());
-        return new MessageEmbedField(string.Empty, string.Empty, inline: false, inputs: doc.RootElement.Clone());
+        return doc.RootElement.Clone();
     }
 
     /// <summary>

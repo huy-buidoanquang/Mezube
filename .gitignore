@@ -3,9 +3,9 @@ obj/
 .vs/
 *.user
 .env
-.env.dev
-.env.prod
-.env.local
+.env.*
+appsettings.local.json
+appsettings.*.local.json
 temp/
 data/
 *.log

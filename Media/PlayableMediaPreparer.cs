@@ -49,15 +49,24 @@ public sealed class PlayableMediaPreparer
                 .ConfigureAwait(false);
             if (stored?.HasPlayableUrl == true)
             {
-                _logger.LogInformation(
-                    "Using cached CDN media for {Source}/{Id}: {Url} elapsedMs={ElapsedMs}",
+                if (await _uploader.IsReachableAsync(stored.PlayableUrl!, cancellationToken).ConfigureAwait(false))
+                {
+                    _logger.LogInformation(
+                        "Using cached CDN media for {Source}/{Id}: {Url} elapsedMs={ElapsedMs}",
+                        id.Source,
+                        id.ExternalId,
+                        stored.PlayableUrl,
+                        stopwatch.ElapsedMilliseconds);
+                    await _store.TouchPlayedAsync(id.Source, id.ExternalId, cancellationToken)
+                        .ConfigureAwait(false);
+                    return stored.ToTrackInfo(track.RequestedBy);
+                }
+
+                _logger.LogWarning(
+                    "Cached CDN media unreachable (will re-upload) {Source}/{Id}: {Url}",
                     id.Source,
                     id.ExternalId,
-                    stored.PlayableUrl,
-                    stopwatch.ElapsedMilliseconds);
-                await _store.TouchPlayedAsync(id.Source, id.ExternalId, cancellationToken)
-                    .ConfigureAwait(false);
-                return stored.ToTrackInfo(track.RequestedBy);
+                    stored.PlayableUrl);
             }
         }
 
@@ -110,11 +119,10 @@ public sealed class PlayableMediaPreparer
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(
-                    ex,
-                    "CDN upload failed for {Title}; falling back to direct media URL (may be blocked by STN).",
-                    track.Title);
-                return track;
+                // Voice/stream STN cannot fetch YouTube/googlevideo — do not fall back.
+                throw new InvalidOperationException(
+                    $"CDN upload failed for '{track.Title}'; cannot play without a public .ogg URL.",
+                    ex);
             }
 
             _logger.LogInformation(
@@ -232,7 +240,8 @@ public sealed class PlayableMediaPreparer
         // Only skip when already a stable Mezon-family CDN ogg/opus URL.
         var onMezonCdn = host.Contains("cdn.mezon", StringComparison.Ordinal)
                          || host.Contains("cdn.komu", StringComparison.Ordinal)
-                         || host.Contains("cdn.nccsoft", StringComparison.Ordinal);
+                         || host.Contains("cdn.nccsoft", StringComparison.Ordinal)
+                         || host.Contains("r2.dev", StringComparison.Ordinal);
         if (onMezonCdn && (path.EndsWith(".ogg") || path.EndsWith(".opus")))
         {
             return false;

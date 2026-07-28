@@ -1,6 +1,8 @@
 using Mezube.Bot;
 using Microsoft.Extensions.Logging;
 using System.Buffers;
+using System.Collections.Concurrent;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -9,7 +11,7 @@ namespace Mezube.Stn;
 
 public sealed class StnRestClientV2
 {
-    private static readonly MediaTypeHeaderValue JsonMediaType = new("application/json");
+    private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
     private static readonly TimeSpan StatusPollInterval = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan PublishTimeout = TimeSpan.FromSeconds(12);
 
@@ -18,9 +20,7 @@ public sealed class StnRestClientV2
     private readonly Uri _playUri;
     private readonly Uri _stopUri;
     private readonly Uri _statusUri;
-    private readonly object _gate = new();
-    private string? _activeRoom;
-    private string? _activeJobId;
+    private readonly ConcurrentDictionary<string, string> _roomJobs = new(StringComparer.Ordinal);
 
     public StnRestClientV2(HttpClient http, BotOptions options, ILogger<StnRestClientV2> logger)
     {
@@ -30,6 +30,11 @@ public sealed class StnRestClientV2
         _stopUri = StnUrl.VoiceV2StopUri(options.StnBaseUrl);
         _statusUri = StnUrl.VoiceV2StatusUri(options.StnBaseUrl);
     }
+
+    public ICollection<string> ActiveRooms => _roomJobs.Keys;
+
+    public bool TryGetJobId(string roomName, out string jobId)
+        => _roomJobs.TryGetValue(roomName, out jobId!);
 
     /// <summary>Unique per play; LiveKit username max length is 32.</summary>
     public static string NewPublisherIdentity(long botUserId)
@@ -56,7 +61,7 @@ public sealed class StnRestClientV2
         if (!response.IsSuccessStatusCode)
         {
             var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            throw new InvalidOperationException($"voiceV2 play {(int)response.StatusCode} on {_playUri}: {body}");
+            throw new StnVoiceException("voiceV2 play", response.StatusCode, body);
         }
 
         var accepted = await ReadAcceptedAsync(response.Content, cancellationToken).ConfigureAwait(false);
@@ -65,11 +70,7 @@ public sealed class StnRestClientV2
             throw new InvalidOperationException("voiceV2 play returned no job_id");
         }
 
-        lock (_gate)
-        {
-            _activeRoom = roomName;
-            _activeJobId = accepted.JobId;
-        }
+        _roomJobs[roomName] = accepted.JobId;
 
         try
         {
@@ -78,23 +79,60 @@ public sealed class StnRestClientV2
         catch
         {
             await TryStopAcceptedAsync(authToken, accepted.JobId, roomName).ConfigureAwait(false);
+            _roomJobs.TryRemove(roomName, out _);
             throw;
         }
     }
 
+    /// <summary>Poll until terminal status (completed/failed/stopped). Returns status string.</summary>
+    public async Task<string> WaitUntilTerminalAsync(
+        string authToken,
+        string roomName,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_roomJobs.TryGetValue(roomName, out var jobId) || string.IsNullOrWhiteSpace(jobId))
+        {
+            return "stopped";
+        }
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, $"{_statusUri}?job_id={Uri.EscapeDataString(jobId)}");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", authToken);
+
+            using var response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            if (response.StatusCode == HttpStatusCode.NotFound)
+            {
+                _roomJobs.TryRemove(roomName, out _);
+                return "stopped";
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+                throw new StnVoiceException("voiceV2 status", response.StatusCode, body);
+            }
+
+            var snapshot = await ReadStatusAsync(response.Content, cancellationToken).ConfigureAwait(false);
+            switch (snapshot.Status)
+            {
+                case "completed":
+                case "failed":
+                case "stopped":
+                    _roomJobs.TryRemove(roomName, out _);
+                    return snapshot.Status ?? "stopped";
+            }
+
+            await Task.Delay(StatusPollInterval, cancellationToken).ConfigureAwait(false);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        return "stopped";
+    }
+
     public async Task StopAsync(string authToken, string roomName, CancellationToken cancellationToken = default)
     {
-        string? jobId;
-        lock (_gate)
-        {
-            if (!string.Equals(_activeRoom, roomName, StringComparison.Ordinal))
-            {
-                return;
-            }
-            jobId = _activeJobId;
-            _activeRoom = null;
-            _activeJobId = null;
-        }
+        _roomJobs.TryRemove(roomName, out var jobId);
 
         using var content = CreateStopContent(jobId ?? string.Empty, roomName);
         using var request = new HttpRequestMessage(HttpMethod.Post, _stopUri);
@@ -105,7 +143,7 @@ public sealed class StnRestClientV2
         if (!response.IsSuccessStatusCode)
         {
             var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            throw new InvalidOperationException($"voiceV2 stop {(int)response.StatusCode} on {_stopUri}: {body}");
+            throw new StnVoiceException("voiceV2 stop", response.StatusCode, body);
         }
     }
 
@@ -123,7 +161,7 @@ public sealed class StnRestClientV2
             if (!response.IsSuccessStatusCode)
             {
                 var body = await response.Content.ReadAsStringAsync(timeoutCts.Token).ConfigureAwait(false);
-                throw new InvalidOperationException($"voiceV2 status {(int)response.StatusCode} on {_statusUri}: {body}");
+                throw new StnVoiceException("voiceV2 status", response.StatusCode, body);
             }
 
             var snapshot = await ReadStatusAsync(response.Content, timeoutCts.Token).ConfigureAwait(false);
@@ -158,7 +196,7 @@ public sealed class StnRestClientV2
         }
     }
 
-    private static ByteArrayContent CreatePlayContent(
+    private static HttpContent CreatePlayContent(
         string roomName,
         string participantIdentity,
         string participantName,
@@ -177,12 +215,10 @@ public sealed class StnRestClientV2
             writer.WriteEndObject();
         }
 
-        var content = new ByteArrayContent(buffer.WrittenMemory.ToArray());
-        content.Headers.ContentType = JsonMediaType;
-        return content;
+        return new PooledJsonContent(buffer.WrittenSpan);
     }
 
-    private static ByteArrayContent CreateStopContent(string jobId, string roomName)
+    private static HttpContent CreateStopContent(string jobId, string roomName)
     {
         var buffer = new ArrayBufferWriter<byte>(128);
         using (var writer = new Utf8JsonWriter(buffer))
@@ -193,15 +229,13 @@ public sealed class StnRestClientV2
             writer.WriteEndObject();
         }
 
-        var content = new ByteArrayContent(buffer.WrittenMemory.ToArray());
-        content.Headers.ContentType = JsonMediaType;
-        return content;
+        return new PooledJsonContent(buffer.WrittenSpan);
     }
 
     private static async Task<AcceptedResponse> ReadAcceptedAsync(HttpContent content, CancellationToken cancellationToken)
     {
         await using var stream = await content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        var accepted = await JsonSerializer.DeserializeAsync<AcceptedResponse>(stream, cancellationToken: cancellationToken)
+        var accepted = await JsonSerializer.DeserializeAsync<AcceptedResponse>(stream, JsonOptions, cancellationToken)
             .ConfigureAwait(false);
         return accepted ?? new AcceptedResponse();
     }
@@ -209,7 +243,7 @@ public sealed class StnRestClientV2
     private static async Task<VoiceStatusResponse> ReadStatusAsync(HttpContent content, CancellationToken cancellationToken)
     {
         await using var stream = await content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        var status = await JsonSerializer.DeserializeAsync<VoiceStatusResponse>(stream, cancellationToken: cancellationToken)
+        var status = await JsonSerializer.DeserializeAsync<VoiceStatusResponse>(stream, JsonOptions, cancellationToken)
             .ConfigureAwait(false);
         return status ?? new VoiceStatusResponse();
     }

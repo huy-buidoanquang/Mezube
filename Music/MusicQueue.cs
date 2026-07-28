@@ -5,50 +5,54 @@ namespace Mezube.Music;
 public sealed class MusicQueue
 {
     private readonly object _gate = new();
-    private readonly Queue<TrackInfoEntity> _tracks = new();
+    private readonly Queue<QueuedPlay> _items = new();
 
-    public TrackInfoEntity? Current { get; private set; }
+    public QueuedPlay? CurrentItem { get; private set; }
+
+    public TrackInfoEntity? Current => CurrentItem?.Track;
+
     public int Count
     {
-        get { lock (_gate) return _tracks.Count; }
+        get { lock (_gate) return _items.Count; }
     }
 
-    public IReadOnlyList<TrackInfoEntity> Snapshot()
+    public IReadOnlyList<QueuedPlay> Snapshot()
     {
         lock (_gate)
         {
-            return _tracks.ToArray();
+            return _items.ToArray();
         }
     }
 
-    public void Enqueue(TrackInfoEntity track)
+    public void Enqueue(QueuedPlay item)
     {
+        ArgumentNullException.ThrowIfNull(item);
         lock (_gate)
         {
-            _tracks.Enqueue(track);
+            _items.Enqueue(item);
         }
     }
 
-    public TrackInfoEntity? PeekNext()
+    public QueuedPlay? PeekNext()
     {
         lock (_gate)
         {
-            return _tracks.Count > 0 ? _tracks.Peek() : null;
+            return _items.Count > 0 ? _items.Peek() : null;
         }
     }
 
-    public TrackInfoEntity? TryDequeueNext()
+    public QueuedPlay? TryDequeueNext()
     {
         lock (_gate)
         {
-            if (_tracks.Count == 0)
+            if (_items.Count == 0)
             {
-                Current = null;
+                CurrentItem = null;
                 return null;
             }
 
-            Current = _tracks.Dequeue();
-            return Current;
+            CurrentItem = _items.Dequeue();
+            return CurrentItem;
         }
     }
 
@@ -56,10 +60,10 @@ public sealed class MusicQueue
     {
         lock (_gate)
         {
-            _tracks.Clear();
+            _items.Clear();
             if (clearCurrent)
             {
-                Current = null;
+                CurrentItem = null;
             }
         }
     }
@@ -68,7 +72,7 @@ public sealed class MusicQueue
     {
         lock (_gate)
         {
-            Current = null;
+            CurrentItem = null;
         }
     }
 }

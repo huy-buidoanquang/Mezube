@@ -2,7 +2,7 @@
 
 Bot phát nhạc cho [Mezon](https://mezon.ai) — prefix `!`, nguồn YouTube (`yt-dlp`) + direct URL.
 
-- **Voice** (`!play`): STN voice v2 `POST /api/v2/voice/play|stop` + `GET /api/v2/voice/status` (wait until `publishing`)
+- **Voice** (`!play`): STN voice v2 (CDN publish) **or** WHIP (`Mezube:StnWhipEnabled=true` → ffmpeg Opus push to LiveKit)
 - **Streaming** (`!stream`): STN WebSocket `/ws` `connect_publisher` / `stop_publisher`
 - Legacy STN `/api/playmedia|/api/stopmedia` (URL_INPUT) is **not** used by Mezube anymore; kept on STN for other clients.
 
@@ -17,38 +17,47 @@ Bot chuẩn bị CDN **Ogg Opus 48 kHz**; STN không transcode (xem [mezon-media
 
 ## Cấu hình
 
-Hai profile riêng (secrets gitignore):
-
-```powershell
-copy .env.example .env
-copy .env.example.dev .env.dev
-copy .env.example.prod .env.prod
-# điền credentials vào .env.dev / .env.prod
-```
+Chọn môi trường bằng `DOTNET_ENVIRONMENT` / `ASPNETCORE_ENVIRONMENT` = `dev` | `prod`.
 
 | File | Vai trò |
 |------|---------|
-| `.env` | Chọn profile: `MEZUBE_ENV=prod` hoặc `dev` |
-| `.env.prod` / `.env.dev` | Credentials + host/STN cho từng môi trường |
-| `.env.local` (optional) | Override máy local (ffmpeg path, …) — load sau cùng |
+| `appsettings.json` | Shared defaults (prefix, paths, viz/CDN URLs, logging) — **không** chứa token |
+| `appsettings.dev.json` / `appsettings.prod.json` | Host / STN / ServerKey theo môi trường |
+| `appsettings.dev.local.json` / `appsettings.prod.local.json` (gitignore) | Secrets máy local — `Mezon:BotId` / `Mezon:Token` |
 
-Đổi môi trường: sửa `MEZUBE_ENV` trong `.env` (hiện đang `prod`).
+```powershell
+# secrets local (không commit)
+@"
+{
+  `"Mezon`": {
+    `"BotId`": 123456789,
+    `"Token`": `"your_bot_secret`"
+  }
+}
+"@ | Set-Content -Encoding utf8 appsettings.dev.local.json
+```
 
-| Biến | Mô tả |
-|------|--------|
-| `MEZUBE_ENV` | `prod` hoặc `dev` |
-| `MEZON_BOT_ID` / `MEZON_BOT_TOKEN` | Bot credentials |
-| `MEZON_SERVER_KEY` | Gateway Basic-Auth — Dev `defaultkey`, Prod `HTTP3m3zonPr0dkey` |
-| `MEZON_HOST` / `MEZON_PORT` | Dev `dev-mezon.nccsoft.vn:8088`, Prod `gw.mezon.ai:443` |
-| `MEZUBE_STN_BASE_URL` | STN origin (vd. `https://stn.mezon.ai` / `http://localhost:8081`) — derive `/api/v2/voice/*` + `/ws` |
-| `MEZUBE_CDN_BASE_URL` | Public CDN sau upload (vd. `https://cdn.komu.vn`) |
-| `MEZUBE_BOT_AVATAR_URL` | Avatar bot — embed `author.icon_url` + thumbnail fallback khi track không có ảnh |
-| `MEZUBE_VIZ_IMAGE_URL` / `MEZUBE_VIZ_POSITION_URL` | Equalizer sprite + JSON cho `!np` animation (để trống → auto-upload `Assets/viz`) |
-| `MEZUBE_TRACKS_DB_PATH` | SQLite track library (mặc định `data/tracks.db`) |
+```powershell
+$env:DOTNET_ENVIRONMENT='dev'
+dotnet run --project Mezube.csproj
+```
+
+| Key | Mô tả |
+|-----|--------|
+| `Mezon:BotId` / `Mezon:Token` | Bot credentials |
+| `Mezon:ServerKey` | Gateway Basic-Auth — Dev `defaultkey`, Prod `HTTP3m3zonPr0dkey` |
+| `Mezon:Host` / `Mezon:Port` | Dev `dev-mezon.nccsoft.vn:8088`, Prod `gw.mezon.ai:443` |
+| `Mezube:StnBaseUrl` | STN origin (vd. `https://stn.mezon.ai`) — derive `/api/v2/voice/*` + `/ws` |
+| `Mezube:StnWhipEnabled` | Voice via WHIP (ffmpeg → LiveKit). Default `false` (v2 CDN). Needs ffmpeg `whip` muxer; otherwise falls back to v2 |
+| `Mezube:CdnBaseUrl` | Public CDN sau upload |
+| `Mezube:BotAvatarUrl` | Avatar bot — embed author + thumbnail fallback |
+| `Mezube:VizImageUrl` / `Mezube:VizPositionUrl` | Equalizer sprite + JSON cho `!np` |
+| `Mezube:TracksDbPath` | SQLite track library (mặc định `data/tracks.db`) |
 
 ## Chạy
 
 ```powershell
+$env:DOTNET_ENVIRONMENT='dev'
 dotnet run --project Mezube.csproj
 ```
 
@@ -59,7 +68,7 @@ dotnet run --project Mezube.csproj
 !help
 ```
 
-Channel target: mention hashtag kênh (`#voice`, `#radio`). Voice cũng fallback sang voice presence của bạn; stream fallback khi chạy lệnh trong Stream channel.
+Channel target: mention hashtag kênh (`#voice`, `#radio`). Voice cũng fallback sang voice presence theo clan; stream fallback khi chạy lệnh trong Stream channel.
 
 ## Lệnh
 
@@ -76,5 +85,5 @@ Build từ thư mục cha (cần `Mezon.Net`):
 
 ```powershell
 docker build -f Mezube/Dockerfile -t mezube .
-docker run --env-file Mezube/.env.prod mezube
+docker run -e DOTNET_ENVIRONMENT=prod -v ${PWD}/Mezube/appsettings.prod.local.json:/app/appsettings.prod.local.json:ro mezube
 ```

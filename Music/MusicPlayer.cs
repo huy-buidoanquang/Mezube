@@ -1,4 +1,4 @@
-using Mezon.Net.Core;
+﻿using Mezon.Net.Core;
 using Mezon.Net.Sdk;
 using Mezon.Net.Sdk.Commands;
 using Mezube.Domain.Entities;
@@ -112,28 +112,44 @@ public sealed class MusicPlayer
         }
 
         var state = GetState(clanId);
-        state.Queue.Enqueue(track);
-        state.Mode = PlaybackMode.Streaming;
-        state.Target = new PlaybackTarget(clanId, channelId);
-        state.NotifyClient = ctx.Client;
-        state.NotifyChannelId = ctx.Channel.Id;
-
+        var target = new PlaybackTarget(clanId, channelId);
+        var play = new QueuedPlay(track, target);
         if (state.IsPlaying)
         {
+            if (state.Mode != PlaybackMode.Streaming)
+            {
+                await UpdateOrReplyAsync(
+                        ctx,
+                        preparing.MessageId,
+                        PlayerMessageBuilder.Error(
+                            "Mode conflict",
+                            "This clan is playing voice. Use !play to queue, or !stop before !stream."),
+                        preparingCreateTime)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            state.Queue.Enqueue(play);
             await UpdateOrReplyAsync(
                     ctx,
                     preparing.MessageId,
-                    PlayerMessageBuilder.Queued(track, state.Queue.Count),
+                    PlayerMessageBuilder.Queued(track, state.Queue.Count, channelId),
                     preparingCreateTime)
                 .ConfigureAwait(false);
             return;
         }
 
+        state.CancelIdleDestroy();
+        state.Queue.Enqueue(play);
+        state.Mode = PlaybackMode.Streaming;
+        state.Target = target;
+        state.NotifyClient = ctx.Client;
+        state.NotifyChannelId = ctx.Channel.Id;
         state.ControlMessageId = preparing.MessageId;
         state.ControlMessageCreateTimeSeconds = preparingCreateTime;
         state.ControlUserId = ctx.Author.Id;
         state.ClanId = clanId;
-        _ = PumpAsync(state, cancellationToken);
+        _ = PumpAsync(state, clanId, cancellationToken);
     }
 
     public async Task PlayVoiceAsync(
@@ -148,7 +164,7 @@ public sealed class MusicPlayer
         {
             channelId = explicitId;
         }
-        else if (_binds.TryGetUserVoiceChannel(ctx.Author.Id, out var fromPresence))
+        else if (_binds.TryGetUserVoiceChannel(clanId, ctx.Author.Id, out var fromPresence))
         {
             channelId = fromPresence;
         }
@@ -212,28 +228,44 @@ public sealed class MusicPlayer
         }
 
         var state = GetState(clanId);
-        state.Queue.Enqueue(track);
-        state.Mode = PlaybackMode.Voice;
-        state.Target = new PlaybackTarget(clanId, channelId, RoomName: channelId.ToString());
-        state.NotifyClient = ctx.Client;
-        state.NotifyChannelId = ctx.Channel.Id;
-
+        var target = new PlaybackTarget(clanId, channelId, RoomName: channelId.ToString());
+        var play = new QueuedPlay(track, target);
         if (state.IsPlaying)
         {
+            if (state.Mode != PlaybackMode.Voice)
+            {
+                await UpdateOrReplyAsync(
+                        ctx,
+                        preparing.MessageId,
+                        PlayerMessageBuilder.Error(
+                            "Mode conflict",
+                            "This clan is streaming. Use !stream to queue, or !stop before !play."),
+                        preparingCreateTime)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            state.Queue.Enqueue(play);
             await UpdateOrReplyAsync(
                     ctx,
                     preparing.MessageId,
-                    PlayerMessageBuilder.Queued(track, state.Queue.Count),
+                    PlayerMessageBuilder.Queued(track, state.Queue.Count, channelId),
                     preparingCreateTime)
                 .ConfigureAwait(false);
             return;
         }
 
+        state.CancelIdleDestroy();
+        state.Queue.Enqueue(play);
+        state.Mode = PlaybackMode.Voice;
+        state.Target = target;
+        state.NotifyClient = ctx.Client;
+        state.NotifyChannelId = ctx.Channel.Id;
         state.ControlMessageId = preparing.MessageId;
         state.ControlMessageCreateTimeSeconds = preparingCreateTime;
         state.ControlUserId = ctx.Author.Id;
         state.ClanId = clanId;
-        _ = PumpAsync(state, cancellationToken);
+        _ = PumpAsync(state, clanId, cancellationToken);
     }
 
     public async Task SkipAsync(ICommandContext ctx, CancellationToken cancellationToken = default)
@@ -269,18 +301,27 @@ public sealed class MusicPlayer
     {
         var state = GetState(clanId);
         state.Queue.Clear();
+        state.LastDestroyReason = PlayerDestroyReason.UserStop;
         // Wake the pump; it owns the single StopAsync for the active track.
         state.CancelTrack();
         state.IsPlaying = false;
         state.TrackStartedAt = null;
         await state.StopNowPlayingProgressAsync().ConfigureAwait(false);
+        ScheduleIdleDestroy(clanId, state);
     }
 
     private async Task<bool> SkipStateAsync(ClanPlayerState state, CancellationToken cancellationToken)
     {
-        // Do not StopCurrentSinkAsync here — CancelTrack lets the pump stop once, then advance.
+        // CancelTrack wakes the active pump (if any); it owns Stop + advance.
+        // Only start a pump when nothing is driving the queue (idle with pending items).
+        state.LastDestroyReason = PlayerDestroyReason.Skip;
+        var needsPump = !state.IsPlaying;
         state.CancelTrack();
-        _ = PumpAsync(state, cancellationToken);
+        if (needsPump)
+        {
+            _ = PumpAsync(state, state.ClanId ?? 0, cancellationToken);
+        }
+
         return true;
     }
 
@@ -288,7 +329,7 @@ public sealed class MusicPlayer
     {
         var clanId = ctx.Clan?.Id ?? ctx.Channel.ClanId;
         var state = GetState(clanId);
-        return ctx.ReplyAsync(PlayerMessageBuilder.QueueList(state.Queue.Current, state.Queue.Snapshot()));
+        return ctx.ReplyAsync(PlayerMessageBuilder.QueueList(state.Queue.CurrentItem, state.Queue.Snapshot()));
     }
 
     public async Task ShowNowPlayingAsync(ICommandContext ctx)
@@ -319,17 +360,18 @@ public sealed class MusicPlayer
         long clanId,
         bool includeMusicViz = false)
     {
-        var track = state.Queue.Current!;
+        var item = state.Queue.CurrentItem!;
         var position = state.GetElapsed();
         return PlayerMessageBuilder.NowPlaying(
-            track,
+            item.Track,
             state.Queue.Count,
             state.Mode.ToString().ToLowerInvariant(),
             position: position,
             controlMessageId: state.ControlMessageId,
             controlUserId: state.ControlUserId,
             clanId: clanId,
-            includeMusicViz: includeMusicViz);
+            includeMusicViz: includeMusicViz,
+            channelId: item.Target.ChannelId);
     }
 
     private async Task<(TrackInfoEntity? Track, Mezon.Net.Client.MessageContent? Error)> TryResolveAsync(
@@ -382,7 +424,7 @@ public sealed class MusicPlayer
         return ctx.ReplyAsync(content);
     }
 
-    private async Task PumpAsync(ClanPlayerState state, CancellationToken cancellationToken)
+    private async Task PumpAsync(ClanPlayerState state, long clanId, CancellationToken cancellationToken)
     {
         if (!await state.TryEnterPumpAsync().ConfigureAwait(false))
         {
@@ -393,13 +435,21 @@ public sealed class MusicPlayer
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                var track = state.Queue.TryDequeueNext();
-                if (track is null || state.Target is null)
+                var item = state.Queue.TryDequeueNext();
+                var mode = state.Mode;
+                if (item is null)
                 {
                     state.IsPlaying = false;
+                    state.Target = null;
+                    state.LastDestroyReason = PlayerDestroyReason.QueueEmpty;
+                    ScheduleIdleDestroy(clanId, state);
                     return;
                 }
 
+                var track = item.Track;
+                var target = item.Target;
+                state.Target = target;
+                state.CancelIdleDestroy();
                 state.IsPlaying = true;
                 using var trackCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 state.SetTrackCts(trackCts);
@@ -407,24 +457,26 @@ public sealed class MusicPlayer
 
                 try
                 {
-                    var sink = state.Mode == PlaybackMode.Voice ? (IPlaybackSink)_voiceSink : _streamingSink;
-                    _logger.LogInformation(
-                        "Playback pipeline start mode={Mode} title={Title} queuedNext={QueuedNext}",
-                        state.Mode,
+                    var sink = mode == PlaybackMode.Voice ? (IPlaybackSink)_voiceSink : _streamingSink;
+                    _logger.LogDebug(
+                        "Playback pipeline start mode={Mode} title={Title} channel={ChannelId} queuedNext={QueuedNext}",
+                        mode,
                         track.Title,
+                        target.ChannelId,
                         state.Queue.Count);
-                    await sink.PlayAsync(state.Target, track, trackCts.Token).ConfigureAwait(false);
-                    _logger.LogInformation(
-                        "Playback sink ready mode={Mode} title={Title} elapsedMs={ElapsedMs}",
-                        state.Mode,
+                    await sink.PlayAsync(target, track, trackCts.Token).ConfigureAwait(false);
+                    _logger.LogDebug(
+                        "Playback sink ready mode={Mode} title={Title} channel={ChannelId} elapsedMs={ElapsedMs}",
+                        mode,
                         track.Title,
+                        target.ChannelId,
                         playStopwatch.ElapsedMilliseconds);
                     state.TrackStartedAt = DateTimeOffset.UtcNow;
                     await SendNowPlayingAsync(state, includeMusicViz: true).ConfigureAwait(false);
 
                     try
                     {
-                        await WaitForTrackEndAsync(state, track, trackCts.Token).ConfigureAwait(false);
+                        await WaitForTrackEndAsync(state, track, mode, target, trackCts.Token).ConfigureAwait(false);
                     }
                     catch (OperationCanceledException) when (trackCts.IsCancellationRequested)
                     {
@@ -432,18 +484,29 @@ public sealed class MusicPlayer
 
                     try
                     {
-                        await sink.StopAsync(state.Target, CancellationToken.None).ConfigureAwait(false);
+                        await sink.StopAsync(target, CancellationToken.None).ConfigureAwait(false);
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogWarning(ex, "Stop sink failed");
+                        _logger.LogWarning(ex, "Stop sink failed channel={ChannelId}", target.ChannelId);
                     }
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Playback failed for {Title}", track.Title);
+                    state.LastDestroyReason = PlayerDestroyReason.StnFailed;
+                    _logger.LogError(ex, "Playback failed for {Title} channel={ChannelId}", track.Title, target.ChannelId);
                     await NotifyPlaybackFailureAsync(state, track, ex).ConfigureAwait(false);
-                    if (state.Mode == PlaybackMode.Streaming && IsStnInfrastructureFailure(ex))
+                    try
+                    {
+                        var sink = mode == PlaybackMode.Voice ? (IPlaybackSink)_voiceSink : _streamingSink;
+                        await sink.StopAsync(target, CancellationToken.None).ConfigureAwait(false);
+                    }
+                    catch (Exception stopEx)
+                    {
+                        _logger.LogDebug(stopEx, "Stop after failure ignored channel={ChannelId}", target.ChannelId);
+                    }
+
+                    if (mode == PlaybackMode.Streaming && IsStnInfrastructureFailure(ex))
                     {
                         state.Queue.Clear(clearCurrent: true);
                         break;
@@ -461,8 +524,37 @@ public sealed class MusicPlayer
         {
             state.IsPlaying = false;
             state.ExitPump();
+            if (state.Queue.Count == 0 && state.Queue.Current is null)
+            {
+                ScheduleIdleDestroy(clanId, state);
+            }
         }
     }
+
+    private void ScheduleIdleDestroy(long clanId, ClanPlayerState state)
+    {
+        state.ScheduleIdleDestroy(
+            IdleSessionTtl,
+            () =>
+            {
+                if (state.IsPlaying || state.Queue.Count > 0 || state.Queue.Current is not null)
+                {
+                    return;
+                }
+
+                if (_states.TryGetValue(clanId, out var current) && ReferenceEquals(current, state)
+                    && _states.TryRemove(clanId, out _))
+                {
+                    state.LastDestroyReason = PlayerDestroyReason.IdleTimeout;
+                    _logger.LogDebug(
+                        "Idle player session destroyed clan={ClanId} reason={Reason}",
+                        clanId,
+                        state.LastDestroyReason);
+                }
+            });
+    }
+
+    private static readonly TimeSpan IdleSessionTtl = TimeSpan.FromSeconds(60);
 
     private async Task SendNowPlayingAsync(ClanPlayerState state, bool includeMusicViz)
     {
@@ -500,14 +592,50 @@ public sealed class MusicPlayer
     private async Task WaitForTrackEndAsync(
         ClanPlayerState state,
         TrackInfoEntity track,
+        PlaybackMode mode,
+        PlaybackTarget target,
         CancellationToken cancellationToken)
     {
-        if (track.Duration is not { } duration || duration <= TimeSpan.Zero)
+        using var durationCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var durationWait = track.Duration is { } d && d > TimeSpan.Zero
+            ? WaitByDurationAsync(state, track, d, durationCts.Token)
+            : Task.Delay(TimeSpan.FromMinutes(10), durationCts.Token);
+
+        if (mode != PlaybackMode.Voice)
         {
-            await Task.Delay(TimeSpan.FromMinutes(10), cancellationToken).ConfigureAwait(false);
+            await durationWait.ConfigureAwait(false);
             return;
         }
 
+        var roomName = string.IsNullOrWhiteSpace(target.RoomName)
+            ? target.ChannelId.ToString()
+            : target.RoomName!;
+        using var statusCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var statusWait = _voiceSink.WaitUntilTerminalAsync(roomName, statusCts.Token);
+        var winner = await Task.WhenAny(durationWait, statusWait).ConfigureAwait(false);
+
+        if (winner == statusWait)
+        {
+            durationCts.Cancel();
+            var terminal = await statusWait.ConfigureAwait(false);
+            if (terminal is "failed")
+            {
+                state.LastDestroyReason = PlayerDestroyReason.StnFailed;
+            }
+
+            return;
+        }
+
+        statusCts.Cancel();
+        await durationWait.ConfigureAwait(false);
+    }
+
+    private async Task WaitByDurationAsync(
+        ClanPlayerState state,
+        TrackInfoEntity track,
+        TimeSpan duration,
+        CancellationToken cancellationToken)
+    {
         var untilNotify = duration > UpNextLead ? duration - UpNextLead : TimeSpan.Zero;
         var afterNotify = (duration > UpNextLead ? UpNextLead : duration) + TrackEndBuffer;
 
@@ -530,7 +658,7 @@ public sealed class MusicPlayer
         }
     }
 
-    private async Task NotifyUpNextAsync(ClanPlayerState state, TrackInfoEntity next, int secondsRemaining)
+    private async Task NotifyUpNextAsync(ClanPlayerState state, QueuedPlay next, int secondsRemaining)
     {
         if (state.NotifyClient is null || state.NotifyChannelId is not long channelId)
         {
@@ -540,11 +668,12 @@ public sealed class MusicPlayer
         try
         {
             var channel = await state.NotifyClient.GetChannelAsync(channelId).ConfigureAwait(false);
-            await channel.SendAsync(PlayerMessageBuilder.UpNext(next, secondsRemaining)).ConfigureAwait(false);
+            await channel.SendAsync(PlayerMessageBuilder.UpNext(next.Track, secondsRemaining, next.Target.ChannelId))
+                .ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to notify up-next for {Title}", next.Title);
+            _logger.LogWarning(ex, "Failed to notify up-next for {Title}", next.Track.Title);
         }
     }
 
@@ -558,7 +687,8 @@ public sealed class MusicPlayer
         try
         {
             var channel = await state.NotifyClient.GetChannelAsync(channelId).ConfigureAwait(false);
-            await channel.SendAsync(PlayerMessageBuilder.Awkward()).ConfigureAwait(false);
+            var content = PlayerMessageBuilder.FromStnFailure(ex) ?? PlayerMessageBuilder.Awkward();
+            await channel.SendAsync(content).ConfigureAwait(false);
         }
         catch (Exception notifyEx)
         {
@@ -568,14 +698,19 @@ public sealed class MusicPlayer
 
     private static bool IsStnInfrastructureFailure(Exception ex)
     {
-        var msg = ex.ToString();
+        if (ex is Stn.StnVoiceException)
+        {
+            return true;
+        }
+
+        var msg = ex.Message;
         return msg.Contains("502", StringComparison.Ordinal)
                || msg.Contains("status code '200'", StringComparison.Ordinal)
                || msg.Contains("STN streaming WebSocket", StringComparison.Ordinal);
     }
 
     private ClanPlayerState GetState(long clanId)
-        => _states.GetOrAdd(clanId, _ => new ClanPlayerState());
+        => _states.GetOrAdd(clanId, id => new ClanPlayerState { ClanId = id });
 
     private enum PlaybackMode
     {
@@ -583,10 +718,24 @@ public sealed class MusicPlayer
         Voice,
     }
 
+    private enum PlayerDestroyReason
+    {
+        None,
+        QueueEmpty,
+        UserStop,
+        Skip,
+        StnFailed,
+        IdleTimeout,
+        ModeConflict,
+        RoomConflict,
+        CapacityExceeded,
+    }
+
     private sealed class ClanPlayerState
     {
         private readonly SemaphoreSlim _pumpGate = new(1, 1);
         private CancellationTokenSource? _trackCts;
+        private CancellationTokenSource? _idleCts;
 
         public MusicQueue Queue { get; } = new();
         public PlaybackTarget? Target { get; set; }
@@ -600,6 +749,7 @@ public sealed class MusicPlayer
         public FakeProgressBar? NowPlayingProgress { get; set; }
         public MezonClient? NotifyClient { get; set; }
         public long? NotifyChannelId { get; set; }
+        public PlayerDestroyReason LastDestroyReason { get; set; }
 
         public TimeSpan GetElapsed()
         {
@@ -649,5 +799,38 @@ public sealed class MusicPlayer
                 // ignored
             }
         }
+
+        public void CancelIdleDestroy()
+        {
+            try
+            {
+                _idleCts?.Cancel();
+            }
+            catch
+            {
+            }
+
+            _idleCts?.Dispose();
+            _idleCts = null;
+        }
+
+        public void ScheduleIdleDestroy(TimeSpan delay, Action destroy)
+        {
+            CancelIdleDestroy();
+            var cts = new CancellationTokenSource();
+            _idleCts = cts;
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(delay, cts.Token).ConfigureAwait(false);
+                    destroy();
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            });
+        }
     }
 }
+
