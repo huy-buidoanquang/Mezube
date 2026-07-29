@@ -78,10 +78,28 @@ dotnet run --project Mezube.csproj
 !play #voice never gonna give you up
 !stream #radio https://example.com/audio.ogg
 !queue / !np / !skip / !stop
+!setdj @DJ / !settings
 !help
 ```
 
 Channel target: mention hashtag kênh (`#voice`, `#radio`). Voice cũng fallback sang voice presence theo clan; stream fallback khi chạy lệnh trong Stream channel.
+
+### Clan invite (mid-session)
+
+Khi bot đang chạy và được invite vào clan mới, SDK `ClanJoined` kích hoạt `RefreshClanMembershipAsync` (debounce ~3s) để `JoinClanChat` — không cần restart. Log: `Clan joined mid-session clanId=…; refreshing membership`.
+
+### DJ permissions
+
+Mô hình kiểu JMusicBot (chưa có vote-skip):
+
+| | Everyone | Track requester | DJ role / clan owner |
+|--|--|--|--|
+| `play` / `stream` / `queue` / `np` / `help` | yes | yes | yes |
+| `skip` own current track | — | yes | yes |
+| force skip / `stop` / Skip·Stop buttons (others) | no | no | yes |
+| `setdj` | no | no | owner only |
+
+`!setdj @role|roleId|none` — chỉ clan owner. `!settings` hiện DJ role hiện tại.
 
 ## Lệnh
 
@@ -89,8 +107,9 @@ Channel target: mention hashtag kênh (`#voice`, `#radio`). Voice cũng fallback
 |------|---------|
 | `!play [#voice] <url\|query>` | Phát vào **voice** |
 | `!stream [#stream] <url\|query>` | Phát vào **streaming** |
-| `!skip` `!stop` `!queue` `!np` | Điều khiển |
-| `!ping` `!help` | Trợ giúp |
+| `!skip` `!stop` `!queue` `!np` | Điều khiển (skip/stop theo DJ rules) |
+| `!setdj` `!settings` | Cấu hình DJ role |
+| `!help` | Trợ giúp |
 
 ## Docker
 

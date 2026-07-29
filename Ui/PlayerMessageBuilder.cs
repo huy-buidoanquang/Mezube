@@ -105,26 +105,20 @@ public static class PlayerMessageBuilder
     public static MessageContent NowPlaying(
         TrackInfoEntity track,
         int queueCount,
-        string mode,
+        string destination,
         TimeSpan? position = null,
         long? controlMessageId = null,
         long? controlUserId = null,
         long? clanId = null,
-        bool includeMusicViz = false,
-        long? channelId = null)
+        bool includeMusicViz = false)
     {
         var fields = new List<MessageEmbedField>
         {
-            new("Mode", mode, inline: true),
+            new("Destination", Escape(destination), inline: true),
             new("Duration", track.DisplayDuration, inline: true),
             new("Source", track.Source, inline: true),
             new("Queued next", queueCount.ToString(), inline: true),
         };
-
-        if (channelId is long ch)
-        {
-            fields.Add(new("Channel", $"{ch}", inline: true));
-        }
 
         if (position is { } p)
         {
@@ -258,20 +252,16 @@ public static class PlayerMessageBuilder
             fields);
     }
 
-    public static MessageContent Preparing(string mode, long? channelId = null)
+    public static MessageContent Preparing(string destination)
     {
         var fields = new List<MessageEmbedField>
         {
-            new("Mode", mode, inline: true),
+            new("Destination", Escape(destination), inline: true),
         };
-        if (channelId is long id)
-        {
-            fields.Add(new("Channel", $"{id}", inline: true));
-        }
 
         return Build(
-            "Searching",
             "Hold on a second, I’m floating among the clouds, searching for your song.",
+            string.Empty,
             ColorInfo,
             thumbnailUrl: null,
             url: null,
@@ -279,25 +269,13 @@ public static class PlayerMessageBuilder
             fields);
     }
 
-    public static string RenderProgressBar(int percent, int width = 14)
-    {
-        percent = Math.Clamp(percent, 0, 100);
-        var filled = (int)Math.Round(width * (percent / 100.0));
-        filled = Math.Clamp(filled, 0, width);
-        return $"[{new string('█', filled)}{new string('░', width - filled)}]";
-    }
+    public static string FormatDestination(string mode, string? channelLabel)
+        => string.IsNullOrWhiteSpace(channelLabel)
+            ? mode
+            : $"{mode} · {channelLabel}";
 
-    public static int ProgressPercent(TimeSpan elapsed, TimeSpan? duration)
-    {
-        if (duration is { } d && d > TimeSpan.Zero)
-        {
-            return Math.Clamp((int)Math.Round(100 * elapsed.TotalSeconds / d.TotalSeconds), 0, 100);
-        }
-
-        // No known duration: fake a slow climb toward 90%.
-        var tick = Math.Max(0, (int)elapsed.TotalSeconds);
-        return Math.Min(90, (int)Math.Round(90 * (1 - Math.Exp(-tick / 45.0))));
-    }
+    public static MessageContent NotAllowed(string description)
+        => Error("Not allowed", description);
 
     private static string FormatPosition(TimeSpan position)
     {
@@ -335,6 +313,7 @@ public static class PlayerMessageBuilder
             new("Voice", $"{p}play [#voice] <url|query>"),
             new("Streaming", $"{p}stream [#stream] <url|query>"),
             new("Controls", $"{p}skip · {p}stop · {p}queue · {p}np"),
+            new("DJ", $"{p}setdj @role|roleId|none · {p}settings"),
         };
 
         return Build(

@@ -23,6 +23,8 @@ public sealed class MusicCommandModule
         commands.AddCommand("stop", ctx => _player.StopAsync(ctx, ctx.CancellationToken)).WithAlias("st");
         commands.AddCommand("queue", ctx => _player.ShowQueueAsync(ctx)).WithAlias("q");
         commands.AddCommand("nowplay", ctx => _player.ShowNowPlayingAsync(ctx)).WithAlias("np");
+        commands.AddCommand("setdj", ctx => _player.SetDjRoleAsync(ctx, ctx.CancellationToken));
+        commands.AddCommand("settings", ctx => _player.ShowSettingsAsync(ctx, ctx.CancellationToken));
         commands.AddCommand("help", HandleHelpAsync);
     }
 

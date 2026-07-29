@@ -2,6 +2,7 @@
 using Mezon.Net.Sdk;
 using Mezon.Net.Sdk.Commands;
 using Mezube.Domain.Entities;
+using Mezube.Helpers;
 using Mezube.Playback;
 using Mezube.Ui;
 using Microsoft.Extensions.Logging;
@@ -17,6 +18,7 @@ public sealed class MusicPlayer
     private readonly VoiceChannelSink _voiceSink;
     private readonly BindStore _binds;
     private readonly MusicVizAssets _viz;
+    private readonly PlaybackAccess _access;
     private readonly ILogger<MusicPlayer> _logger;
     private readonly ConcurrentDictionary<long, ClanPlayerState> _states = new();
 
@@ -26,6 +28,7 @@ public sealed class MusicPlayer
         VoiceChannelSink voiceSink,
         BindStore binds,
         MusicVizAssets viz,
+        PlaybackAccess access,
         ILogger<MusicPlayer> logger)
     {
         _resolver = resolver;
@@ -33,6 +36,7 @@ public sealed class MusicPlayer
         _voiceSink = voiceSink;
         _binds = binds;
         _viz = viz;
+        _access = access;
         _logger = logger;
     }
 
@@ -65,10 +69,6 @@ public sealed class MusicPlayer
             return;
         }
 
-        var preparing = await ctx.ReplyAsync(PlayerMessageBuilder.Preparing("streaming", channelId))
-            .ConfigureAwait(false);
-        var preparingCreateTime = preparing.CreateTimeSeconds > 0 ? preparing.CreateTimeSeconds : (uint?)null;
-
         Mezon.Net.Sdk.Entities.TextChannel channel;
         try
         {
@@ -77,27 +77,24 @@ public sealed class MusicPlayer
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "GetChannelAsync failed for stream {ChannelId}", channelId);
-            await UpdateOrReplyAsync(
-                    ctx,
-                    preparing.MessageId,
-                    PlayerMessageBuilder.Awkward(),
-                    preparingCreateTime)
-                .ConfigureAwait(false);
+            await ctx.ReplyAsync(PlayerMessageBuilder.Awkward()).ConfigureAwait(false);
             return;
         }
 
         if (channel.Type != (int)ChannelType.Streaming)
         {
-            await UpdateOrReplyAsync(
-                    ctx,
-                    preparing.MessageId,
-                    PlayerMessageBuilder.Error(
-                        "Invalid request",
-                        $"Channel {channelId} is not a streaming channel."),
-                    preparingCreateTime)
+            await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                    "Invalid request",
+                    $"Channel {channelId} is not a streaming channel."))
                 .ConfigureAwait(false);
             return;
         }
+
+        var destination = PlayerMessageBuilder.FormatDestination("streaming", channel.Name);
+        var preparing = await ctx.ReplyAsync(PlayerMessageBuilder.Preparing(destination))
+            .ConfigureAwait(false);
+        var preparingCreateTime = preparing.CreateTimeSeconds > 0 ? preparing.CreateTimeSeconds : (uint?)null;
+        CommandReplyTracker.Remember(preparing.MessageId, preparingCreateTime, ctx.Channel);
 
         var (track, resolveError) = await TryResolveAsync(ctx, query, cancellationToken).ConfigureAwait(false);
         if (track is null)
@@ -112,7 +109,7 @@ public sealed class MusicPlayer
         }
 
         var state = GetState(clanId);
-        var target = new PlaybackTarget(clanId, channelId);
+        var target = new PlaybackTarget(clanId, channelId, ChannelLabel: channel.Name);
         var play = new QueuedPlay(track, target);
         if (state.IsPlaying)
         {
@@ -181,10 +178,6 @@ public sealed class MusicPlayer
             return;
         }
 
-        var preparing = await ctx.ReplyAsync(PlayerMessageBuilder.Preparing("voice", channelId))
-            .ConfigureAwait(false);
-        var preparingCreateTime = preparing.CreateTimeSeconds > 0 ? preparing.CreateTimeSeconds : (uint?)null;
-
         Mezon.Net.Sdk.Entities.TextChannel channel;
         try
         {
@@ -193,27 +186,24 @@ public sealed class MusicPlayer
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "GetChannelAsync failed for voice {ChannelId}", channelId);
-            await UpdateOrReplyAsync(
-                    ctx,
-                    preparing.MessageId,
-                    PlayerMessageBuilder.Awkward(),
-                    preparingCreateTime)
-                .ConfigureAwait(false);
+            await ctx.ReplyAsync(PlayerMessageBuilder.Awkward()).ConfigureAwait(false);
             return;
         }
 
         if (channel.Type is not ((int)ChannelType.MezonVoice or (int)ChannelType.GmeetVoice))
         {
-            await UpdateOrReplyAsync(
-                    ctx,
-                    preparing.MessageId,
-                    PlayerMessageBuilder.Error(
-                        "Invalid request",
-                        $"Channel {channelId} is not a voice channel."),
-                    preparingCreateTime)
+            await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                    "Invalid request",
+                    $"Channel {channelId} is not a voice channel."))
                 .ConfigureAwait(false);
             return;
         }
+
+        var destination = PlayerMessageBuilder.FormatDestination("voice", channel.Name);
+        var preparing = await ctx.ReplyAsync(PlayerMessageBuilder.Preparing(destination))
+            .ConfigureAwait(false);
+        var preparingCreateTime = preparing.CreateTimeSeconds > 0 ? preparing.CreateTimeSeconds : (uint?)null;
+        CommandReplyTracker.Remember(preparing.MessageId, preparingCreateTime, ctx.Channel);
 
         var (track, resolveError) = await TryResolveAsync(ctx, query, cancellationToken).ConfigureAwait(false);
         if (track is null)
@@ -228,7 +218,7 @@ public sealed class MusicPlayer
         }
 
         var state = GetState(clanId);
-        var target = new PlaybackTarget(clanId, channelId, RoomName: channelId.ToString());
+        var target = new PlaybackTarget(clanId, channelId, RoomName: channelId.ToString(), ChannelLabel: channel.Name);
         var play = new QueuedPlay(track, target);
         if (state.IsPlaying)
         {
@@ -271,19 +261,69 @@ public sealed class MusicPlayer
     public async Task SkipAsync(ICommandContext ctx, CancellationToken cancellationToken = default)
     {
         var clanId = ctx.Clan?.Id ?? ctx.Channel.ClanId;
-        var skipped = await SkipInternalAsync(clanId, cancellationToken).ConfigureAwait(false);
-        await ctx.ReplyAsync(skipped
-                ? PlayerMessageBuilder.Ok("Skipped", "Moved to the next track (if any).")
-                : PlayerMessageBuilder.Status("Nothing playing", "Queue is empty."))
-            .ConfigureAwait(false);
+        var outcome = await TrySkipAsync(ctx.Client, clanId, ctx.Author.Id, cancellationToken).ConfigureAwait(false);
+        if (!outcome.Allowed)
+        {
+            await ctx.ReplyAsync(outcome.Content).ConfigureAwait(false);
+            return;
+        }
+
+        await PublishControlOutcomeAsync(ctx, clanId, outcome.Content).ConfigureAwait(false);
     }
 
     public async Task StopAsync(ICommandContext ctx, CancellationToken cancellationToken = default)
     {
         var clanId = ctx.Clan?.Id ?? ctx.Channel.ClanId;
+        var outcome = await TryStopAsync(ctx.Client, clanId, ctx.Author.Id, cancellationToken).ConfigureAwait(false);
+        if (!outcome.Allowed)
+        {
+            await ctx.ReplyAsync(outcome.Content).ConfigureAwait(false);
+            return;
+        }
+
+        await PublishControlOutcomeAsync(ctx, clanId, outcome.Content).ConfigureAwait(false);
+    }
+
+    public async Task<ControlOutcome> TrySkipAsync(
+        MezonClient client,
+        long clanId,
+        long userId,
+        CancellationToken cancellationToken = default)
+    {
+        var state = GetState(clanId);
+        var requesterId = state.Queue.CurrentItem?.Track.RequestedByUserId;
+        if (!await _access.CanSkipAsync(client, clanId, userId, requesterId, cancellationToken).ConfigureAwait(false))
+        {
+            return ControlOutcome.Denied(PlayerMessageBuilder.NotAllowed(
+                "Only the track requester, DJ role, or clan owner can skip. (Vote-skip coming later.)"));
+        }
+
+        var skipped = await SkipInternalAsync(clanId, cancellationToken).ConfigureAwait(false);
+        return ControlOutcome.Ok(skipped
+            ? PlayerMessageBuilder.Ok("Skipped", "Moved to the next track (if any).")
+            : PlayerMessageBuilder.Status("Nothing playing", "Queue is empty."));
+    }
+
+    public async Task<ControlOutcome> TryStopAsync(
+        MezonClient client,
+        long clanId,
+        long userId,
+        CancellationToken cancellationToken = default)
+    {
+        if (!await _access.CanStopAsync(client, clanId, userId, cancellationToken).ConfigureAwait(false))
+        {
+            return ControlOutcome.Denied(PlayerMessageBuilder.NotAllowed(
+                "Only DJ role or clan owner can stop playback."));
+        }
+
         await StopInternalAsync(clanId, cancellationToken).ConfigureAwait(false);
-        await ctx.ReplyAsync(PlayerMessageBuilder.Ok("Stopped", "Playback stopped and queue cleared."))
-            .ConfigureAwait(false);
+        return ControlOutcome.Ok(PlayerMessageBuilder.Ok("Stopped", "Playback stopped and queue cleared."));
+    }
+
+    public readonly record struct ControlOutcome(bool Allowed, Mezon.Net.Client.MessageContent Content)
+    {
+        public static ControlOutcome Ok(Mezon.Net.Client.MessageContent content) => new(true, content);
+        public static ControlOutcome Denied(Mezon.Net.Client.MessageContent content) => new(false, content);
     }
 
     public Task<bool> SkipInternalAsync(long clanId, CancellationToken cancellationToken = default)
@@ -308,6 +348,37 @@ public sealed class MusicPlayer
         state.TrackStartedAt = null;
         await state.StopNowPlayingProgressAsync().ConfigureAwait(false);
         ScheduleIdleDestroy(clanId, state);
+    }
+
+    private async Task PublishControlOutcomeAsync(
+        ICommandContext ctx,
+        long clanId,
+        Mezon.Net.Client.MessageContent content)
+    {
+        var state = GetState(clanId);
+        if (state.ControlMessageId is long messageId
+            && state.NotifyClient is not null
+            && state.NotifyChannelId is long channelId)
+        {
+            try
+            {
+                var channel = await state.NotifyClient.GetChannelAsync(channelId, ctx.CancellationToken)
+                    .ConfigureAwait(false);
+                await channel.UpdateMessageAsync(
+                        messageId,
+                        content,
+                        hideEdited: true,
+                        createTimeSeconds: state.ControlMessageCreateTimeSeconds)
+                    .ConfigureAwait(false);
+                return;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to update control message {MessageId} after skip/stop", messageId);
+            }
+        }
+
+        await ctx.ReplyAsync(content).ConfigureAwait(false);
     }
 
     private async Task<bool> SkipStateAsync(ClanPlayerState state, CancellationToken cancellationToken)
@@ -346,32 +417,165 @@ public sealed class MusicPlayer
 
         await _viz.EnsureAsync(ctx.Client, ctx.CancellationToken).ConfigureAwait(false);
 
-        state.ControlMessageId = ctx.Message.Id;
         state.ControlUserId = ctx.Author.Id;
-        var content = BuildNowPlayingContent(state, clanId, includeMusicViz: true);
-        await ctx.ReplyAsync(content).ConfigureAwait(false);
+        state.NotifyClient = ctx.Client;
+        state.NotifyChannelId = ctx.Channel.Id;
+        // Reply without controls first so we can stamp ControlMessageId = reply id for buttons.
+        var seed = BuildNowPlayingContent(state, clanId, includeMusicViz: true, includeControls: false);
+        var reply = await ctx.ReplyAsync(seed).ConfigureAwait(false);
+        state.ControlMessageId = reply.MessageId;
+        state.ControlMessageCreateTimeSeconds = reply.CreateTimeSeconds > 0 ? reply.CreateTimeSeconds : null;
+        var content = BuildNowPlayingContent(state, clanId, includeMusicViz: true, includeControls: true);
+        await ctx.Channel.UpdateMessageAsync(
+                reply.MessageId,
+                content,
+                hideEdited: true,
+                createTimeSeconds: state.ControlMessageCreateTimeSeconds)
+            .ConfigureAwait(false);
         await state.StopNowPlayingProgressAsync().ConfigureAwait(false);
         // Temporarily disabled: live progress edits interrupt embed Animation.
         // state.NowPlayingProgress = FakeProgressBar.Start(...);
     }
 
+    public async Task SetDjRoleAsync(ICommandContext ctx, CancellationToken cancellationToken = default)
+    {
+        var clanId = ctx.Clan?.Id ?? ctx.Channel.ClanId;
+        if (!await _access.CanConfigureDjAsync(ctx.Client, clanId, ctx.Author.Id, cancellationToken)
+                .ConfigureAwait(false))
+        {
+            await ctx.ReplyAsync(PlayerMessageBuilder.NotAllowed(
+                    "Only the clan owner can configure the DJ role."))
+                .ConfigureAwait(false);
+            return;
+        }
+
+        var raw = string.Join(' ', ctx.Args).Trim();
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                    "Missing role",
+                    "Usage: !setdj @role | roleId | none"))
+                .ConfigureAwait(false);
+            return;
+        }
+
+        if (raw.Equals("none", StringComparison.OrdinalIgnoreCase)
+            || raw.Equals("off", StringComparison.OrdinalIgnoreCase)
+            || raw.Equals("clear", StringComparison.OrdinalIgnoreCase))
+        {
+            await _access.SetDjRoleIdAsync(clanId, null, cancellationToken).ConfigureAwait(false);
+            await ctx.ReplyAsync(PlayerMessageBuilder.Ok("DJ role cleared", "Force skip/stop now require clan owner."))
+                .ConfigureAwait(false);
+            return;
+        }
+
+        long? roleId = null;
+        string? roleTitle = null;
+        foreach (var mention in ctx.Message.Mentions)
+        {
+            if (mention.RoleId != 0)
+            {
+                roleId = mention.RoleId;
+                roleTitle = string.IsNullOrWhiteSpace(mention.Rolename) ? null : mention.Rolename;
+                break;
+            }
+        }
+
+        if (roleId is null && long.TryParse(raw.TrimStart('@'), out var parsed) && parsed != 0)
+        {
+            roleId = parsed;
+        }
+
+        if (roleId is null)
+        {
+            try
+            {
+                var clan = await ctx.Client.GetClanAsync(clanId, cancellationToken).ConfigureAwait(false);
+                var roles = await clan.ListRolesAsync(limit: 100).ConfigureAwait(false);
+                var needle = raw.TrimStart('@');
+                foreach (var role in roles.Roles.Roles)
+                {
+                    if (role.Title.Equals(needle, StringComparison.OrdinalIgnoreCase)
+                        || role.Slug.Equals(needle, StringComparison.OrdinalIgnoreCase))
+                    {
+                        roleId = role.Id;
+                        roleTitle = role.Title;
+                        break;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to resolve DJ role by name clan={ClanId}", clanId);
+            }
+        }
+
+        if (roleId is null)
+        {
+            await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                    "Role not found",
+                    "Pass a role mention, numeric role id, or exact role name. Use none to clear."))
+                .ConfigureAwait(false);
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(roleTitle))
+        {
+            try
+            {
+                var clan = await ctx.Client.GetClanAsync(clanId, cancellationToken).ConfigureAwait(false);
+                var roles = await clan.ListRolesAsync(limit: 100).ConfigureAwait(false);
+                foreach (var role in roles.Roles.Roles)
+                {
+                    if (role.Id == roleId.Value)
+                    {
+                        roleTitle = role.Title;
+                        break;
+                    }
+                }
+            }
+            catch
+            {
+                // title is optional for confirmation
+            }
+        }
+
+        await _access.SetDjRoleIdAsync(clanId, roleId, cancellationToken).ConfigureAwait(false);
+        var label = string.IsNullOrWhiteSpace(roleTitle) ? $"{roleId}" : $"{roleTitle} ({roleId})";
+        await ctx.ReplyAsync(PlayerMessageBuilder.Ok("DJ role set", $"Members with {label} can force-skip and stop."))
+            .ConfigureAwait(false);
+    }
+
+    public async Task ShowSettingsAsync(ICommandContext ctx, CancellationToken cancellationToken = default)
+    {
+        var clanId = ctx.Clan?.Id ?? ctx.Channel.ClanId;
+        var djRoleId = await _access.GetDjRoleIdAsync(clanId, cancellationToken).ConfigureAwait(false);
+        var djValue = djRoleId is long id ? $"{id}" : "none (owner only for force skip/stop)";
+        await ctx.ReplyAsync(PlayerMessageBuilder.Status(
+                "Clan settings",
+                $"DJ role: {djValue}"))
+            .ConfigureAwait(false);
+    }
+
     private static Mezon.Net.Client.MessageContent BuildNowPlayingContent(
         ClanPlayerState state,
         long clanId,
-        bool includeMusicViz = false)
+        bool includeMusicViz = false,
+        bool includeControls = true)
     {
         var item = state.Queue.CurrentItem!;
         var position = state.GetElapsed();
+        var mode = state.Mode == PlaybackMode.Voice ? "voice" : "streaming";
+        var destination = PlayerMessageBuilder.FormatDestination(mode, item.Target.ChannelLabel);
         return PlayerMessageBuilder.NowPlaying(
             item.Track,
             state.Queue.Count,
-            state.Mode.ToString().ToLowerInvariant(),
+            destination,
             position: position,
-            controlMessageId: state.ControlMessageId,
-            controlUserId: state.ControlUserId,
+            controlMessageId: includeControls ? state.ControlMessageId : null,
+            controlUserId: includeControls ? state.ControlUserId : null,
             clanId: clanId,
-            includeMusicViz: includeMusicViz,
-            channelId: item.Target.ChannelId);
+            includeMusicViz: includeMusicViz);
     }
 
     private async Task<(TrackInfoEntity? Track, Mezon.Net.Client.MessageContent? Error)> TryResolveAsync(
@@ -397,7 +601,7 @@ public sealed class MusicPlayer
                 return (null, PlayerMessageBuilder.Error("Not found", "No track matched that query."));
             }
 
-            return (track, null);
+            return (track.WithRequester(ctx.Author.Id, ctx.Author.Username ?? ctx.Author.Id.ToString()), null);
         }
         catch (Exception ex)
         {

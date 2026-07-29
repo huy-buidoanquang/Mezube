@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Mezon.Net.Core;
 using Mezon.Net.Models;
 using Mezon.Net.Sdk;
@@ -15,6 +16,7 @@ namespace Mezube.Bot;
 public sealed class MezubeBot : BackgroundService
 {
     private static readonly AsyncLocal<(long ClanId, long ChannelId)?> RateLimitNotifyTarget = new();
+    private static readonly TimeSpan ClanRefreshDebounce = TimeSpan.FromSeconds(3);
 
     private readonly BotOptions _options;
     private readonly MusicPlayer _player;
@@ -23,8 +25,10 @@ public sealed class MezubeBot : BackgroundService
     private readonly VoiceChannelSinkHolder _voiceHolder;
     private readonly MusicVizAssets _viz;
     private readonly ILogger<MezubeBot> _logger;
+    private readonly ConcurrentDictionary<(long ClanId, long MessageId), byte> _controlOneShot = new();
     private MezonClient? _client;
     private long _lastRateLimitNotifyMs;
+    private int _clanRefreshGeneration;
 
     public MezubeBot(
         BotOptions options,
@@ -70,6 +74,7 @@ public sealed class MezubeBot : BackgroundService
         commands.Use(async (ctx, next) =>
         {
             RateLimitNotifyTarget.Value = (ctx.Channel.ClanId, ctx.Channel.Id);
+            CommandReplyTracker.Clear();
             try
             {
                 await next(ctx).ConfigureAwait(false);
@@ -79,7 +84,21 @@ public sealed class MezubeBot : BackgroundService
                 _logger.LogError(ex, "Command {Command} failed", ctx.Name);
                 try
                 {
-                    await ctx.ReplyAsync(PlayerMessageBuilder.Awkward()).ConfigureAwait(false);
+                    var awkward = PlayerMessageBuilder.Awkward();
+                    var prior = CommandReplyTracker.Peek();
+                    if (prior is not null)
+                    {
+                        await prior.Channel.UpdateMessageAsync(
+                                prior.MessageId,
+                                awkward,
+                                hideEdited: true,
+                                createTimeSeconds: prior.CreateTimeSeconds)
+                            .ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await ctx.ReplyAsync(awkward).ConfigureAwait(false);
+                    }
                 }
                 catch (Exception notifyEx)
                 {
@@ -88,6 +107,7 @@ public sealed class MezubeBot : BackgroundService
             }
             finally
             {
+                CommandReplyTracker.Clear();
                 RateLimitNotifyTarget.Value = null;
             }
         });
@@ -107,24 +127,48 @@ public sealed class MezubeBot : BackgroundService
             try
             {
                 var clanId = parts.ClanId ?? ctx.Channel.ClanId;
+                var messageId = ctx.Message?.Id ?? parts.MessageId;
+                var lockKey = (clanId, messageId);
+                if (!_controlOneShot.TryAdd(lockKey, 0))
+                {
+                    return;
+                }
+
                 switch (parts.Action)
                 {
                     case MezubeButtonId.ActionSkip:
                         {
-                            var ok = await _player.SkipInternalAsync(clanId, ctx.CancellationToken).ConfigureAwait(false);
-                            await ctx.RespondAsync(ok
-                                    ? PlayerMessageBuilder.Ok("Skipped", "Moved to the next track (if any).")
-                                    : PlayerMessageBuilder.Status("Nothing playing", "Queue is empty."))
+                            var outcome = await _player
+                                .TrySkipAsync(ctx.Client, clanId, ctx.User.Id, ctx.CancellationToken)
                                 .ConfigureAwait(false);
+                            if (!outcome.Allowed)
+                            {
+                                _controlOneShot.TryRemove(lockKey, out _);
+                                await ctx.RespondAsync(outcome.Content).ConfigureAwait(false);
+                                break;
+                            }
+
+                            await UpdateControlMessageAsync(ctx, outcome.Content).ConfigureAwait(false);
                             break;
                         }
                     case MezubeButtonId.ActionStop:
                         {
-                            await _player.StopInternalAsync(clanId, ctx.CancellationToken).ConfigureAwait(false);
-                            await ctx.RespondAsync(PlayerMessageBuilder.Ok("Stopped", "Playback stopped and queue cleared."))
+                            var outcome = await _player
+                                .TryStopAsync(ctx.Client, clanId, ctx.User.Id, ctx.CancellationToken)
                                 .ConfigureAwait(false);
+                            if (!outcome.Allowed)
+                            {
+                                _controlOneShot.TryRemove(lockKey, out _);
+                                await ctx.RespondAsync(outcome.Content).ConfigureAwait(false);
+                                break;
+                            }
+
+                            await UpdateControlMessageAsync(ctx, outcome.Content).ConfigureAwait(false);
                             break;
                         }
+                    default:
+                        _controlOneShot.TryRemove(lockKey, out _);
+                        break;
                 }
             }
             catch (Exception ex) when (!ctx.CancellationToken.IsCancellationRequested)
@@ -161,6 +205,26 @@ public sealed class MezubeBot : BackgroundService
             {
                 _logger.LogWarning(ex, "Music viz warm-up failed");
             }
+        };
+
+        client.ClanJoined += data =>
+        {
+            ClanJoinResponse joined = data;
+            // ClanJoin is also the JoinClanChat ack. Only refresh for clans not already cached
+            // (true mid-session invite); otherwise Refresh → JoinClanChat → ClanJoin loops forever.
+            if (client.Clans.TryGet(joined.ClanId, out _))
+            {
+                _logger.LogDebug(
+                    "ClanJoin ack for known clanId={ClanId}; skipping membership refresh",
+                    joined.ClanId);
+                return Task.CompletedTask;
+            }
+
+            _logger.LogInformation(
+                "Clan joined mid-session clanId={ClanId}; refreshing membership",
+                joined.ClanId);
+            ScheduleClanMembershipRefresh(client, stoppingToken);
+            return Task.CompletedTask;
         };
 
         client.VoiceJoined += data =>
@@ -238,6 +302,54 @@ public sealed class MezubeBot : BackgroundService
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
             _logger.LogInformation("Shutdown requested.");
+        }
+    }
+
+    private static Task UpdateControlMessageAsync(IInteractionContext ctx, Mezon.Net.Client.MessageContent content)
+    {
+        if (ctx.Message is not null)
+        {
+            return ctx.UpdateMessageAsync(content);
+        }
+
+        return ctx.RespondAsync(content);
+    }
+
+    private void ScheduleClanMembershipRefresh(MezonClient client, CancellationToken stoppingToken)
+    {
+        var generation = Interlocked.Increment(ref _clanRefreshGeneration);
+        _ = DebouncedRefreshClanMembershipAsync(client, generation, stoppingToken);
+    }
+
+    private async Task DebouncedRefreshClanMembershipAsync(
+        MezonClient client,
+        int generation,
+        CancellationToken stoppingToken)
+    {
+        try
+        {
+            await Task.Delay(ClanRefreshDebounce, stoppingToken).ConfigureAwait(false);
+            if (generation != Volatile.Read(ref _clanRefreshGeneration))
+            {
+                return;
+            }
+
+            await client.RefreshClanMembershipAsync(stoppingToken).ConfigureAwait(false);
+            _logger.LogInformation(
+                "Clan membership refreshed after invite: {Count} clan(s)",
+                client.Clans.Count);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // shutdown
+        }
+        catch (OperationCanceledException)
+        {
+            // superseded debounce (should not happen with generation gate)
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Mid-session clan membership refresh failed");
         }
     }
 

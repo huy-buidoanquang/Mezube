@@ -56,7 +56,9 @@ internal static class Program
         builder.Services.AddSingleton<WhipFfmpegPublisher>();
         builder.Services.AddSingleton<MezonCdnUploader>();
         builder.Services.AddSingleton<MusicVizAssets>();
-        builder.Services.AddSingleton<ITrackDb, SqliteTrackDb>();
+        builder.Services.AddSingleton<SqliteTrackDb>();
+        builder.Services.AddSingleton<ITrackDb>(sp => sp.GetRequiredService<SqliteTrackDb>());
+        builder.Services.AddSingleton<IClanSettingsStore>(sp => sp.GetRequiredService<SqliteTrackDb>());
         builder.Services.AddSingleton<PlayableMediaProcessor>();
         builder.Services.AddSingleton<YoutubeTrackResolver>();
         builder.Services.AddSingleton<DirectUrlTrackResolver>();
@@ -69,6 +71,7 @@ internal static class Program
         builder.Services.AddSingleton<BindStore>();
         builder.Services.AddSingleton<StreamingChannelSink>();
         builder.Services.AddSingleton<VoiceChannelSink>();
+        builder.Services.AddSingleton<PlaybackAccess>();
         builder.Services.AddSingleton<MusicPlayer>();
         builder.Services.AddHostedService<MezubeBot>();
 

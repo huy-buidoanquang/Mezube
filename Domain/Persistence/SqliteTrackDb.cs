@@ -5,7 +5,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Mezube.Domain.Persistence;
 
-public sealed class SqliteTrackDb : ITrackDb, IDisposable
+public sealed class SqliteTrackDb : ITrackDb, IClanSettingsStore, IDisposable
 {
     private readonly string _connectionString;
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -244,6 +244,78 @@ public sealed class SqliteTrackDb : ITrackDb, IDisposable
         }
     }
 
+    public async Task<long?> GetDjRoleIdAsync(long clanId, CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText =
+                """
+                SELECT dj_role_id
+                FROM clan_settings
+                WHERE clan_id = $clan_id
+                LIMIT 1;
+                """;
+            cmd.Parameters.AddWithValue("$clan_id", clanId);
+            var result = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            if (result is null or DBNull)
+            {
+                return null;
+            }
+
+            var value = Convert.ToInt64(result);
+            return value == 0 ? null : value;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task SetDjRoleIdAsync(long clanId, long? roleId, CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var now = DateTimeOffset.UtcNow.ToString("O");
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using var cmd = connection.CreateCommand();
+            if (roleId is null)
+            {
+                cmd.CommandText =
+                    """
+                    INSERT INTO clan_settings (clan_id, dj_role_id, updated_at)
+                    VALUES ($clan_id, NULL, $now)
+                    ON CONFLICT(clan_id) DO UPDATE SET
+                        dj_role_id = NULL,
+                        updated_at = excluded.updated_at;
+                    """;
+            }
+            else
+            {
+                cmd.CommandText =
+                    """
+                    INSERT INTO clan_settings (clan_id, dj_role_id, updated_at)
+                    VALUES ($clan_id, $dj_role_id, $now)
+                    ON CONFLICT(clan_id) DO UPDATE SET
+                        dj_role_id = excluded.dj_role_id,
+                        updated_at = excluded.updated_at;
+                    """;
+                cmd.Parameters.AddWithValue("$dj_role_id", roleId.Value);
+            }
+
+            cmd.Parameters.AddWithValue("$clan_id", clanId);
+            cmd.Parameters.AddWithValue("$now", now);
+            await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     public void Dispose()
     {
         if (_disposed)
@@ -280,6 +352,12 @@ public sealed class SqliteTrackDb : ITrackDb, IDisposable
               alias_key TEXT PRIMARY KEY,
               source TEXT NOT NULL,
               external_id TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS clan_settings (
+              clan_id INTEGER PRIMARY KEY,
+              dj_role_id INTEGER,
+              updated_at TEXT NOT NULL
             );
             """;
         cmd.ExecuteNonQuery();
