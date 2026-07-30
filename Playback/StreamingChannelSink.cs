@@ -70,9 +70,24 @@ public sealed class StreamingChannelSink : IPlaybackSink
     public async Task StopAsync(PlaybackTarget target, CancellationToken cancellationToken = default)
     {
         var client = _holder.GetClient();
-        var authToken = await client.GetAuthTokenAsync().ConfigureAwait(false);
-        await _stn.EnsureConnectedAsync(authToken, client.BotId, client.Username, cancellationToken)
-            .ConfigureAwait(false);
-        await _stn.StopAsync(target.ClanId, target.ChannelId, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var authToken = await client.GetAuthTokenAsync().ConfigureAwait(false);
+            await _stn.EnsureConnectedAsync(authToken, client.BotId, client.Username, cancellationToken)
+                .ConfigureAwait(false);
+            await _stn.StopAsync(target.ClanId, target.ChannelId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Streaming stop failed clan={ClanId} channel={ChannelId}; forcing STN disconnect",
+                target.ClanId,
+                target.ChannelId);
+            await _stn.DisconnectAsync().ConfigureAwait(false);
+        }
     }
+
+    public Task WaitUntilPublisherEndedAsync(CancellationToken cancellationToken = default)
+        => _stn.WaitUntilPublisherEndedAsync(cancellationToken);
 }

@@ -722,7 +722,7 @@ public sealed class MusicPlayer
             controlMessageId: includeControls ? state.ControlMessageId : null,
             controlUserId: includeControls ? state.ControlUserId : null,
             clanId: clanId,
-            includeMusicViz: includeMusicViz);
+            includeMusicViz: false);
     }
 
     private async Task<(TrackInfoEntity? Track, Mezon.Net.Client.MessageContent? Error)> TryResolveAsync(
@@ -1004,6 +1004,21 @@ public sealed class MusicPlayer
 
         if (mode != PlaybackMode.Voice)
         {
+            using var endedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var endedWait = _streamingSink.WaitUntilPublisherEndedAsync(endedCts.Token);
+            var streamWinner = await Task.WhenAny(durationWait, endedWait).ConfigureAwait(false);
+            if (streamWinner == endedWait)
+            {
+                durationCts.Cancel();
+                await endedWait.ConfigureAwait(false);
+                _logger.LogDebug(
+                    "Streaming track ended by STN signal title={Title} channel={ChannelId}",
+                    track.Title,
+                    target.ChannelId);
+                return;
+            }
+
+            endedCts.Cancel();
             await durationWait.ConfigureAwait(false);
             return;
         }

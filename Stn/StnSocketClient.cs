@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.WebSockets;
 using System.Text;
@@ -10,17 +11,21 @@ namespace Mezube.Stn;
 
 public sealed class StnSocketClient : IAsyncDisposable
 {
+    private static readonly TimeSpan CommandAckTimeout = TimeSpan.FromSeconds(20);
+
     private readonly BotOptions _options;
     private readonly ILogger<StnSocketClient> _logger;
     private readonly string _wsBase;
     private readonly SemaphoreSlim _sendGate = new(1, 1);
     private readonly ArrayBufferWriter<byte> _sendBuffer = new(512);
     private readonly byte[] _receiveBuffer = new byte[8 * 1024];
+    private readonly ConcurrentDictionary<string, TaskCompletionSource<string?>> _ackWaiters = new();
     private ClientWebSocket? _socket;
     private CancellationTokenSource? _receiveCts;
     private Task? _receiveTask;
     private string? _token;
     private long _botUserId;
+    private TaskCompletionSource? _publisherEnded;
 
     public StnSocketClient(BotOptions options, ILogger<StnSocketClient> logger)
     {
@@ -69,11 +74,61 @@ public sealed class StnSocketClient : IAsyncDisposable
         }
     }
 
-    public Task PlayAsync(long clanId, long streamChannelId, string fileUrl, CancellationToken cancellationToken = default)
-        => SendKeyAsync("connect_publisher", clanId, streamChannelId, fileUrl, cancellationToken);
+    public async Task PlayAsync(long clanId, long streamChannelId, string fileUrl, CancellationToken cancellationToken = default)
+    {
+        await SendKeyAndWaitAsync(
+                "connect_publisher",
+                "connect_publisher",
+                clanId,
+                streamChannelId,
+                fileUrl,
+                cancellationToken)
+            .ConfigureAwait(false);
+        // Arm end-waiter only after a successful publish ack so reconnect/disconnect
+        // during EnsureConnected cannot complete it early.
+        ResetPublisherEnded();
+    }
 
-    public Task StopAsync(long clanId, long streamChannelId, CancellationToken cancellationToken = default)
-        => SendKeyAsync("stop_publisher", clanId, streamChannelId, fileUrl: string.Empty, cancellationToken);
+    public async Task StopAsync(long clanId, long streamChannelId, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (IsConnected)
+            {
+                await SendKeyAsync("stop_publisher", clanId, streamChannelId, fileUrl: string.Empty, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            CompletePublisherEnded();
+            await DisconnectAsync().ConfigureAwait(false);
+        }
+    }
+
+    public Task WaitUntilPublisherEndedAsync(CancellationToken cancellationToken = default)
+    {
+        var tcs = _publisherEnded;
+        if (tcs is null)
+        {
+            // PlayAsync arms this after connect ack; if missing, fall back to duration-only wait.
+            return Task.Delay(Timeout.Infinite, cancellationToken);
+        }
+
+        return tcs.Task.WaitAsync(cancellationToken);
+    }
+
+    private void ResetPublisherEnded()
+    {
+        var next = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var previous = Interlocked.Exchange(ref _publisherEnded, next);
+        previous?.TrySetCanceled();
+    }
+
+    private void CompletePublisherEnded()
+    {
+        _publisherEnded?.TrySetResult();
+    }
 
     private static ClientWebSocket CreateSocket()
     {
@@ -121,6 +176,41 @@ public sealed class StnSocketClient : IAsyncDisposable
         return end < 0
             ? text[..(idx + 6)] + "***"
             : text[..(idx + 6)] + "***" + text[end..];
+    }
+
+    private async Task SendKeyAndWaitAsync(
+        string key,
+        string ackKey,
+        long clanId,
+        long streamChannelId,
+        string fileUrl,
+        CancellationToken cancellationToken)
+    {
+        var waiter = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_ackWaiters.TryAdd(ackKey, waiter))
+        {
+            throw new InvalidOperationException($"STN command already in flight: {ackKey}");
+        }
+
+        try
+        {
+            await SendKeyAsync(key, clanId, streamChannelId, fileUrl, cancellationToken).ConfigureAwait(false);
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(CommandAckTimeout);
+            var error = await waiter.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(error))
+            {
+                throw new InvalidOperationException($"STN {ackKey} failed: {error}");
+            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException($"Timed out waiting for STN {ackKey} ack.");
+        }
+        finally
+        {
+            _ackWaiters.TryRemove(ackKey, out _);
+        }
     }
 
     private async Task SendKeyAsync(
@@ -179,14 +269,23 @@ public sealed class StnSocketClient : IAsyncDisposable
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
                     _logger.LogWarning("STN WS closed by server: {Status}", result.CloseStatus);
+                    FailPending("STN websocket closed by server");
+                    CompletePublisherEnded();
                     break;
                 }
 
-                if (result.Count > 0 && _logger.IsEnabled(LogLevel.Debug))
+                if (result.Count <= 0)
                 {
-                    var text = Encoding.UTF8.GetString(_receiveBuffer, 0, result.Count);
+                    continue;
+                }
+
+                var text = Encoding.UTF8.GetString(_receiveBuffer, 0, result.Count);
+                if (_logger.IsEnabled(LogLevel.Debug))
+                {
                     _logger.LogTrace("STN WS message: {Message}", text);
                 }
+
+                HandleServerMessage(text);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -195,6 +294,90 @@ public sealed class StnSocketClient : IAsyncDisposable
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "STN receive loop ended");
+            FailPending(ex.Message);
+            CompletePublisherEnded();
+        }
+    }
+
+    private void HandleServerMessage(string text)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(text);
+            if (!doc.RootElement.TryGetProperty("Key", out var keyElement))
+            {
+                return;
+            }
+
+            var key = keyElement.GetString();
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                return;
+            }
+
+            if (string.Equals(key, "connect_publisher", StringComparison.Ordinal))
+            {
+                CompleteAck("connect_publisher", error: null);
+                return;
+            }
+
+            if (string.Equals(key, "error", StringComparison.Ordinal))
+            {
+                var error = ReadJsonValueAsString(doc.RootElement);
+                CompleteAck("connect_publisher", error ?? "unknown STN error");
+                CompletePublisherEnded();
+                return;
+            }
+
+            if (string.Equals(key, "info", StringComparison.Ordinal))
+            {
+                var info = ReadJsonValueAsString(doc.RootElement);
+                if (string.Equals(info, "stream_publisher_ended", StringComparison.Ordinal)
+                    || string.Equals(info, "stream publish failed", StringComparison.Ordinal)
+                    || (info?.Contains("stream publish failed", StringComparison.OrdinalIgnoreCase) ?? false))
+                {
+                    _logger.LogInformation("STN publisher ended info={Info}", info);
+                    CompletePublisherEnded();
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to parse STN WS message");
+        }
+    }
+
+    private static string? ReadJsonValueAsString(JsonElement root)
+    {
+        if (!root.TryGetProperty("Value", out var valueElement))
+        {
+            return null;
+        }
+
+        return valueElement.ValueKind switch
+        {
+            JsonValueKind.String => valueElement.GetString(),
+            JsonValueKind.Null => null,
+            _ => valueElement.ToString(),
+        };
+    }
+
+    private void CompleteAck(string ackKey, string? error)
+    {
+        if (_ackWaiters.TryRemove(ackKey, out var waiter))
+        {
+            waiter.TrySetResult(error);
+        }
+    }
+
+    private void FailPending(string error)
+    {
+        foreach (var key in _ackWaiters.Keys)
+        {
+            if (_ackWaiters.TryRemove(key, out var waiter))
+            {
+                waiter.TrySetResult(error);
+            }
         }
     }
 
@@ -239,6 +422,8 @@ public sealed class StnSocketClient : IAsyncDisposable
             _socket.Dispose();
             _socket = null;
         }
+
+        FailPending("STN websocket disconnected");
     }
 
     public async ValueTask DisposeAsync()
