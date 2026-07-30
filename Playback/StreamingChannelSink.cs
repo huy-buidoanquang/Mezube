@@ -1,6 +1,6 @@
 using Mezube.Bot;
 using Mezube.Domain.Entities;
-using Mezube.Media;
+using Mezube.Music;
 using Mezube.Stn;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics;
@@ -11,18 +11,18 @@ public sealed class StreamingChannelSink : IPlaybackSink
 {
     private readonly StnSocketClient _stn;
     private readonly StreamingChannelSinkHolder _holder;
-    private readonly PlayableMediaProcessor _processor;
+    private readonly TrackPrepService _prep;
     private readonly ILogger<StreamingChannelSink> _logger;
 
     public StreamingChannelSink(
         StnSocketClient stn,
         StreamingChannelSinkHolder holder,
-        PlayableMediaProcessor processor,
+        TrackPrepService prep,
         ILogger<StreamingChannelSink> logger)
     {
         _stn = stn;
         _holder = holder;
-        _processor = processor;
+        _prep = prep;
         _logger = logger;
     }
 
@@ -33,7 +33,7 @@ public sealed class StreamingChannelSink : IPlaybackSink
         var client = _holder.GetClient();
         var total = Stopwatch.StartNew();
         var process = Stopwatch.StartNew();
-        var playable = await _processor.ProcessTrackAsync(client, track, cancellationToken).ConfigureAwait(false);
+        var playable = await _prep.EnsurePreparedAsync(client, track, cancellationToken).ConfigureAwait(false);
         _logger.LogDebug(
             "Streaming media processed title={Title} clan={ClanId} channel={ChannelId} elapsedMs={ElapsedMs} url={Url}",
             track.Title,

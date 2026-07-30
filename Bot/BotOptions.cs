@@ -1,3 +1,4 @@
+using Mezube.Domain;
 using Mezube.Stn;
 using Microsoft.Extensions.Configuration;
 
@@ -56,6 +57,12 @@ public sealed class BotOptions
     public string VizPositionUrl { get; set; } = string.Empty;
     /// <summary>Public CDN base used after UploadAttachmentFile PUT.</summary>
     public string CdnBaseUrl { get; set; } = string.Empty;
+
+    public int MaxPrepConcurrency { get; set; } = MezubeConstants.MaxPrepConcurrency;
+    public int MaxConcurrentPlayback { get; set; } = MezubeConstants.MaxConcurrentPlayback;
+    public int MaxQueuePerClan { get; set; } = MezubeConstants.MaxQueuePerClan;
+    public long MaxAudioBytes { get; set; } = MezubeConstants.MaxAudioBytes;
+    public int InterTrackDelayMs { get; set; } = MezubeConstants.InterTrackDelayMs;
 
     public static BotOptions FromConfiguration(IConfiguration configuration)
     {
@@ -133,6 +140,31 @@ public sealed class BotOptions
         if (!IsAllowed(WhipOpusVbr, "on", "off", "constrained"))
         {
             throw new InvalidOperationException("Mezube:WhipOpusVbr must be on, off, or constrained.");
+        }
+
+        if (MaxPrepConcurrency < 1)
+        {
+            throw new InvalidOperationException("Mezube:MaxPrepConcurrency must be >= 1.");
+        }
+
+        if (MaxConcurrentPlayback < 1)
+        {
+            throw new InvalidOperationException("Mezube:MaxConcurrentPlayback must be >= 1.");
+        }
+
+        if (MaxQueuePerClan < 1)
+        {
+            throw new InvalidOperationException("Mezube:MaxQueuePerClan must be >= 1.");
+        }
+
+        if (MaxAudioBytes < 1)
+        {
+            throw new InvalidOperationException("Mezube:MaxAudioBytes must be >= 1.");
+        }
+
+        if (InterTrackDelayMs < 0)
+        {
+            throw new InvalidOperationException("Mezube:InterTrackDelayMs must be >= 0.");
         }
     }
 

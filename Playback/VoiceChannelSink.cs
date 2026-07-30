@@ -3,6 +3,7 @@ using System.Diagnostics;
 using Mezube.Bot;
 using Mezube.Domain.Entities;
 using Mezube.Media;
+using Mezube.Music;
 using Mezube.Stn;
 using Microsoft.Extensions.Logging;
 
@@ -21,7 +22,7 @@ public sealed class VoiceChannelSink : IPlaybackSink
     private readonly WhipFfmpegPublisher _whipPublisher;
     private readonly BotOptions _options;
     private readonly VoiceChannelSinkHolder _holder;
-    private readonly PlayableMediaProcessor _processor;
+    private readonly TrackPrepService _prep;
     private readonly ILogger<VoiceChannelSink> _logger;
     private readonly ConcurrentDictionary<string, VoiceTransport> _roomTransport = new(StringComparer.Ordinal);
 
@@ -31,7 +32,7 @@ public sealed class VoiceChannelSink : IPlaybackSink
         WhipFfmpegPublisher whipPublisher,
         BotOptions options,
         VoiceChannelSinkHolder holder,
-        PlayableMediaProcessor processor,
+        TrackPrepService prep,
         ILogger<VoiceChannelSink> logger)
     {
         _voiceV2 = voiceV2;
@@ -39,7 +40,7 @@ public sealed class VoiceChannelSink : IPlaybackSink
         _whipPublisher = whipPublisher;
         _options = options;
         _holder = holder;
-        _processor = processor;
+        _prep = prep;
         _logger = logger;
     }
 
@@ -66,7 +67,7 @@ public sealed class VoiceChannelSink : IPlaybackSink
         }
 
         var process = Stopwatch.StartNew();
-        var playable = await _processor.ProcessTrackAsync(client, track, cancellationToken).ConfigureAwait(false);
+        var playable = await _prep.EnsurePreparedAsync(client, track, cancellationToken).ConfigureAwait(false);
         _logger.LogDebug(
             "Voice media processed title={Title} room={Room} elapsedMs={ElapsedMs} url={Url}",
             track.Title,
@@ -95,6 +96,7 @@ public sealed class VoiceChannelSink : IPlaybackSink
             useWhip = false;
         }
 
+        string transport;
         if (useWhip)
         {
             _logger.LogInformation(
@@ -102,14 +104,36 @@ public sealed class VoiceChannelSink : IPlaybackSink
                 roomName,
                 playable.Title,
                 _options.WhipEncoderDisabled ? "copy" : "libopus");
-            await PlayWhipAsync(
-                    authToken,
+            try
+            {
+                await PlayWhipAsync(
+                        authToken,
+                        roomName,
+                        participantIdentity,
+                        playable.MediaUrl,
+                        playable.Title,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                transport = "whip";
+            }
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                // WHIP often fails on ICE/DTLS from home NAT; voice v2 (CDN publish) still works.
+                _logger.LogWarning(
+                    ex,
+                    "WHIP publish failed; falling back to voice v2 room={Room} title={Title}",
                     roomName,
-                    participantIdentity,
-                    playable.MediaUrl,
-                    playable.Title,
-                    cancellationToken)
-                .ConfigureAwait(false);
+                    playable.Title);
+                await PlayVoiceV2Async(
+                        authToken,
+                        roomName,
+                        participantIdentity,
+                        playable.MediaUrl,
+                        playable.Title,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                transport = "v2";
+            }
         }
         else
         {
@@ -117,21 +141,20 @@ public sealed class VoiceChannelSink : IPlaybackSink
                 "Voice transport selected transport=v2 room={Room} title={Title}",
                 roomName,
                 playable.Title);
-            await _voiceV2.PlayUntilPublishingAsync(
+            await PlayVoiceV2Async(
                     authToken,
                     roomName,
                     participantIdentity,
-                    _options.BotDisplayName,
                     playable.MediaUrl,
                     playable.Title,
                     cancellationToken)
                 .ConfigureAwait(false);
-            _roomTransport[roomName] = VoiceTransport.V2;
+            transport = "v2";
         }
 
         _logger.LogDebug(
             "Voice play pipeline completed transport={Transport} title={Title} room={Room} stnElapsedMs={StnElapsedMs} totalElapsedMs={TotalElapsedMs}",
-            useWhip ? "whip" : "v2",
+            transport,
             track.Title,
             roomName,
             play.ElapsedMilliseconds,
@@ -193,6 +216,26 @@ public sealed class VoiceChannelSink : IPlaybackSink
         {
             _logger.LogDebug(ex, "Voice v2 stop failed room={Room}", roomName);
         }
+    }
+
+    private async Task PlayVoiceV2Async(
+        string authToken,
+        string roomName,
+        string participantIdentity,
+        string mediaUrl,
+        string title,
+        CancellationToken cancellationToken)
+    {
+        await _voiceV2.PlayUntilPublishingAsync(
+                authToken,
+                roomName,
+                participantIdentity,
+                _options.BotDisplayName,
+                mediaUrl,
+                title,
+                cancellationToken)
+            .ConfigureAwait(false);
+        _roomTransport[roomName] = VoiceTransport.V2;
     }
 
     private async Task PlayWhipAsync(

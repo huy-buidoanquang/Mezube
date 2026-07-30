@@ -12,6 +12,10 @@ public sealed class TrackInfoEntity
     public string Source { get; init; } = "unknown";
     /// <summary>Source-scoped id (YouTube video id, URL hash, SoundCloud track id, …).</summary>
     public string? ExternalId { get; init; }
+    /// <summary>Reported or approximate source media size in bytes (from yt-dlp probe or store).</summary>
+    public long? SourceBytes { get; init; }
+    /// <summary>True when store/prep already marked this track over the max size.</summary>
+    public bool IsTooLarge { get; init; }
 
     public string DisplayDuration => Duration is { } d
         ? d.TotalHours >= 1
@@ -31,5 +35,7 @@ public sealed class TrackInfoEntity
             Duration = Duration,
             Source = Source,
             ExternalId = ExternalId,
+            SourceBytes = SourceBytes,
+            IsTooLarge = IsTooLarge,
         };
 }

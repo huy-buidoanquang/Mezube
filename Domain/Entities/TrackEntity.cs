@@ -9,6 +9,10 @@ public sealed class TrackEntity
     public string? ThumbnailUrl { get; init; }
     public TimeSpan? Duration { get; init; }
     public string? PlayableUrl { get; init; }
+    /// <summary>Persisted probe/download size when known.</summary>
+    public long? SourceBytes { get; init; }
+    /// <summary>True when this track exceeded the max audio size and must not be queued/played.</summary>
+    public bool IsTooLarge { get; init; }
 
     public bool HasPlayableUrl => !string.IsNullOrWhiteSpace(PlayableUrl);
 
@@ -28,6 +32,8 @@ public sealed class TrackEntity
             Duration = Duration,
             Source = Source,
             ExternalId = ExternalId,
+            SourceBytes = SourceBytes,
+            IsTooLarge = IsTooLarge,
         };
     }
 }

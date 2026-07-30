@@ -1,5 +1,5 @@
+using Mezube.Application;
 using Mezube.Domain.Entities;
-using Mezube.Domain.Persistence;
 using Mezube.Helpers;
 using Microsoft.Extensions.Logging;
 
@@ -7,10 +7,10 @@ namespace Mezube.Music;
 
 public sealed class DirectUrlTrackResolver : ITrackResolver
 {
-    private readonly ITrackDb _store;
+    private readonly ITrackLibraryService _store;
     private readonly ILogger<DirectUrlTrackResolver> _logger;
 
-    public DirectUrlTrackResolver(ITrackDb store, ILogger<DirectUrlTrackResolver> logger)
+    public DirectUrlTrackResolver(ITrackLibraryService store, ILogger<DirectUrlTrackResolver> logger)
     {
         _store = store;
         _logger = logger;

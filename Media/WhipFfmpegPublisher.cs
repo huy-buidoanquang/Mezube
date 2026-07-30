@@ -324,17 +324,28 @@ public sealed class WhipFfmpegPublisher
 
     private static bool LooksPublishing(string line)
     {
+        // Do not treat ICE candidate SDP lines as ready — only real publish/connect hints.
+        if (line.Contains("a=candidate:", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
         // ffmpeg whip muxer wording varies by version; accept common readiness hints.
         return line.Contains("WHIP", StringComparison.OrdinalIgnoreCase)
                && (line.Contains("publish", StringComparison.OrdinalIgnoreCase)
                    || line.Contains("connected", StringComparison.OrdinalIgnoreCase)
                    || line.Contains("established", StringComparison.OrdinalIgnoreCase)
-                   || line.Contains("DTLS", StringComparison.OrdinalIgnoreCase)
-                   || line.Contains("ICE", StringComparison.OrdinalIgnoreCase));
+                   || line.Contains("DTLS", StringComparison.OrdinalIgnoreCase));
     }
 
     private static bool LooksActionableWarning(string line)
     {
+        // ICE candidates are normal SDP noise during handshake.
+        if (line.Contains("a=candidate:", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
         return line.Contains("error", StringComparison.OrdinalIgnoreCase)
                || line.Contains("fail", StringComparison.OrdinalIgnoreCase)
                || line.Contains("invalid", StringComparison.OrdinalIgnoreCase)

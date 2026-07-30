@@ -1,5 +1,5 @@
 using Mezon.Net.Sdk;
-using Mezube.Domain.Persistence;
+using Mezube.Application;
 using Microsoft.Extensions.Logging;
 
 namespace Mezube.Music;
@@ -10,10 +10,10 @@ namespace Mezube.Music;
 /// </summary>
 public sealed class PlaybackAccess
 {
-    private readonly IClanSettingsStore _settings;
+    private readonly IClanSettingsService _settings;
     private readonly ILogger<PlaybackAccess> _logger;
 
-    public PlaybackAccess(IClanSettingsStore settings, ILogger<PlaybackAccess> logger)
+    public PlaybackAccess(IClanSettingsService settings, ILogger<PlaybackAccess> logger)
     {
         _settings = settings;
         _logger = logger;

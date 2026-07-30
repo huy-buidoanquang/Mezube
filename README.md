@@ -101,6 +101,18 @@ Mô hình kiểu JMusicBot (chưa có vote-skip):
 
 `!setdj @role|roleId|none` — chỉ clan owner. `!settings` hiện DJ role hiện tại.
 
+### Playback / queue limits
+
+| Limit | Default | Ý nghĩa |
+|-------|---------|---------|
+| Max queue / clan | 20 | Quá → title `Everyone wants a piece of me today! Please take a number and hold tight` |
+| Prep concurrency | 64 | Download/ffmpeg/CDN song song toàn bot |
+| Concurrent playback | 64 | Tối đa 64 clan đang phát |
+| Max audio size | 100MB | Quá → Searching cập nhật `Copyright strikes again! I can’t play this song right now.` |
+| Inter-track delay | 2s | Sau mỗi lần stop sink trước bài kế |
+
+Audio được **process ngầm** ngay khi vào queue (không đợi đến lượt phát). Persistence dùng service/repository (`ITrackLibraryService` / SQLite) — có thể thay Postgres sau.
+
 ## Lệnh
 
 | Lệnh | Ý nghĩa |

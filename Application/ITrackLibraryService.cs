@@ -1,8 +1,8 @@
 using Mezube.Domain.Entities;
 
-namespace Mezube.Domain.Persistence;
+namespace Mezube.Application;
 
-public interface ITrackDb
+public interface ITrackLibraryService
 {
     Task<TrackEntity?> TryGetAsync(string source, string externalId, CancellationToken cancellationToken = default);
 
@@ -23,4 +23,11 @@ public interface ITrackDb
         CancellationToken cancellationToken = default);
 
     Task TouchPlayedAsync(string source, string externalId, CancellationToken cancellationToken = default);
+
+    Task MarkTooLargeAsync(
+        string source,
+        string externalId,
+        long? sourceBytes = null,
+        string? title = null,
+        CancellationToken cancellationToken = default);
 }

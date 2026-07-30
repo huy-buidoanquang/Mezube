@@ -1,5 +1,6 @@
+using Mezube.Application;
+using Mezube.Domain;
 using Mezube.Domain.Entities;
-using Mezube.Domain.Persistence;
 using Mezube.Helpers;
 using Mezube.Media;
 using Microsoft.Extensions.Logging;
@@ -9,12 +10,12 @@ namespace Mezube.Music;
 public sealed class YoutubeTrackResolver : ITrackResolver
 {
     private readonly YtDlpProcessor _ytDlp;
-    private readonly ITrackDb _store;
+    private readonly ITrackLibraryService _store;
     private readonly ILogger<YoutubeTrackResolver> _logger;
 
     public YoutubeTrackResolver(
         YtDlpProcessor ytDlp,
-        ITrackDb store,
+        ITrackLibraryService store,
         ILogger<YoutubeTrackResolver> logger)
     {
         _ytDlp = ytDlp;
@@ -100,6 +101,8 @@ public sealed class YoutubeTrackResolver : ITrackResolver
                 Duration = resolved.Duration,
                 Source = resolved.Source,
                 ExternalId = externalId,
+                SourceBytes = resolved.SourceBytes,
+                IsTooLarge = resolved.IsTooLarge,
             };
         }
 
@@ -111,6 +114,21 @@ public sealed class YoutubeTrackResolver : ITrackResolver
                     externalId,
                     cancellationToken)
                 .ConfigureAwait(false);
+            if (existing is { IsTooLarge: true })
+            {
+                if (!TrackIdentityHelper.TryParseYoutubeId(trimmed, out _))
+                {
+                    await _store.SetAliasAsync(
+                            TrackIdentityHelper.NormalizeQueryAlias(trimmed),
+                            TrackIdentityHelper.SourceYoutube,
+                            externalId,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+
+                return existing.ToTrackInfo(requestedBy);
+            }
+
             if (existing?.HasPlayableUrl == true)
             {
                 if (!TrackIdentityHelper.TryParseYoutubeId(trimmed, out _))
@@ -136,6 +154,11 @@ public sealed class YoutubeTrackResolver : ITrackResolver
                         ThumbnailUrl = resolved.ThumbnailUrl,
                         Duration = resolved.Duration,
                         PlayableUrl = existing?.PlayableUrl,
+                        SourceBytes = resolved.SourceBytes ?? existing?.SourceBytes,
+                        IsTooLarge = resolved.IsTooLarge
+                            || (existing?.IsTooLarge ?? false)
+                            || (resolved.SourceBytes is long bytes
+                                && bytes > MezubeConstants.MaxAudioBytes),
                     },
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -148,6 +171,30 @@ public sealed class YoutubeTrackResolver : ITrackResolver
                         externalId,
                         cancellationToken)
                     .ConfigureAwait(false);
+            }
+
+            if (resolved.SourceBytes is long overBytes && overBytes > MezubeConstants.MaxAudioBytes)
+            {
+                await _store.MarkTooLargeAsync(
+                        TrackIdentityHelper.SourceYoutube,
+                        externalId,
+                        overBytes,
+                        resolved.Title,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                resolved = new TrackInfoEntity
+                {
+                    Title = resolved.Title,
+                    MediaUrl = resolved.MediaUrl,
+                    WebpageUrl = resolved.WebpageUrl,
+                    ThumbnailUrl = resolved.ThumbnailUrl,
+                    RequestedBy = resolved.RequestedBy,
+                    Duration = resolved.Duration,
+                    Source = resolved.Source,
+                    ExternalId = externalId,
+                    SourceBytes = resolved.SourceBytes,
+                    IsTooLarge = true,
+                };
             }
         }
 

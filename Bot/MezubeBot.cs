@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using Mezon.Net.Core;
 using Mezon.Net.Models;
 using Mezon.Net.Sdk;
@@ -9,6 +8,7 @@ using Mezube.Music;
 using Mezube.Ui;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using System.Collections.Concurrent;
 using MezonLogLevel = Mezon.Net.Logging.LogLevel;
 
 namespace Mezube.Bot;
@@ -57,7 +57,7 @@ public sealed class MezubeBot : BackgroundService
         var clientOptions = new MezonClientOptions(_options.BotId, _options.Token, _options.Host, _options.Port, _options.UseSsl)
         {
             ServerKey = _options.ServerKey,
-            TransportType = Mezon.Net.Core.TransportType.WebSocket,
+            TransportType = Mezon.Net.Core.TransportType.Tcp,
             LogLevel = MezonLogLevel.Trace,
             MaxTransportRequestsPerSecond = 60,
             MaxTransportRequestsPerMinute = 500,

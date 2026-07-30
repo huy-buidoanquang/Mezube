@@ -59,6 +59,8 @@ public sealed class YtDlpProcessor
             duration = TimeSpan.FromSeconds(seconds);
         }
 
+        long? sourceBytes = TryReadSourceBytes(root);
+
         string? externalId = null;
         if (root.TryGetProperty("id", out var idEl))
         {
@@ -92,7 +94,63 @@ public sealed class YtDlpProcessor
             Duration = duration,
             Source = TrackIdentityHelper.SourceYoutube,
             ExternalId = string.IsNullOrWhiteSpace(externalId) ? null : externalId,
+            SourceBytes = sourceBytes,
         };
+    }
+
+    private static long? TryReadSourceBytes(JsonElement root)
+    {
+        if (TryReadPositiveInt64(root, "filesize", out var exact))
+        {
+            return exact;
+        }
+
+        if (TryReadPositiveInt64(root, "filesize_approx", out var approx))
+        {
+            return approx;
+        }
+
+        if (root.TryGetProperty("requested_downloads", out var downloads)
+            && downloads.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in downloads.EnumerateArray())
+            {
+                if (TryReadPositiveInt64(item, "filesize", out var dExact))
+                {
+                    return dExact;
+                }
+
+                if (TryReadPositiveInt64(item, "filesize_approx", out var dApprox))
+                {
+                    return dApprox;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static bool TryReadPositiveInt64(JsonElement el, string name, out long value)
+    {
+        value = 0;
+        if (!el.TryGetProperty(name, out var prop))
+        {
+            return false;
+        }
+
+        if (prop.ValueKind == JsonValueKind.Number && prop.TryGetInt64(out var n) && n > 0)
+        {
+            value = n;
+            return true;
+        }
+
+        if (prop.ValueKind == JsonValueKind.Number && prop.TryGetDouble(out var d) && d > 0)
+        {
+            value = (long)d;
+            return true;
+        }
+
+        return false;
     }
 
     public async Task<string?> DownloadTrackAudioAsync(string source, string outputPathWithoutExt, CancellationToken cancellationToken = default)

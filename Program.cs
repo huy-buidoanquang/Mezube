@@ -1,5 +1,7 @@
-﻿using Mezube.Bot;
-using Mezube.Domain.Persistence;
+﻿using Mezube.Application;
+using Mezube.Bot;
+using Mezube.Infrastructure.Persistence;
+using Mezube.Infrastructure.Persistence.Sqlite;
 using Mezube.Media;
 using Mezube.Music;
 using Mezube.Playback;
@@ -56,10 +58,15 @@ internal static class Program
         builder.Services.AddSingleton<WhipFfmpegPublisher>();
         builder.Services.AddSingleton<MezonCdnUploader>();
         builder.Services.AddSingleton<MusicVizAssets>();
-        builder.Services.AddSingleton<SqliteTrackDb>();
-        builder.Services.AddSingleton<ITrackDb>(sp => sp.GetRequiredService<SqliteTrackDb>());
-        builder.Services.AddSingleton<IClanSettingsStore>(sp => sp.GetRequiredService<SqliteTrackDb>());
+
+        builder.Services.AddSingleton<SqliteDbConnectionFactory>();
+        builder.Services.AddSingleton<ITrackRepository, SqliteTrackRepository>();
+        builder.Services.AddSingleton<IClanSettingsRepository, SqliteClanSettingsRepository>();
+        builder.Services.AddSingleton<ITrackLibraryService, TrackLibraryService>();
+        builder.Services.AddSingleton<IClanSettingsService, ClanSettingsService>();
+
         builder.Services.AddSingleton<PlayableMediaProcessor>();
+        builder.Services.AddSingleton<TrackPrepService>();
         builder.Services.AddSingleton<YoutubeTrackResolver>();
         builder.Services.AddSingleton<DirectUrlTrackResolver>();
         builder.Services.AddSingleton<ITrackResolver>(sp =>

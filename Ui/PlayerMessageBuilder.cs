@@ -277,6 +277,33 @@ public static class PlayerMessageBuilder
     public static MessageContent NotAllowed(string description)
         => Error("Not allowed", description);
 
+    public static MessageContent CopyrightBlocked()
+        => Build(
+            Mezube.Domain.MezubeConstants.TitleCopyrightBlocked,
+            string.Empty,
+            ColorError,
+            thumbnailUrl: null,
+            url: null,
+            includeControls: false);
+
+    public static MessageContent QueueFull()
+        => Build(
+            Mezube.Domain.MezubeConstants.TitleQueueFull,
+            string.Empty,
+            ColorInfo,
+            thumbnailUrl: null,
+            url: null,
+            includeControls: false);
+
+    public static MessageContent PlaybackSlotsFull()
+        => Build(
+            Mezube.Domain.MezubeConstants.TitlePlaybackSlotsFull,
+            string.Empty,
+            ColorInfo,
+            thumbnailUrl: null,
+            url: null,
+            includeControls: false);
+
     private static string FormatPosition(TimeSpan position)
     {
         position = position < TimeSpan.Zero ? TimeSpan.Zero : position;

@@ -1,10 +1,10 @@
+using Mezon.Net.Sdk;
+using Mezube.Application;
 using Mezube.Bot;
 using Mezube.Domain.Entities;
-using Mezube.Domain.Persistence;
-using Mezon.Net.Sdk;
+using Mezube.Helpers;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics;
-using Mezube.Helpers;
 
 namespace Mezube.Media;
 
@@ -19,7 +19,7 @@ public sealed class PlayableMediaProcessor
     private readonly YtDlpProcessor _ytDlp;
     private readonly FfmpegProcessor _ffmpeg;
     private readonly MezonCdnUploader _uploader;
-    private readonly ITrackDb _store;
+    private readonly ITrackLibraryService _store;
     private readonly ILogger<PlayableMediaProcessor> _logger;
 
     public PlayableMediaProcessor(
@@ -27,7 +27,7 @@ public sealed class PlayableMediaProcessor
         YtDlpProcessor ytDlp,
         FfmpegProcessor ffmpeg,
         MezonCdnUploader uploader,
-        ITrackDb store,
+        ITrackLibraryService store,
         ILogger<PlayableMediaProcessor> logger)
     {
         _options = options;
@@ -47,10 +47,29 @@ public sealed class PlayableMediaProcessor
         var pipelineStopwatch = Stopwatch.StartNew();
         var identity = ResolveIdentity(track);
 
+        if (track.IsTooLarge
+            || (track.SourceBytes is long reported && reported > _options.MaxAudioBytes))
+        {
+            await MarkTooLargeIfPossibleAsync(identity, track, track.SourceBytes, cancellationToken)
+                .ConfigureAwait(false);
+            throw new AudioTooLargeException(
+                track.Title,
+                track.SourceBytes ?? 0,
+                _options.MaxAudioBytes);
+        }
+
         if (identity is { } id)
         {
             var stored = await _store.TryGetAsync(id.Source, id.ExternalId, cancellationToken)
                 .ConfigureAwait(false);
+            if (stored is { IsTooLarge: true })
+            {
+                throw new AudioTooLargeException(
+                    track.Title,
+                    stored.SourceBytes ?? track.SourceBytes ?? 0,
+                    _options.MaxAudioBytes);
+            }
+
             if (stored?.HasPlayableUrl == true)
             {
                 if (await _uploader.IsReachableAsync(stored.PlayableUrl!, cancellationToken).ConfigureAwait(false))
@@ -63,7 +82,10 @@ public sealed class PlayableMediaProcessor
                         stopwatch.ElapsedMilliseconds);
                     await _store.TouchPlayedAsync(id.Source, id.ExternalId, cancellationToken)
                         .ConfigureAwait(false);
-                    return stored.ToTrackInfo(track.RequestedBy);
+                    var cached = stored.ToTrackInfo(track.RequestedBy);
+                    return track.RequestedByUserId is long uid
+                        ? cached.WithRequester(uid, track.RequestedBy)
+                        : cached;
                 }
 
                 _logger.LogWarning(
@@ -109,6 +131,15 @@ public sealed class PlayableMediaProcessor
             {
                 throw new InvalidOperationException("yt-dlp download returned no file.");
             }
+
+            var fileLength = new FileInfo(downloaded).Length;
+            if (fileLength > _options.MaxAudioBytes)
+            {
+                await MarkTooLargeIfPossibleAsync(identity, track, fileLength, cancellationToken)
+                    .ConfigureAwait(false);
+                throw new AudioTooLargeException(track.Title, fileLength, _options.MaxAudioBytes);
+            }
+
             _logger.LogDebug(
                 "Prepare download completed title={Title} inputExt={InputExt} elapsedMs={ElapsedMs}",
                 track.Title,
@@ -166,6 +197,8 @@ public sealed class PlayableMediaProcessor
                             ThumbnailUrl = track.ThumbnailUrl,
                             Duration = track.Duration,
                             PlayableUrl = cdnUrl,
+                            SourceBytes = track.SourceBytes,
+                            IsTooLarge = track.IsTooLarge,
                         },
                         cancellationToken)
                     .ConfigureAwait(false);
@@ -182,9 +215,12 @@ public sealed class PlayableMediaProcessor
                 WebpageUrl = track.WebpageUrl,
                 ThumbnailUrl = track.ThumbnailUrl,
                 RequestedBy = track.RequestedBy,
+                RequestedByUserId = track.RequestedByUserId,
                 Duration = track.Duration,
                 Source = track.Source,
                 ExternalId = identity?.ExternalId ?? track.ExternalId,
+                SourceBytes = track.SourceBytes,
+                IsTooLarge = track.IsTooLarge,
             };
         }
         finally
@@ -217,6 +253,32 @@ public sealed class PlayableMediaProcessor
         }
 
         return null;
+    }
+
+    private async Task MarkTooLargeIfPossibleAsync(
+        (string Source, string ExternalId)? identity,
+        TrackInfoEntity track,
+        long? sourceBytes,
+        CancellationToken cancellationToken)
+    {
+        if (identity is not { } id)
+        {
+            return;
+        }
+
+        try
+        {
+            await _store.MarkTooLargeAsync(id.Source, id.ExternalId, sourceBytes, track.Title, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Failed to persist too-large flag for {Source}/{Id}",
+                id.Source,
+                id.ExternalId);
+        }
     }
 
     private async Task<string> EnsureOggAsync(string inputPath, CancellationToken cancellationToken)

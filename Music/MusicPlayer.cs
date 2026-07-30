@@ -1,8 +1,10 @@
 ﻿using Mezon.Net.Core;
 using Mezon.Net.Sdk;
 using Mezon.Net.Sdk.Commands;
+using Mezube.Bot;
 using Mezube.Domain.Entities;
 using Mezube.Helpers;
+using Mezube.Media;
 using Mezube.Playback;
 using Mezube.Ui;
 using Microsoft.Extensions.Logging;
@@ -19,8 +21,11 @@ public sealed class MusicPlayer
     private readonly BindStore _binds;
     private readonly MusicVizAssets _viz;
     private readonly PlaybackAccess _access;
+    private readonly TrackPrepService _prep;
+    private readonly BotOptions _options;
     private readonly ILogger<MusicPlayer> _logger;
     private readonly ConcurrentDictionary<long, ClanPlayerState> _states = new();
+    private readonly SemaphoreSlim _playSlots;
 
     public MusicPlayer(
         ITrackResolver resolver,
@@ -29,6 +34,8 @@ public sealed class MusicPlayer
         BindStore binds,
         MusicVizAssets viz,
         PlaybackAccess access,
+        TrackPrepService prep,
+        BotOptions options,
         ILogger<MusicPlayer> logger)
     {
         _resolver = resolver;
@@ -37,7 +44,10 @@ public sealed class MusicPlayer
         _binds = binds;
         _viz = viz;
         _access = access;
+        _prep = prep;
+        _options = options;
         _logger = logger;
+        _playSlots = new SemaphoreSlim(Math.Max(1, options.MaxConcurrentPlayback));
     }
 
     public async Task PlayStreamingAsync(
@@ -108,9 +118,31 @@ public sealed class MusicPlayer
             return;
         }
 
+        if (IsTooLarge(track))
+        {
+            await UpdateOrReplyAsync(
+                    ctx,
+                    preparing.MessageId,
+                    PlayerMessageBuilder.CopyrightBlocked(),
+                    preparingCreateTime)
+                .ConfigureAwait(false);
+            return;
+        }
+
         var state = GetState(clanId);
+        if (state.Queue.TotalCount >= _options.MaxQueuePerClan)
+        {
+            await UpdateOrReplyAsync(
+                    ctx,
+                    preparing.MessageId,
+                    PlayerMessageBuilder.QueueFull(),
+                    preparingCreateTime)
+                .ConfigureAwait(false);
+            return;
+        }
+
         var target = new PlaybackTarget(clanId, channelId, ChannelLabel: channel.Name);
-        var play = new QueuedPlay(track, target);
+        var play = new QueuedPlay(track, target, preparing.MessageId, preparingCreateTime);
         if (state.IsPlaying)
         {
             if (state.Mode != PlaybackMode.Streaming)
@@ -127,10 +159,22 @@ public sealed class MusicPlayer
             }
 
             state.Queue.Enqueue(play);
+            StartBackgroundPrep(ctx.Client, state, play);
             await UpdateOrReplyAsync(
                     ctx,
                     preparing.MessageId,
                     PlayerMessageBuilder.Queued(track, state.Queue.Count, channelId),
+                    preparingCreateTime)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        if (!await TryAcquirePlaySlotAsync().ConfigureAwait(false))
+        {
+            await UpdateOrReplyAsync(
+                    ctx,
+                    preparing.MessageId,
+                    PlayerMessageBuilder.PlaybackSlotsFull(),
                     preparingCreateTime)
                 .ConfigureAwait(false);
             return;
@@ -146,6 +190,9 @@ public sealed class MusicPlayer
         state.ControlMessageCreateTimeSeconds = preparingCreateTime;
         state.ControlUserId = ctx.Author.Id;
         state.ClanId = clanId;
+        state.HoldsPlaySlot = true;
+        ResetPrepToken(state);
+        StartBackgroundPrep(ctx.Client, state, play);
         _ = PumpAsync(state, clanId, cancellationToken);
     }
 
@@ -217,9 +264,31 @@ public sealed class MusicPlayer
             return;
         }
 
+        if (IsTooLarge(track))
+        {
+            await UpdateOrReplyAsync(
+                    ctx,
+                    preparing.MessageId,
+                    PlayerMessageBuilder.CopyrightBlocked(),
+                    preparingCreateTime)
+                .ConfigureAwait(false);
+            return;
+        }
+
         var state = GetState(clanId);
+        if (state.Queue.TotalCount >= _options.MaxQueuePerClan)
+        {
+            await UpdateOrReplyAsync(
+                    ctx,
+                    preparing.MessageId,
+                    PlayerMessageBuilder.QueueFull(),
+                    preparingCreateTime)
+                .ConfigureAwait(false);
+            return;
+        }
+
         var target = new PlaybackTarget(clanId, channelId, RoomName: channelId.ToString(), ChannelLabel: channel.Name);
-        var play = new QueuedPlay(track, target);
+        var play = new QueuedPlay(track, target, preparing.MessageId, preparingCreateTime);
         if (state.IsPlaying)
         {
             if (state.Mode != PlaybackMode.Voice)
@@ -236,10 +305,22 @@ public sealed class MusicPlayer
             }
 
             state.Queue.Enqueue(play);
+            StartBackgroundPrep(ctx.Client, state, play);
             await UpdateOrReplyAsync(
                     ctx,
                     preparing.MessageId,
                     PlayerMessageBuilder.Queued(track, state.Queue.Count, channelId),
+                    preparingCreateTime)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        if (!await TryAcquirePlaySlotAsync().ConfigureAwait(false))
+        {
+            await UpdateOrReplyAsync(
+                    ctx,
+                    preparing.MessageId,
+                    PlayerMessageBuilder.PlaybackSlotsFull(),
                     preparingCreateTime)
                 .ConfigureAwait(false);
             return;
@@ -255,7 +336,77 @@ public sealed class MusicPlayer
         state.ControlMessageCreateTimeSeconds = preparingCreateTime;
         state.ControlUserId = ctx.Author.Id;
         state.ClanId = clanId;
+        state.HoldsPlaySlot = true;
+        ResetPrepToken(state);
+        StartBackgroundPrep(ctx.Client, state, play);
         _ = PumpAsync(state, clanId, cancellationToken);
+    }
+
+    private bool IsTooLarge(TrackInfoEntity track)
+        => track.SourceBytes is long bytes && bytes > _options.MaxAudioBytes;
+
+    private Task<bool> TryAcquirePlaySlotAsync()
+        => _playSlots.WaitAsync(0);
+
+    private void ReleasePlaySlot(ClanPlayerState state)
+    {
+        if (!state.HoldsPlaySlot)
+        {
+            return;
+        }
+
+        state.HoldsPlaySlot = false;
+        _playSlots.Release();
+    }
+
+    private static void ResetPrepToken(ClanPlayerState state)
+    {
+        state.PrepCts?.Cancel();
+        state.PrepCts?.Dispose();
+        state.PrepCts = new CancellationTokenSource();
+    }
+
+    private void StartBackgroundPrep(MezonClient client, ClanPlayerState state, QueuedPlay play)
+    {
+        var ct = state.PrepCts?.Token ?? CancellationToken.None;
+        _prep.StartBackgroundPrep(client, play.Track, ct, ex =>
+        {
+            if (ex is not AudioTooLargeException)
+            {
+                return;
+            }
+
+            _ = HandlePrepTooLargeAsync(state, play);
+        });
+    }
+
+    private async Task HandlePrepTooLargeAsync(ClanPlayerState state, QueuedPlay play)
+    {
+        try
+        {
+            state.Queue.TryRemovePending(item =>
+                ReferenceEquals(item.Track, play.Track)
+                || (item.Track.Source == play.Track.Source
+                    && item.Track.ExternalId == play.Track.ExternalId
+                    && item.ReplyMessageId == play.ReplyMessageId));
+
+            if (play.ReplyMessageId is long messageId
+                && state.NotifyClient is not null
+                && state.NotifyChannelId is long channelId)
+            {
+                var channel = await state.NotifyClient.GetChannelAsync(channelId).ConfigureAwait(false);
+                await channel.UpdateMessageAsync(
+                        messageId,
+                        PlayerMessageBuilder.CopyrightBlocked(),
+                        hideEdited: true,
+                        createTimeSeconds: play.ReplyCreateTimeSeconds)
+                    .ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to apply copyright block for {Title}", play.Track.Title);
+        }
     }
 
     public async Task SkipAsync(ICommandContext ctx, CancellationToken cancellationToken = default)
@@ -342,11 +493,11 @@ public sealed class MusicPlayer
         var state = GetState(clanId);
         state.Queue.Clear();
         state.LastDestroyReason = PlayerDestroyReason.UserStop;
+        state.PrepCts?.Cancel();
         // Wake the pump; it owns the single StopAsync for the active track.
         state.CancelTrack();
         state.IsPlaying = false;
         state.TrackStartedAt = null;
-        await state.StopNowPlayingProgressAsync().ConfigureAwait(false);
         ScheduleIdleDestroy(clanId, state);
     }
 
@@ -409,7 +560,6 @@ public sealed class MusicPlayer
         var state = GetState(clanId);
         if (state.Queue.Current is null)
         {
-            await state.StopNowPlayingProgressAsync().ConfigureAwait(false);
             await ctx.ReplyAsync(PlayerMessageBuilder.Status("Nothing playing", "Queue is empty."))
                 .ConfigureAwait(false);
             return;
@@ -432,9 +582,6 @@ public sealed class MusicPlayer
                 hideEdited: true,
                 createTimeSeconds: state.ControlMessageCreateTimeSeconds)
             .ConfigureAwait(false);
-        await state.StopNowPlayingProgressAsync().ConfigureAwait(false);
-        // Temporarily disabled: live progress edits interrupt embed Animation.
-        // state.NowPlayingProgress = FakeProgressBar.Start(...);
     }
 
     public async Task SetDjRoleAsync(ICommandContext ctx, CancellationToken cancellationToken = default)
@@ -632,6 +779,7 @@ public sealed class MusicPlayer
     {
         if (!await state.TryEnterPumpAsync().ConfigureAwait(false))
         {
+            ReleasePlaySlot(state);
             return;
         }
 
@@ -676,6 +824,12 @@ public sealed class MusicPlayer
                         target.ChannelId,
                         playStopwatch.ElapsedMilliseconds);
                     state.TrackStartedAt = DateTimeOffset.UtcNow;
+                    if (item.ReplyMessageId is long replyId)
+                    {
+                        state.ControlMessageId = replyId;
+                        state.ControlMessageCreateTimeSeconds = item.ReplyCreateTimeSeconds;
+                    }
+
                     await SendNowPlayingAsync(state, includeMusicViz: true).ConfigureAwait(false);
 
                     try
@@ -694,6 +848,10 @@ public sealed class MusicPlayer
                     {
                         _logger.LogWarning(ex, "Stop sink failed channel={ChannelId}", target.ChannelId);
                     }
+                }
+                catch (AudioTooLargeException)
+                {
+                    await NotifyCopyrightBlockedAsync(state, item).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
@@ -720,7 +878,15 @@ public sealed class MusicPlayer
                 {
                     state.TrackStartedAt = null;
                     state.ClearTrackCts();
-                    await state.StopNowPlayingProgressAsync().ConfigureAwait(false);
+                }
+
+                try
+                {
+                    await Task.Delay(_options.InterTrackDelayMs, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    break;
                 }
             }
         }
@@ -728,11 +894,42 @@ public sealed class MusicPlayer
         {
             state.IsPlaying = false;
             state.ExitPump();
+            ReleasePlaySlot(state);
             if (state.Queue.Count == 0 && state.Queue.Current is null)
             {
                 ScheduleIdleDestroy(clanId, state);
             }
         }
+    }
+
+    private async Task NotifyCopyrightBlockedAsync(ClanPlayerState state, QueuedPlay item)
+    {
+        if (item.ReplyMessageId is long messageId
+            && state.NotifyClient is not null
+            && state.NotifyChannelId is long channelId)
+        {
+            try
+            {
+                var channel = await state.NotifyClient.GetChannelAsync(channelId).ConfigureAwait(false);
+                await channel.UpdateMessageAsync(
+                        messageId,
+                        PlayerMessageBuilder.CopyrightBlocked(),
+                        hideEdited: true,
+                        createTimeSeconds: item.ReplyCreateTimeSeconds)
+                    .ConfigureAwait(false);
+                return;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to update copyright message for {Title}", item.Track.Title);
+            }
+        }
+
+        await NotifyPlaybackFailureAsync(state, item.Track, new AudioTooLargeException(
+                item.Track.Title,
+                item.Track.SourceBytes ?? 0,
+                _options.MaxAudioBytes))
+            .ConfigureAwait(false);
     }
 
     private void ScheduleIdleDestroy(long clanId, ClanPlayerState state)
@@ -891,7 +1088,9 @@ public sealed class MusicPlayer
         try
         {
             var channel = await state.NotifyClient.GetChannelAsync(channelId).ConfigureAwait(false);
-            var content = PlayerMessageBuilder.FromStnFailure(ex) ?? PlayerMessageBuilder.Awkward();
+            var content = ex is AudioTooLargeException
+                ? PlayerMessageBuilder.CopyrightBlocked()
+                : PlayerMessageBuilder.FromStnFailure(ex) ?? PlayerMessageBuilder.Awkward();
             await channel.SendAsync(content).ConfigureAwait(false);
         }
         catch (Exception notifyEx)
@@ -950,10 +1149,11 @@ public sealed class MusicPlayer
         public long? ControlMessageId { get; set; }
         public uint? ControlMessageCreateTimeSeconds { get; set; }
         public long? ControlUserId { get; set; }
-        public FakeProgressBar? NowPlayingProgress { get; set; }
         public MezonClient? NotifyClient { get; set; }
         public long? NotifyChannelId { get; set; }
         public PlayerDestroyReason LastDestroyReason { get; set; }
+        public bool HoldsPlaySlot { get; set; }
+        public CancellationTokenSource? PrepCts { get; set; }
 
         public TimeSpan GetElapsed()
         {
@@ -964,16 +1164,6 @@ public sealed class MusicPlayer
 
             var elapsed = DateTimeOffset.UtcNow - started;
             return elapsed < TimeSpan.Zero ? TimeSpan.Zero : elapsed;
-        }
-
-        public async Task StopNowPlayingProgressAsync()
-        {
-            var progress = NowPlayingProgress;
-            NowPlayingProgress = null;
-            if (progress is not null)
-            {
-                await progress.StopAsync().ConfigureAwait(false);
-            }
         }
 
         public async Task<bool> TryEnterPumpAsync()

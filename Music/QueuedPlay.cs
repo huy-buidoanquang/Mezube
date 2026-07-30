@@ -8,4 +8,8 @@ namespace Mezube.Music;
 /// can play in another voice/stream channel of the same clan after the current track ends
 /// (still sequential — never concurrent rooms for one clan).
 /// </summary>
-public sealed record QueuedPlay(TrackInfoEntity Track, PlaybackTarget Target);
+public sealed record QueuedPlay(
+    TrackInfoEntity Track,
+    PlaybackTarget Target,
+    long? ReplyMessageId = null,
+    uint? ReplyCreateTimeSeconds = null);

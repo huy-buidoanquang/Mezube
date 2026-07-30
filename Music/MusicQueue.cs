@@ -16,6 +16,18 @@ public sealed class MusicQueue
         get { lock (_gate) return _items.Count; }
     }
 
+    /// <summary>Current track (if any) plus pending queue length.</summary>
+    public int TotalCount
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _items.Count + (CurrentItem is null ? 0 : 1);
+            }
+        }
+    }
+
     public IReadOnlyList<QueuedPlay> Snapshot()
     {
         lock (_gate)
@@ -30,6 +42,39 @@ public sealed class MusicQueue
         lock (_gate)
         {
             _items.Enqueue(item);
+        }
+    }
+
+    public bool TryRemovePending(Func<QueuedPlay, bool> predicate)
+    {
+        ArgumentNullException.ThrowIfNull(predicate);
+        lock (_gate)
+        {
+            if (_items.Count == 0)
+            {
+                return false;
+            }
+
+            var kept = new Queue<QueuedPlay>(_items.Count);
+            var removed = false;
+            while (_items.Count > 0)
+            {
+                var item = _items.Dequeue();
+                if (!removed && predicate(item))
+                {
+                    removed = true;
+                    continue;
+                }
+
+                kept.Enqueue(item);
+            }
+
+            while (kept.Count > 0)
+            {
+                _items.Enqueue(kept.Dequeue());
+            }
+
+            return removed;
         }
     }
 

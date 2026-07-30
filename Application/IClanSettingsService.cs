@@ -1,6 +1,6 @@
-namespace Mezube.Domain.Persistence;
+namespace Mezube.Application;
 
-public interface IClanSettingsStore
+public interface IClanSettingsService
 {
     Task<long?> GetDjRoleIdAsync(long clanId, CancellationToken cancellationToken = default);
 
