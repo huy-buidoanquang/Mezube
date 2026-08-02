@@ -14,10 +14,14 @@ namespace Mezube.Music;
 public sealed class TrackPrepService
 {
     private readonly PlayableMediaProcessor _processor;
-    private readonly BotOptions _options;
     private readonly ILogger<TrackPrepService> _logger;
     private readonly SemaphoreSlim _gate;
-    private readonly ConcurrentDictionary<string, Task<TrackInfoEntity>> _inflight = new(StringComparer.Ordinal);
+    /// <summary>
+    /// Lazy wraps the prep Task so ConcurrentDictionary.GetOrAdd cannot start ProcessTrackAsync
+    /// twice under race (valueFactory may run more than once; Lazy.Value runs once).
+    /// </summary>
+    private readonly ConcurrentDictionary<string, Lazy<Task<TrackInfoEntity>>> _inflight =
+        new(StringComparer.Ordinal);
 
     public TrackPrepService(
         PlayableMediaProcessor processor,
@@ -25,7 +29,6 @@ public sealed class TrackPrepService
         ILogger<TrackPrepService> logger)
     {
         _processor = processor;
-        _options = options;
         _logger = logger;
         _gate = new SemaphoreSlim(Math.Max(1, options.MaxPrepConcurrency));
     }
@@ -38,11 +41,20 @@ public sealed class TrackPrepService
         var key = BuildKey(track);
         if (key is null)
         {
-            return RunUngatedAsync(client, track, cancellationToken);
+            // No stable identity — cannot safely share; still gated to limit blast radius.
+            return RunGatedUngatedKeyAsync(client, track, cancellationToken);
         }
 
-        var task = _inflight.GetOrAdd(key, _ => RunGatedAsync(client, track, key, cancellationToken));
-        return AwaitSharedAsync(task, key, cancellationToken);
+        // GetOrAdd may invoke this factory more than once under contention; creating Lazy is cheap.
+        // Only the Lazy that wins the dictionary slot has .Value read — that runs prep exactly once.
+        var lazy = _inflight.GetOrAdd(
+            key,
+            static (k, state) => new Lazy<Task<TrackInfoEntity>>(
+                () => state.self.RunGatedAsync(state.client, state.track, k),
+                LazyThreadSafetyMode.ExecutionAndPublication),
+            (self: this, client, track));
+
+        return AwaitSharedAsync(lazy.Value, cancellationToken);
     }
 
     /// <summary>Fire-and-forget prep for a queued item; errors are logged by the caller continuation.</summary>
@@ -60,7 +72,7 @@ public sealed class TrackPrepService
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                // stop/clear
+                // stop/clear — waiter cancelled; shared prep (if any) may still finish.
             }
             catch (Exception ex)
             {
@@ -73,13 +85,15 @@ public sealed class TrackPrepService
     private async Task<TrackInfoEntity> RunGatedAsync(
         MezonClient client,
         TrackInfoEntity track,
-        string key,
-        CancellationToken cancellationToken)
+        string key)
     {
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        // Shared work must not use a per-caller CT: CancelTrack / PrepCts cancel would abort
+        // Client work for every waiter, and racing factories used to capture different tokens.
+        await _gate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
-            return await _processor.ProcessTrackAsync(client, track, cancellationToken).ConfigureAwait(false);
+            return await _processor.ProcessTrackAsync(client, track, CancellationToken.None)
+                .ConfigureAwait(false);
         }
         finally
         {
@@ -88,15 +102,25 @@ public sealed class TrackPrepService
         }
     }
 
-    private Task<TrackInfoEntity> RunUngatedAsync(
+    private async Task<TrackInfoEntity> RunGatedUngatedKeyAsync(
         MezonClient client,
         TrackInfoEntity track,
         CancellationToken cancellationToken)
-        => _processor.ProcessTrackAsync(client, track, cancellationToken);
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await _processor.ProcessTrackAsync(client, track, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
 
     private static async Task<TrackInfoEntity> AwaitSharedAsync(
         Task<TrackInfoEntity> task,
-        string key,
         CancellationToken cancellationToken)
     {
         if (task.IsCompleted)
@@ -132,6 +156,13 @@ public sealed class TrackPrepService
             && !string.IsNullOrWhiteSpace(track.MediaUrl))
         {
             return $"{TrackIdentityHelper.SourceUrl}:{TrackIdentityHelper.ForDirectUrl(track.MediaUrl)}";
+        }
+
+        // Last-resort share key so background + Play still dedupe when ExternalId is missing.
+        var url = track.WebpageUrl ?? track.MediaUrl;
+        if (!string.IsNullOrWhiteSpace(url))
+        {
+            return $"fallback:{TrackIdentityHelper.ForDirectUrl(url)}";
         }
 
         return null;

@@ -3,6 +3,7 @@ using Mezon.Net.Sdk.Builders;
 using Mezube.Bot;
 using Mezube.Domain.Entities;
 using Mezube.Music;
+using Mezube.Playback;
 using Mezube.Stn;
 using System.Buffers;
 using System.Net;
@@ -111,7 +112,7 @@ public static class PlayerMessageBuilder
         TrackInfoEntity track,
         int queueCount,
         string destination,
-        TimeSpan? position = null,
+        string? nextTitle = null,
         long? controlMessageId = null,
         long? controlUserId = null,
         long? clanId = null,
@@ -119,22 +120,12 @@ public static class PlayerMessageBuilder
     {
         var fields = new List<MessageEmbedField>
         {
-            new("Destination", Escape(destination), inline: true),
+            new("Channel", Escape(destination), inline: true),
             new("Duration", track.DisplayDuration, inline: true),
             new("Source", track.Source, inline: true),
-            new("Queued next", queueCount.ToString(), inline: true),
+            new("Queued", queueCount.ToString(), inline: true),
+            new("Next", Escape(TruncateTitle(nextTitle)), inline: true),
         };
-
-        if (position is { } p)
-        {
-            // Clamp to known duration (if present) to avoid displaying values past the end.
-            if (track.Duration is { } d && d > TimeSpan.Zero && p > d)
-            {
-                p = d;
-            }
-
-            fields.Add(new("Timeline", $"{FormatPosition(p)} / {track.DisplayDuration}", inline: true));
-        }
 
         if (!string.IsNullOrWhiteSpace(track.RequestedBy))
         {
@@ -167,6 +158,24 @@ public static class PlayerMessageBuilder
             fields: fields,
             skipButtonId: skipId,
             stopButtonId: stopId);
+    }
+
+    private const int NextTitleMaxChars = 64;
+
+    private static string TruncateTitle(string? title)
+    {
+        if (string.IsNullOrWhiteSpace(title))
+        {
+            return "—";
+        }
+
+        var trimmed = title.Trim();
+        if (trimmed.Length <= NextTitleMaxChars)
+        {
+            return trimmed;
+        }
+
+        return trimmed[..(NextTitleMaxChars - 3)] + "...";
     }
 
     public static MessageContent Queued(TrackInfoEntity track, int position, long? channelId = null)
@@ -232,7 +241,7 @@ public static class PlayerMessageBuilder
         {
             fields.Add(new("Now", Escape(current.Track.Title), inline: true));
             fields.Add(new("Duration", current.Track.DisplayDuration, inline: true));
-            fields.Add(new("Channel", $"{current.Target.ChannelId}", inline: true));
+            fields.Add(new("Channel", Escape(FormatChannelLabel(current.Target)), inline: true));
         }
 
         for (var i = 0; i < upcoming.Count; i++)
@@ -240,7 +249,7 @@ public static class PlayerMessageBuilder
             var item = upcoming[i];
             fields.Add(new($"#{i + 1}", Escape(item.Track.Title), inline: true));
             fields.Add(new("Duration", item.Track.DisplayDuration, inline: true));
-            fields.Add(new("Channel", $"{item.Target.ChannelId}", inline: true));
+            fields.Add(new("Channel", Escape(FormatChannelLabel(item.Target)), inline: true));
         }
 
         var description = current is null
@@ -277,7 +286,12 @@ public static class PlayerMessageBuilder
     public static string FormatDestination(string mode, string? channelLabel)
         => string.IsNullOrWhiteSpace(channelLabel)
             ? mode
-            : $"{mode} · {channelLabel}";
+            : $"{mode} · #{channelLabel}";
+
+    private static string FormatChannelLabel(PlaybackTarget target)
+        => string.IsNullOrWhiteSpace(target.ChannelLabel)
+            ? target.ChannelId.ToString()
+            : target.ChannelLabel!;
 
     public static MessageContent NotAllowed(string description)
         => Error("Not allowed", description);
@@ -308,14 +322,6 @@ public static class PlayerMessageBuilder
             thumbnailUrl: null,
             url: null,
             includeControls: false);
-
-    private static string FormatPosition(TimeSpan position)
-    {
-        position = position < TimeSpan.Zero ? TimeSpan.Zero : position;
-        return position.TotalHours >= 1
-            ? position.ToString(@"h\:mm\:ss")
-            : position.ToString(@"m\:ss");
-    }
 
     public static MessageContent Status(string title, string description)
         => Build(title, description, ColorInfo, thumbnailUrl: null, url: null, includeControls: false);
@@ -525,9 +531,8 @@ public static class PlayerMessageBuilder
     }
 
     /// <summary>
-    /// Dense multi-cell EQ: each Mezon pool cell holds several thin bars with a
-    /// continuous rainbow hue across the whole viz (not one solid color per cell).
-    /// Frame names: <c>c{col}_h{1..10}.png</c> — keep in sync with Assets/viz generator.
+    /// Dense multi-cell EQ pool. Frame keys match Assets/viz atlas:
+    /// <c>{col}{height}</c> e.g. <c>05</c>, <c>010</c> (col 0..9, height 1..10).
     /// </summary>
     private static string[][] BuildEqualizerPool()
     {
@@ -551,7 +556,7 @@ public static class PlayerMessageBuilder
                 wave = Math.Clamp(wave, -1.0, 1.0);
                 var level = 0.05 + 0.95 * ((wave + 1) * 0.5);
                 var height = Math.Clamp((int)Math.Round(level * maxHeight), 1, maxHeight);
-                seq[s] = $"c{c}_h{height}.png";
+                seq[s] = $"{c}{height}";
             }
 
             pool[c] = seq;

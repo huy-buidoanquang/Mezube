@@ -188,6 +188,7 @@ public sealed class MusicPlayer
         state.NotifyChannelId = ctx.Channel.Id;
         state.ControlMessageId = preparing.MessageId;
         state.ControlMessageCreateTimeSeconds = preparingCreateTime;
+        state.ControlMessageHasButtons = false;
         state.ControlUserId = ctx.Author.Id;
         state.ClanId = clanId;
         state.HoldsPlaySlot = true;
@@ -334,6 +335,7 @@ public sealed class MusicPlayer
         state.NotifyChannelId = ctx.Channel.Id;
         state.ControlMessageId = preparing.MessageId;
         state.ControlMessageCreateTimeSeconds = preparingCreateTime;
+        state.ControlMessageHasButtons = false;
         state.ControlUserId = ctx.Author.Id;
         state.ClanId = clanId;
         state.HoldsPlaySlot = true;
@@ -564,7 +566,6 @@ public sealed class MusicPlayer
         // Wake the pump; it owns the single StopAsync for the active track.
         state.CancelTrack();
         state.IsPlaying = false;
-        state.TrackStartedAt = null;
         ScheduleIdleDestroy(clanId, state);
     }
 
@@ -637,11 +638,12 @@ public sealed class MusicPlayer
         state.ControlUserId = ctx.Author.Id;
         state.NotifyClient = ctx.Client;
         state.NotifyChannelId = ctx.Channel.Id;
-        // Reply without controls first so we can stamp ControlMessageId = reply id for buttons.
+        // Seed without buttons so ControlMessageId = reply id, then attach Skip/Stop.
         var seed = BuildNowPlayingContent(state, clanId, includeMusicViz: true, includeControls: false);
         var reply = await ctx.ReplyAsync(seed).ConfigureAwait(false);
         state.ControlMessageId = reply.MessageId;
         state.ControlMessageCreateTimeSeconds = reply.CreateTimeSeconds > 0 ? reply.CreateTimeSeconds : null;
+        state.ControlMessageHasButtons = true;
         var content = BuildNowPlayingContent(state, clanId, includeMusicViz: true, includeControls: true);
         await ctx.Channel.UpdateMessageAsync(
                 reply.MessageId,
@@ -775,21 +777,20 @@ public sealed class MusicPlayer
         ClanPlayerState state,
         long clanId,
         bool includeMusicViz = false,
-        bool includeControls = true)
+        bool includeControls = false)
     {
         var item = state.Queue.CurrentItem!;
-        var position = state.GetElapsed();
         var mode = state.Mode == PlaybackMode.Voice ? "voice" : "streaming";
         var destination = PlayerMessageBuilder.FormatDestination(mode, item.Target.ChannelLabel);
         return PlayerMessageBuilder.NowPlaying(
             item.Track,
             state.Queue.Count,
             destination,
-            position: position,
+            nextTitle: state.Queue.PeekNext()?.Track.Title,
             controlMessageId: includeControls ? state.ControlMessageId : null,
             controlUserId: includeControls ? state.ControlUserId : null,
             clanId: clanId,
-            includeMusicViz: false);
+            includeMusicViz: true);
     }
 
     private async Task<(TrackInfoEntity? Track, Mezon.Net.Client.MessageContent? Error)> TryResolveAsync(
@@ -892,11 +893,11 @@ public sealed class MusicPlayer
                         track.Title,
                         target.ChannelId,
                         playStopwatch.ElapsedMilliseconds);
-                    state.TrackStartedAt = DateTimeOffset.UtcNow;
                     if (item.ReplyMessageId is long replyId)
                     {
                         state.ControlMessageId = replyId;
                         state.ControlMessageCreateTimeSeconds = item.ReplyCreateTimeSeconds;
+                        state.ControlMessageHasButtons = false;
                     }
 
                     await SendNowPlayingAsync(state, includeMusicViz: true).ConfigureAwait(false);
@@ -960,7 +961,6 @@ public sealed class MusicPlayer
                 }
                 finally
                 {
-                    state.TrackStartedAt = null;
                     state.ClearTrackCts();
                 }
 
@@ -1063,7 +1063,7 @@ public sealed class MusicPlayer
     }
 
     /// <summary>How long to keep clan player state + streaming publisher WS after the queue empties.</summary>
-    private static readonly TimeSpan IdleSessionTtl = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan IdleSessionTtl = TimeSpan.FromMinutes(5);
 
     private async Task SendNowPlayingAsync(ClanPlayerState state, bool includeMusicViz)
     {
@@ -1081,7 +1081,11 @@ public sealed class MusicPlayer
         {
             await _viz.EnsureAsync(state.NotifyClient, CancellationToken.None).ConfigureAwait(false);
             var channel = await state.NotifyClient.GetChannelAsync(channelId).ConfigureAwait(false);
-            var content = BuildNowPlayingContent(state, clanId, includeMusicViz);
+            var content = BuildNowPlayingContent(
+                state,
+                clanId,
+                includeMusicViz,
+                includeControls: state.ControlMessageHasButtons);
             await channel.UpdateMessageAsync(
                     messageId,
                     content,
@@ -1292,27 +1296,17 @@ public sealed class MusicPlayer
         public PlaybackTarget? Target { get; set; }
         public PlaybackMode Mode { get; set; } = PlaybackMode.Streaming;
         public bool IsPlaying { get; set; }
-        public DateTimeOffset? TrackStartedAt { get; set; }
         public long? ClanId { get; set; }
         public long? ControlMessageId { get; set; }
         public uint? ControlMessageCreateTimeSeconds { get; set; }
+        /// <summary>True when the control message was created by !np (keeps Skip/Stop on updates).</summary>
+        public bool ControlMessageHasButtons { get; set; }
         public long? ControlUserId { get; set; }
         public MezonClient? NotifyClient { get; set; }
         public long? NotifyChannelId { get; set; }
         public PlayerDestroyReason LastDestroyReason { get; set; }
         public bool HoldsPlaySlot { get; set; }
         public CancellationTokenSource? PrepCts { get; set; }
-
-        public TimeSpan GetElapsed()
-        {
-            if (TrackStartedAt is not { } started)
-            {
-                return TimeSpan.Zero;
-            }
-
-            var elapsed = DateTimeOffset.UtcNow - started;
-            return elapsed < TimeSpan.Zero ? TimeSpan.Zero : elapsed;
-        }
 
         public async Task<bool> TryEnterPumpAsync()
         {

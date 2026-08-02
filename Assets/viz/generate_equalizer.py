@@ -163,7 +163,7 @@ def main() -> None:
                 src = y * FRAME * 4
                 dst = (y * sheet_w + idx * FRAME) * 4
                 sheet[dst : dst + FRAME * 4] = tile[src : src + FRAME * 4]
-            name = f"c{c}_h{height}.png"
+            name = f"{c}{height}"
             frames[name] = {
                 "frame": {"x": idx * FRAME, "y": 0, "w": FRAME, "h": FRAME},
                 "rotated": False,
@@ -173,12 +173,12 @@ def main() -> None:
             }
         print(f"cell {c + 1}/{COLS}")
 
-    pool = [[f"c{c}_h{height_at(s, c)}.png" for s in range(STEPS)] for c in range(COLS)]
+    pool = [[f"{c}{height_at(s, c)}" for s in range(STEPS)] for c in range(COLS)]
 
     write_png(OUT / "equalizer.png", sheet_w, sheet_h, sheet)
     meta = {
         "app": "Mezube",
-        "version": "9.0-solid-cell-80",
+        "version": "10.0-short-frame-keys",
         "image": "equalizer.png",
         "format": "RGBA8888",
         "size": {"w": sheet_w, "h": sheet_h},
