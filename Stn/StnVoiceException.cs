@@ -19,4 +19,7 @@ public sealed class StnVoiceException : InvalidOperationException
 
     public bool IsConflict => StatusCode == HttpStatusCode.Conflict;
     public bool IsCapacityExceeded => StatusCode == HttpStatusCode.TooManyRequests;
+
+    /// <summary>STN admission control refused the request (subscriber cap, heap watermark, shutdown).</summary>
+    public bool IsUnavailable => StatusCode == HttpStatusCode.ServiceUnavailable;
 }

@@ -31,6 +31,11 @@ public sealed class BotOptions
     /// Default false (set in appsettings).
     /// </summary>
     public bool StnWhipEnabled { get; set; }
+    /// <summary>
+    /// Optional STN streaming <c>publisher_password</c>. Sent in WS <c>Value.Password</c>.
+    /// Leave empty when STN does not require a publisher password.
+    /// </summary>
+    public string StnPublisherPassword { get; set; } = string.Empty;
     public string YtDlpPath { get; set; } = "yt-dlp";
     public string FfmpegPath { get; set; } = "ffmpeg";
     public string TempDir { get; set; } = "temp";

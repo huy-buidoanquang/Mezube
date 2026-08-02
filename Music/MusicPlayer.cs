@@ -435,6 +435,22 @@ public sealed class MusicPlayer
         await PublishControlOutcomeAsync(ctx, clanId, outcome.Content).ConfigureAwait(false);
     }
 
+    public async Task PauseAsync(ICommandContext ctx, CancellationToken cancellationToken = default)
+    {
+        var clanId = ctx.Clan?.Id ?? ctx.Channel.ClanId;
+        var outcome = await TrySetPausedAsync(ctx.Client, clanId, ctx.Author.Id, paused: true, cancellationToken)
+            .ConfigureAwait(false);
+        await ctx.ReplyAsync(outcome.Content).ConfigureAwait(false);
+    }
+
+    public async Task ResumeAsync(ICommandContext ctx, CancellationToken cancellationToken = default)
+    {
+        var clanId = ctx.Clan?.Id ?? ctx.Channel.ClanId;
+        var outcome = await TrySetPausedAsync(ctx.Client, clanId, ctx.Author.Id, paused: false, cancellationToken)
+            .ConfigureAwait(false);
+        await ctx.ReplyAsync(outcome.Content).ConfigureAwait(false);
+    }
+
     public async Task<ControlOutcome> TrySkipAsync(
         MezonClient client,
         long clanId,
@@ -469,6 +485,57 @@ public sealed class MusicPlayer
 
         await StopInternalAsync(clanId, cancellationToken).ConfigureAwait(false);
         return ControlOutcome.Ok(PlayerMessageBuilder.Ok("Stopped", "Playback stopped and queue cleared."));
+    }
+
+    public async Task<ControlOutcome> TrySetPausedAsync(
+        MezonClient client,
+        long clanId,
+        long userId,
+        bool paused,
+        CancellationToken cancellationToken = default)
+    {
+        var state = GetState(clanId);
+        if (state.Mode != PlaybackMode.Streaming)
+        {
+            return ControlOutcome.Denied(PlayerMessageBuilder.Error(
+                "Pause is streaming-only",
+                "Use !stream. Voice pause is not supported yet."));
+        }
+
+        if (!state.IsPlaying || state.Target is null)
+        {
+            return ControlOutcome.Denied(PlayerMessageBuilder.Status("Nothing playing", "Queue is empty."));
+        }
+
+        var requesterId = state.Queue.CurrentItem?.Track.RequestedByUserId;
+        if (!await _access.CanSkipAsync(client, clanId, userId, requesterId, cancellationToken).ConfigureAwait(false))
+        {
+            return ControlOutcome.Denied(PlayerMessageBuilder.NotAllowed(
+                "Only the track requester, DJ role, or clan owner can pause/resume."));
+        }
+
+        if (_streamingSink.IsPaused(state.Target.ChannelId) == paused)
+        {
+            return ControlOutcome.Ok(PlayerMessageBuilder.Status(
+                paused ? "Already paused" : "Already playing",
+                paused ? "Track is already paused." : "Track is already playing."));
+        }
+
+        try
+        {
+            await _streamingSink.SetPausedAsync(state.Target, paused, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "STN pause failed clan={ClanId} paused={Paused}", clanId, paused);
+            return ControlOutcome.Denied(PlayerMessageBuilder.Error(
+                "Pause failed",
+                "STN could not change pause state. Try again."));
+        }
+
+        return ControlOutcome.Ok(PlayerMessageBuilder.Ok(
+            paused ? "Paused" : "Resumed",
+            paused ? "Streaming track paused. Use !resume to continue." : "Streaming track resumed."));
     }
 
     public readonly record struct ControlOutcome(bool Allowed, Mezon.Net.Client.MessageContent Content)
@@ -791,8 +858,10 @@ public sealed class MusicPlayer
                 var mode = state.Mode;
                 if (item is null)
                 {
+                    // Keep the STN publisher WS warm across an empty queue so a re-queue
+                    // within IdleSessionTtl reuses the session (no ws_close / channel_closed).
+                    // Teardown happens in ScheduleIdleDestroy after the idle TTL.
                     state.IsPlaying = false;
-                    state.Target = null;
                     state.LastDestroyReason = PlayerDestroyReason.QueueEmpty;
                     ScheduleIdleDestroy(clanId, state);
                     return;
@@ -842,7 +911,22 @@ public sealed class MusicPlayer
 
                     try
                     {
-                        await sink.StopAsync(target, CancellationToken.None).ConfigureAwait(false);
+                        if (mode == PlaybackMode.Streaming)
+                        {
+                            // Keep the WS + listeners across tracks; only !stop tears the session down.
+                            if (state.LastDestroyReason == PlayerDestroyReason.UserStop)
+                            {
+                                await _streamingSink.StopAsync(target, CancellationToken.None).ConfigureAwait(false);
+                            }
+                            else
+                            {
+                                await _streamingSink.EndTrackAsync(target, CancellationToken.None).ConfigureAwait(false);
+                            }
+                        }
+                        else
+                        {
+                            await sink.StopAsync(target, CancellationToken.None).ConfigureAwait(false);
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -947,15 +1031,39 @@ public sealed class MusicPlayer
                     && _states.TryRemove(clanId, out _))
                 {
                     state.LastDestroyReason = PlayerDestroyReason.IdleTimeout;
+                    var target = state.Target;
+                    var mode = state.Mode;
+                    state.Target = null;
                     _logger.LogDebug(
                         "Idle player session destroyed clan={ClanId} reason={Reason}",
                         clanId,
                         state.LastDestroyReason);
+
+                    if (mode == PlaybackMode.Streaming && target is { })
+                    {
+                        _ = TearDownStreamingIdleAsync(target);
+                    }
                 }
             });
     }
 
-    private static readonly TimeSpan IdleSessionTtl = TimeSpan.FromSeconds(60);
+    private async Task TearDownStreamingIdleAsync(PlaybackTarget target)
+    {
+        try
+        {
+            await _streamingSink.StopAsync(target, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(
+                ex,
+                "Streaming session stop on idle timeout failed channel={ChannelId}",
+                target.ChannelId);
+        }
+    }
+
+    /// <summary>How long to keep clan player state + streaming publisher WS after the queue empties.</summary>
+    private static readonly TimeSpan IdleSessionTtl = TimeSpan.FromMinutes(15);
 
     private async Task SendNowPlayingAsync(ClanPlayerState state, bool includeMusicViz)
     {
@@ -997,31 +1105,36 @@ public sealed class MusicPlayer
         PlaybackTarget target,
         CancellationToken cancellationToken)
     {
-        using var durationCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var durationWait = track.Duration is { } d && d > TimeSpan.Zero
-            ? WaitByDurationAsync(state, track, d, durationCts.Token)
-            : Task.Delay(TimeSpan.FromMinutes(10), durationCts.Token);
-
         if (mode != PlaybackMode.Voice)
         {
+            // STN stream_track_ended is authoritative; duration is only used for up-next UX.
             using var endedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            var endedWait = _streamingSink.WaitUntilPublisherEndedAsync(endedCts.Token);
-            var streamWinner = await Task.WhenAny(durationWait, endedWait).ConfigureAwait(false);
-            if (streamWinner == endedWait)
+            var endedWait = _streamingSink.WaitUntilTrackEndedAsync(target.ChannelId, endedCts.Token);
+            var upNextTask = track.Duration is { } d && d > UpNextLead
+                ? NotifyStreamingUpNextAsync(state, d, endedCts.Token)
+                : Task.CompletedTask;
+
+            await endedWait.ConfigureAwait(false);
+            endedCts.Cancel();
+            try
             {
-                durationCts.Cancel();
-                await endedWait.ConfigureAwait(false);
-                _logger.LogDebug(
-                    "Streaming track ended by STN signal title={Title} channel={ChannelId}",
-                    track.Title,
-                    target.ChannelId);
-                return;
+                await upNextTask.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
             }
 
-            endedCts.Cancel();
-            await durationWait.ConfigureAwait(false);
+            _logger.LogDebug(
+                "Streaming track ended by STN signal title={Title} channel={ChannelId}",
+                track.Title,
+                target.ChannelId);
             return;
         }
+
+        using var durationCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var durationWait = track.Duration is { } voiceDuration && voiceDuration > TimeSpan.Zero
+            ? WaitByDurationAsync(state, track, voiceDuration, durationCts.Token)
+            : Task.Delay(TimeSpan.FromMinutes(10), durationCts.Token);
 
         var roomName = string.IsNullOrWhiteSpace(target.RoomName)
             ? target.ChannelId.ToString()
@@ -1044,6 +1157,26 @@ public sealed class MusicPlayer
 
         statusCts.Cancel();
         await durationWait.ConfigureAwait(false);
+    }
+
+    private async Task NotifyStreamingUpNextAsync(
+        ClanPlayerState state,
+        TimeSpan duration,
+        CancellationToken cancellationToken)
+    {
+        var untilNotify = duration - UpNextLead;
+        if (untilNotify > TimeSpan.Zero)
+        {
+            await Task.Delay(untilNotify, cancellationToken).ConfigureAwait(false);
+        }
+
+        var next = state.Queue.PeekNext();
+        if (next is null)
+        {
+            return;
+        }
+
+        await NotifyUpNextAsync(state, next, (int)Math.Ceiling(UpNextLead.TotalSeconds)).ConfigureAwait(false);
     }
 
     private async Task WaitByDurationAsync(

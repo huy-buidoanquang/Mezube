@@ -25,7 +25,10 @@ public sealed class StnSocketClient : IAsyncDisposable
     private Task? _receiveTask;
     private string? _token;
     private long _botUserId;
+    private long _channelId;
+    private TaskCompletionSource? _trackEnded;
     private TaskCompletionSource? _publisherEnded;
+    private volatile bool _paused;
 
     public StnSocketClient(BotOptions options, ILogger<StnSocketClient> logger)
     {
@@ -36,6 +39,8 @@ public sealed class StnSocketClient : IAsyncDisposable
 
     public bool IsConnected => _socket?.State == WebSocketState.Open;
 
+    public bool IsPaused => _paused;
+
     public async Task EnsureConnectedAsync(
         string authToken,
         long botUserId,
@@ -43,12 +48,24 @@ public sealed class StnSocketClient : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         _botUserId = botUserId;
-        if (IsConnected && string.Equals(_token, authToken, StringComparison.Ordinal))
+        // Token may refresh between tracks (GetOrRefreshAuthTokenAsync). The STN
+        // socket was already authenticated at upgrade — reconnecting would run
+        // Conn.Close → leavePublisherPresence → RemovePublisher → channel_closed
+        // for every listener. Keep the open socket and only remember the newer token.
+        if (IsConnected)
         {
+            if (!string.Equals(_token, authToken, StringComparison.Ordinal))
+            {
+                _logger.LogDebug("STN publisher WS kept across auth token refresh");
+                _token = authToken;
+            }
+
+            // Receive loop must outlive per-track CTS (skip cancels trackCts). If it
+            // somehow exited while the socket stayed Open, restart it on this session.
+            EnsureReceiveLoop();
             return;
         }
 
-        await DisconnectAsync().ConfigureAwait(false);
         _token = authToken;
 
         var displayName = string.IsNullOrWhiteSpace(username) ? _options.BotDisplayName : username;
@@ -59,8 +76,10 @@ public sealed class StnSocketClient : IAsyncDisposable
         {
             await socket.ConnectAsync(uri, cancellationToken).ConfigureAwait(false);
             _socket = socket;
-            _receiveCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            _receiveTask = ReceiveLoopAsync(_receiveCts.Token);
+            // Session-lifetime CTS only — NEVER link to Play's trackCts. Cancelling
+            // ReceiveAsync aborts ClientWebSocket (1006) → STN leavePublisherPresence
+            // (ws_close) → kicks every listener on skip/next.
+            EnsureReceiveLoop();
             _logger.LogInformation("STN publisher WS connected via {Base}", _wsBase);
         }
         catch (Exception ex)
@@ -74,8 +93,24 @@ public sealed class StnSocketClient : IAsyncDisposable
         }
     }
 
+    private void EnsureReceiveLoop()
+    {
+        if (_receiveTask is { IsCompleted: false })
+        {
+            return;
+        }
+
+        _receiveCts?.Dispose();
+        _receiveCts = new CancellationTokenSource();
+        _receiveTask = ReceiveLoopAsync(_receiveCts.Token);
+    }
+
     public async Task PlayAsync(long clanId, long streamChannelId, string fileUrl, CancellationToken cancellationToken = default)
     {
+        _channelId = streamChannelId;
+        _paused = false;
+        // Arm before connect ack so a fast stream_track_ended cannot be missed.
+        ResetTrackEnded();
         await SendKeyAndWaitAsync(
                 "connect_publisher",
                 "connect_publisher",
@@ -84,26 +119,115 @@ public sealed class StnSocketClient : IAsyncDisposable
                 fileUrl,
                 cancellationToken)
             .ConfigureAwait(false);
-        // Arm end-waiter only after a successful publish ack so reconnect/disconnect
-        // during EnsureConnected cannot complete it early.
-        ResetPublisherEnded();
     }
 
-    public async Task StopAsync(long clanId, long streamChannelId, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Abort the current URL early (skip) without tearing down the publisher session.
+    /// STN keeps listeners and emits <c>stream_track_ended</c>.
+    /// </summary>
+    public async Task EndTrackAsync(long clanId, long streamChannelId, CancellationToken cancellationToken = default)
+    {
+        if (!IsConnected)
+        {
+            CompleteTrackEnded();
+            return;
+        }
+
+        // Already finished (server EOF) — do not send another end that could race Play.
+        if (_trackEnded?.Task.IsCompleted == true)
+        {
+            return;
+        }
+
+        try
+        {
+            await SendKeyAsync(
+                    "stream_track_ended",
+                    clanId,
+                    streamChannelId,
+                    fileUrl: string.Empty,
+                    pauseValue: null,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            // Wait briefly for STN to release the publisher claim before the next connect_publisher.
+            var tcs = _trackEnded;
+            if (tcs is not null)
+            {
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(5));
+                try
+                {
+                    await tcs.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    _logger.LogDebug("STN end-track ack timed out channel={ChannelId}; continuing", streamChannelId);
+                    CompleteTrackEnded();
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "STN end-track send failed channel={ChannelId}", streamChannelId);
+            CompleteTrackEnded();
+        }
+    }
+
+    public async Task SetPausedAsync(long clanId, long streamChannelId, bool paused, CancellationToken cancellationToken = default)
+    {
+        if (!IsConnected)
+        {
+            throw new InvalidOperationException("STN WebSocket is not connected.");
+        }
+
+        await SendKeyAndWaitAsync(
+                "stream_track_paused",
+                "stream_track_paused",
+                clanId,
+                streamChannelId,
+                fileUrl: string.Empty,
+                cancellationToken,
+                pauseValue: paused)
+            .ConfigureAwait(false);
+        _paused = paused;
+    }
+
+    /// <summary>Tear down the publisher session and kick listeners (<c>stop_publisher</c>).</summary>
+    public async Task StopPublisherAsync(long clanId, long streamChannelId, CancellationToken cancellationToken = default)
     {
         try
         {
             if (IsConnected)
             {
-                await SendKeyAsync("stop_publisher", clanId, streamChannelId, fileUrl: string.Empty, cancellationToken)
+                await SendKeyAsync(
+                        "stop_publisher",
+                        clanId,
+                        streamChannelId,
+                        fileUrl: string.Empty,
+                        pauseValue: null,
+                        cancellationToken)
                     .ConfigureAwait(false);
             }
         }
         finally
         {
+            _paused = false;
+            CompleteTrackEnded();
             CompletePublisherEnded();
             await DisconnectAsync().ConfigureAwait(false);
         }
+    }
+
+    public Task WaitUntilTrackEndedAsync(CancellationToken cancellationToken = default)
+    {
+        var tcs = _trackEnded;
+        if (tcs is null)
+        {
+            return Task.Delay(Timeout.Infinite, cancellationToken);
+        }
+
+        return tcs.Task.WaitAsync(cancellationToken);
     }
 
     public Task WaitUntilPublisherEndedAsync(CancellationToken cancellationToken = default)
@@ -111,29 +235,34 @@ public sealed class StnSocketClient : IAsyncDisposable
         var tcs = _publisherEnded;
         if (tcs is null)
         {
-            // PlayAsync arms this after connect ack; if missing, fall back to duration-only wait.
             return Task.Delay(Timeout.Infinite, cancellationToken);
         }
 
         return tcs.Task.WaitAsync(cancellationToken);
     }
 
-    private void ResetPublisherEnded()
+    private void ResetTrackEnded()
     {
         var next = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var previous = Interlocked.Exchange(ref _publisherEnded, next);
+        var previous = Interlocked.Exchange(ref _trackEnded, next);
         previous?.TrySetCanceled();
+    }
+
+    private void CompleteTrackEnded()
+    {
+        _trackEnded?.TrySetResult();
     }
 
     private void CompletePublisherEnded()
     {
-        _publisherEnded?.TrySetResult();
+        _publisherEnded ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _publisherEnded.TrySetResult();
+        CompleteTrackEnded();
     }
 
     private static ClientWebSocket CreateSocket()
     {
         var socket = new ClientWebSocket();
-        // Some STN proxies mishandle HTTP/2 upgrade negotiations.
         socket.Options.HttpVersion = HttpVersion.Version11;
         socket.Options.HttpVersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
         return socket;
@@ -150,6 +279,11 @@ public sealed class StnSocketClient : IAsyncDisposable
     private static string DescribeFailure(string baseUrl, Exception ex)
     {
         var msg = ex.Message;
+        if (msg.Contains("'503'", StringComparison.Ordinal) || StnServerLoad.MentionsCapacity(msg))
+        {
+            return $"- {baseUrl}: 503 — STN đang quá tải (hết slot listener / áp lực bộ nhớ) hoặc đang shutdown. Thử lại sau ít phút.";
+        }
+
         if (msg.Contains("'502'", StringComparison.Ordinal))
         {
             return $"- {baseUrl}: 502 Bad Gateway (service STN down / nginx không proxy được backend).";
@@ -184,7 +318,8 @@ public sealed class StnSocketClient : IAsyncDisposable
         long clanId,
         long streamChannelId,
         string fileUrl,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool? pauseValue = null)
     {
         var waiter = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
         if (!_ackWaiters.TryAdd(ackKey, waiter))
@@ -194,7 +329,8 @@ public sealed class StnSocketClient : IAsyncDisposable
 
         try
         {
-            await SendKeyAsync(key, clanId, streamChannelId, fileUrl, cancellationToken).ConfigureAwait(false);
+            await SendKeyAsync(key, clanId, streamChannelId, fileUrl, pauseValue, cancellationToken)
+                .ConfigureAwait(false);
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeoutCts.CancelAfter(CommandAckTimeout);
             var error = await waiter.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
@@ -218,6 +354,7 @@ public sealed class StnSocketClient : IAsyncDisposable
         long clanId,
         long streamChannelId,
         string fileUrl,
+        bool? pauseValue,
         CancellationToken cancellationToken)
     {
         if (_socket is null || _socket.State != WebSocketState.Open)
@@ -237,11 +374,21 @@ public sealed class StnSocketClient : IAsyncDisposable
                 writer.WriteString("UserId"u8, _botUserId.ToString());
                 writer.WriteString("Key"u8, key);
                 writer.WritePropertyName("Value"u8);
-                writer.WriteStartObject();
-                writer.WriteString("ChannelId"u8, streamChannelId.ToString());
-                writer.WriteString("Password"u8, "");
-                writer.WriteString("FileUrl"u8, fileUrl);
-                writer.WriteEndObject();
+                if (pauseValue is { } paused)
+                {
+                    writer.WriteStartObject();
+                    writer.WriteBoolean("paused"u8, paused);
+                    writer.WriteEndObject();
+                }
+                else
+                {
+                    writer.WriteStartObject();
+                    writer.WriteString("ChannelId"u8, streamChannelId.ToString());
+                    writer.WriteString("Password"u8, _options.StnPublisherPassword ?? string.Empty);
+                    writer.WriteString("FileUrl"u8, fileUrl);
+                    writer.WriteEndObject();
+                }
+
                 writer.WriteEndObject();
             }
 
@@ -250,7 +397,13 @@ public sealed class StnSocketClient : IAsyncDisposable
                 key,
                 streamChannelId,
                 _wsBase);
-            await _socket.SendAsync(_sendBuffer.WrittenMemory, WebSocketMessageType.Text, endOfMessage: true, cancellationToken)
+            // Do not pass caller's CT into SendAsync — cancelling it aborts ClientWebSocket
+            // (same 1006 / ws_close kick as a cancelled ReceiveAsync).
+            await _socket.SendAsync(
+                    _sendBuffer.WrittenMemory,
+                    WebSocketMessageType.Text,
+                    endOfMessage: true,
+                    CancellationToken.None)
                 .ConfigureAwait(false);
         }
         finally
@@ -321,11 +474,36 @@ public sealed class StnSocketClient : IAsyncDisposable
                 return;
             }
 
+            if (string.Equals(key, "stream_track_ended", StringComparison.Ordinal))
+            {
+                _logger.LogInformation(
+                    "STN stream_track_ended channel={ChannelId}",
+                    _channelId);
+                _paused = false;
+                CompleteTrackEnded();
+                return;
+            }
+
+            if (string.Equals(key, "stream_track_paused", StringComparison.Ordinal))
+            {
+                _paused = ReadPausedValue(doc.RootElement) ?? _paused;
+                CompleteAck("stream_track_paused", error: null);
+                _logger.LogDebug("STN stream_track_paused paused={Paused} channel={ChannelId}", _paused, _channelId);
+                return;
+            }
+
+            if (string.Equals(key, "password_required", StringComparison.Ordinal))
+            {
+                _logger.LogDebug("STN password_required for publisher (using configured StnPublisherPassword)");
+                return;
+            }
+
             if (string.Equals(key, "error", StringComparison.Ordinal))
             {
                 var error = ReadJsonValueAsString(doc.RootElement);
                 CompleteAck("connect_publisher", error ?? "unknown STN error");
-                CompletePublisherEnded();
+                CompleteAck("stream_track_paused", error ?? "unknown STN error");
+                CompleteTrackEnded();
                 return;
             }
 
@@ -345,6 +523,33 @@ public sealed class StnSocketClient : IAsyncDisposable
         {
             _logger.LogDebug(ex, "Failed to parse STN WS message");
         }
+    }
+
+    private static bool? ReadPausedValue(JsonElement root)
+    {
+        if (!root.TryGetProperty("Value", out var valueElement))
+        {
+            return null;
+        }
+
+        if (valueElement.ValueKind == JsonValueKind.True)
+        {
+            return true;
+        }
+
+        if (valueElement.ValueKind == JsonValueKind.False)
+        {
+            return false;
+        }
+
+        if (valueElement.ValueKind == JsonValueKind.Object
+            && valueElement.TryGetProperty("paused", out var pausedElement)
+            && (pausedElement.ValueKind is JsonValueKind.True or JsonValueKind.False))
+        {
+            return pausedElement.GetBoolean();
+        }
+
+        return null;
     }
 
     private static string? ReadJsonValueAsString(JsonElement root)

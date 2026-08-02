@@ -18,7 +18,6 @@ public sealed class StnWhipClient
     private readonly ILogger<StnWhipClient> _logger;
     private readonly Uri _startUri;
     private readonly Uri _stopUri;
-    private readonly Uri _statusUri;
     private readonly ConcurrentDictionary<string, WhipSession> _rooms = new(StringComparer.Ordinal);
 
     public StnWhipClient(HttpClient http, BotOptions options, ILogger<StnWhipClient> logger)
@@ -27,7 +26,6 @@ public sealed class StnWhipClient
         _logger = logger;
         _startUri = StnUrl.VoiceWhipStartUri(options.StnBaseUrl);
         _stopUri = StnUrl.VoiceWhipStopUri(options.StnBaseUrl);
-        _statusUri = StnUrl.VoiceWhipStatusUri(options.StnBaseUrl);
     }
 
     public ICollection<string> ActiveRooms => _rooms.Keys;

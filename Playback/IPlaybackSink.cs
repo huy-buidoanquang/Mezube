@@ -11,7 +11,7 @@ public interface IPlaybackSink
 
 /// <param name="ClanId">Clan owning the playback target.</param>
 /// <param name="ChannelId">Stream or voice channel id.</param>
-/// <param name="RoomName">LiveKit room for voice playMedia (voice channel id string).</param>
+/// <param name="RoomName">LiveKit room for voice (voice channel id string).</param>
 /// <param name="ChannelLabel">Human channel label for Destination UI.</param>
 public sealed record PlaybackTarget(
     long ClanId,

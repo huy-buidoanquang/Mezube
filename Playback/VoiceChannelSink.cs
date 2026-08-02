@@ -74,11 +74,10 @@ public sealed class VoiceChannelSink : IPlaybackSink
             roomName,
             process.ElapsedMilliseconds,
             playable.MediaUrl);
-        if (!playable.MediaUrl.Contains(".ogg", StringComparison.OrdinalIgnoreCase)
-            && !playable.MediaUrl.Contains(".opus", StringComparison.OrdinalIgnoreCase))
+        if (!StnMediaUrl.IsSupportedOpusSourceUrl(playable.MediaUrl))
         {
             throw new InvalidOperationException(
-                $"Voice play requires .ogg/.opus URL, got: {playable.MediaUrl}");
+                $"Voice play requires .ogg/.opus URL path, got: {playable.MediaUrl}");
         }
 
         var auth = Stopwatch.StartNew();

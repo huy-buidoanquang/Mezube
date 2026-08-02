@@ -21,6 +21,8 @@ public sealed class MusicCommandModule
         commands.AddCommand("stream", HandleStreamAsync).WithAlias("s");
         commands.AddCommand("skip", ctx => _player.SkipAsync(ctx, ctx.CancellationToken)).WithAlias("sk");
         commands.AddCommand("stop", ctx => _player.StopAsync(ctx, ctx.CancellationToken)).WithAlias("st");
+        commands.AddCommand("pause", ctx => _player.PauseAsync(ctx, ctx.CancellationToken));
+        commands.AddCommand("resume", ctx => _player.ResumeAsync(ctx, ctx.CancellationToken)).WithAlias("unpause");
         commands.AddCommand("queue", ctx => _player.ShowQueueAsync(ctx)).WithAlias("q");
         commands.AddCommand("nowplay", ctx => _player.ShowNowPlayingAsync(ctx)).WithAlias("np");
         commands.AddCommand("setdj", ctx => _player.SetDjRoleAsync(ctx, ctx.CancellationToken));

@@ -31,9 +31,14 @@ public static class PlayerMessageBuilder
         if (ex is StnVoiceException stn)
         {
             var body = stn.Body;
-            if (stn.IsCapacityExceeded
-                || Contains(body, "max concurrent voice rooms reached")
-                || Contains(body, "max concurrent whip"))
+            if (stn.IsUnavailable || StnServerLoad.MentionsCapacity(body))
+            {
+                return Error(
+                    "STN at capacity",
+                    "STN is out of free slots or under memory pressure. Try again in a moment.");
+            }
+
+            if (stn.IsCapacityExceeded)
             {
                 return Error(
                     "Voice capacity full",
@@ -58,13 +63,6 @@ public static class PlayerMessageBuilder
                         "This voice room already has an active v2 job. Use !stop, then try again.");
                 }
 
-                if (Contains(body, "legacy voice publisher active"))
-                {
-                    return Error(
-                        "Room busy",
-                        "This voice room is used by a legacy publisher. Stop it first, then try again.");
-                }
-
                 return Error(
                     "Room conflict",
                     "Another publisher already owns this voice room. Stop it first, then try again.");
@@ -80,8 +78,15 @@ public static class PlayerMessageBuilder
             return null;
         }
 
-        // WaitForPublishingAsync throws InvalidOperationException with STN status codes.
+        // Streaming WS failures and WaitForPublishingAsync surface plain InvalidOperationException.
         var message = ex.Message ?? string.Empty;
+        if (Contains(message, "503") || StnServerLoad.MentionsCapacity(message))
+        {
+            return Error(
+                "STN at capacity",
+                "STN is out of free slots or under memory pressure. Try again in a moment.");
+        }
+
         if (Contains(message, "download_failed") || Contains(message, "404"))
         {
             return Error(
@@ -339,7 +344,7 @@ public static class PlayerMessageBuilder
         {
             new("Voice", $"{p}play [#voice] <url|query>"),
             new("Streaming", $"{p}stream [#stream] <url|query>"),
-            new("Controls", $"{p}skip · {p}stop · {p}queue · {p}np"),
+            new("Controls", $"{p}skip · {p}pause · {p}resume · {p}stop · {p}queue · {p}np"),
             new("DJ", $"{p}setdj @role|roleId|none · {p}settings"),
         };
 

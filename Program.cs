@@ -50,7 +50,7 @@ internal static class Program
         builder.Services.AddHttpClient<StnRestClientV2>();
         builder.Services.AddHttpClient<StnWhipClient>();
         builder.Services.AddHttpClient(nameof(MezonCdnUploader));
-        builder.Services.AddSingleton<StnSocketClient>();
+        builder.Services.AddSingleton<StnStreamingSessionManager>();
         builder.Services.AddSingleton<StreamingChannelSinkHolder>();
         builder.Services.AddSingleton<VoiceChannelSinkHolder>();
         builder.Services.AddSingleton<YtDlpProcessor>();
@@ -83,15 +83,16 @@ internal static class Program
         builder.Services.AddHostedService<MezubeBot>();
 
         var host = builder.Build();
-        RegisterWhipCleanup(host);
+        RegisterMediaCleanup(host);
         await host.RunAsync().ConfigureAwait(false);
     }
 
-    private static void RegisterWhipCleanup(IHost host)
+    private static void RegisterMediaCleanup(IHost host)
     {
         var lifetime = host.Services.GetRequiredService<IHostApplicationLifetime>();
         var publisher = host.Services.GetRequiredService<WhipFfmpegPublisher>();
-        var logger = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Mezube.WhipCleanup");
+        var streamingSessions = host.Services.GetRequiredService<StnStreamingSessionManager>();
+        var logger = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Mezube.MediaCleanup");
 
         lifetime.ApplicationStopping.Register(() =>
         {
@@ -103,6 +104,16 @@ internal static class Program
             catch (Exception ex)
             {
                 logger.LogWarning(ex, "Failed to stop all WHIP publishers during shutdown");
+            }
+
+            try
+            {
+                logger.LogDebug("Disposing all STN streaming sessions during host shutdown");
+                streamingSessions.DisposeAllAsync().GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to dispose STN streaming sessions during shutdown");
             }
         });
     }

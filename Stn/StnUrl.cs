@@ -56,14 +56,6 @@ public static class StnUrl
         return baseUrl;
     }
 
-    [Obsolete("Legacy URL_INPUT endpoint. Mezube uses VoiceV2PlayUri.")]
-    public static Uri PlayMediaUri(string baseUrl)
-        => new(NormalizeBase(baseUrl) + "/api/playmedia", UriKind.Absolute);
-
-    [Obsolete("Legacy URL_INPUT endpoint. Mezube uses VoiceV2StopUri.")]
-    public static Uri StopMediaUri(string baseUrl)
-        => new(NormalizeBase(baseUrl) + "/api/stopmedia", UriKind.Absolute);
-
     public static Uri VoiceV2PlayUri(string baseUrl)
         => new(NormalizeBase(baseUrl) + "/api/v2/voice/play", UriKind.Absolute);
 
