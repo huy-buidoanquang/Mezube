@@ -25,6 +25,7 @@ public sealed class MezubeBot : BackgroundService
     private readonly VoiceChannelSinkHolder _voiceHolder;
     private readonly MusicVizAssets _viz;
     private readonly ILogger<MezubeBot> _logger;
+    private readonly ILogger _mezonLogger;
     private readonly ConcurrentDictionary<(long ClanId, long MessageId), byte> _controlOneShot = new();
     private MezonClient? _client;
     private long _lastRateLimitNotifyMs;
@@ -37,7 +38,8 @@ public sealed class MezubeBot : BackgroundService
         StreamingChannelSinkHolder streamingHolder,
         VoiceChannelSinkHolder voiceHolder,
         MusicVizAssets viz,
-        ILogger<MezubeBot> logger)
+        ILogger<MezubeBot> logger,
+        ILoggerFactory loggerFactory)
     {
         _options = options;
         _player = player;
@@ -46,6 +48,7 @@ public sealed class MezubeBot : BackgroundService
         _voiceHolder = voiceHolder;
         _viz = viz;
         _logger = logger;
+        _mezonLogger = loggerFactory.CreateLogger("Mezon");
     }
 
     public MezonClient Client => _client ?? throw new InvalidOperationException("Bot not started.");
@@ -58,7 +61,7 @@ public sealed class MezubeBot : BackgroundService
         {
             ServerKey = _options.ServerKey,
             TransportType = Mezon.Net.Core.TransportType.Tcp,
-            LogLevel = MezonLogLevel.Trace,
+            LogLevel = _options.MezonNetLogLevel,
             MaxTransportRequestsPerSecond = 60,
             MaxTransportRequestsPerMinute = 500,
             DefaultRatelimitCallback = TransportRateLimitedHandlerAsync,
@@ -429,20 +432,20 @@ public sealed class MezubeBot : BackgroundService
             switch (message.Level)
             {
                 case MezonLogLevel.Trace:
-                    _logger.LogTrace("{MezonLog}", text);
+                    _mezonLogger.LogTrace("{MezonLog}", text);
                     break;
                 case MezonLogLevel.Debug:
-                    _logger.LogDebug("{MezonLog}", text);
+                    _mezonLogger.LogDebug("{MezonLog}", text);
                     break;
                 case MezonLogLevel.Warning:
-                    _logger.LogWarning("{MezonLog}", text);
+                    _mezonLogger.LogWarning("{MezonLog}", text);
                     break;
                 case MezonLogLevel.Error:
                 case MezonLogLevel.Critical:
-                    _logger.LogError("{MezonLog}", text);
+                    _mezonLogger.LogError("{MezonLog}", text);
                     break;
                 default:
-                    _logger.LogInformation("{MezonLog}", text);
+                    _mezonLogger.LogInformation("{MezonLog}", text);
                     break;
             }
 

@@ -40,6 +40,7 @@ internal static class Program
         builder.Logging.AddFilter("Microsoft", LogLevel.Warning);
         builder.Logging.AddFilter("System", LogLevel.Warning);
         builder.Logging.AddFilter("Mezube", LogLevel.Trace);
+        builder.Logging.AddFilter("Mezon", (LogLevel)(int)options.MezonNetLogLevel);
         builder.Logging.AddSimpleConsole(o =>
         {
             o.SingleLine = true;

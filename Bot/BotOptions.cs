@@ -1,5 +1,6 @@
 using Mezube.Domain;
 using Mezube.Stn;
+using Mezon.Net.Logging;
 using Microsoft.Extensions.Configuration;
 
 namespace Mezube.Bot;
@@ -17,6 +18,10 @@ public sealed class BotOptions
     public string Host { get; set; } = string.Empty;
     public string Port { get; set; } = string.Empty;
     public bool UseSsl { get; set; } = true;
+    /// <summary>
+    /// Minimum severity forwarded by Mezon.Net (<c>Mezon:LogLevel</c> or <c>Logging:LogLevel:Mezon</c>).
+    /// </summary>
+    public LogLevel MezonNetLogLevel { get; set; } = LogLevel.Warning;
     public string CommandPrefix { get; set; } = "!";
     public long DefaultClanId { get; set; }
     public long DefaultStreamChannelId { get; set; }
@@ -74,6 +79,7 @@ public sealed class BotOptions
         var options = new BotOptions();
         configuration.GetSection("Mezon").Bind(options);
         configuration.GetSection("Mezube").Bind(options);
+        options.MezonNetLogLevel = ParseMezonNetLogLevel(configuration);
 
         if (string.IsNullOrWhiteSpace(options.CommandPrefix))
         {
@@ -86,6 +92,21 @@ public sealed class BotOptions
         }
 
         return options;
+    }
+
+    private static LogLevel ParseMezonNetLogLevel(IConfiguration configuration)
+    {
+        var text = configuration["Mezon:LogLevel"]
+            ?? configuration["Logging:LogLevel:Mezon"]
+            ?? configuration["Logging:LogLevel:Default"];
+
+        if (!string.IsNullOrWhiteSpace(text)
+            && Enum.TryParse(text, ignoreCase: true, out LogLevel level))
+        {
+            return level;
+        }
+
+        return LogLevel.Warning;
     }
 
     public void Validate()
