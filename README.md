@@ -10,10 +10,10 @@ Bot chuẩn bị CDN **Ogg Opus 48 kHz**; STN không transcode (xem [mezon-media
 
 ## Yêu cầu
 
-- .NET 10 SDK
+- .NET 10 SDK (deploy) / .NET 10 runtime (chạy framework-dependent)
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) trên PATH
-- [ffmpeg](https://ffmpeg.org/) trên PATH (convert → ogg)
-- Sibling repo: `F:\projects\mezon\Mezon.Net` (ProjectReference Sdk)
+- [ffmpeg](https://ffmpeg.org/) trên PATH (convert → ogg; WHIP cần muxer `whip`)
+- NuGet: `Mezon.Net.Sdk` (không cần sibling `Mezon.Net` source)
 
 ## Cấu hình
 
@@ -125,9 +125,51 @@ Audio được **process ngầm** ngay khi vào queue (không đợi đến lư�
 
 ## Docker
 
-Build từ thư mục cha (cần `Mezon.Net`):
+Build từ thư mục `Mezube` (NuGet `Mezon.Net.Sdk`, không cần sibling source):
 
 ```powershell
-docker build -f Mezube/Dockerfile -t mezube .
-docker run -e DOTNET_ENVIRONMENT=prod -v ${PWD}/Mezube/appsettings.prod.local.json:/app/appsettings.prod.local.json:ro mezube
+docker build -t mezube .
+docker run --rm -e DOTNET_ENVIRONMENT=prod `
+  -v ${PWD}/appsettings.prod.local.json:/app/appsettings.prod.local.json:ro `
+  -v mezube-data:/app/data -v mezube-temp:/app/temp mezube
 ```
+
+```bash
+docker build -t mezube .
+docker run --rm -e DOTNET_ENVIRONMENT=prod \
+  -v "$PWD/appsettings.prod.local.json:/app/appsettings.prod.local.json:ro" \
+  -v mezube-data:/app/data -v mezube-temp:/app/temp mezube
+```
+
+## Deploy production (Windows + Linux)
+
+Script publish Release, giữ `data/`, tạo `run.ps1` / `run.sh`, và (Linux) unit systemd.
+
+**Windows (PowerShell):**
+
+```powershell
+./scripts/deploy-prod.ps1
+./scripts/deploy-prod.ps1 -SelfContained
+./scripts/deploy-prod.ps1 -Run
+./scripts/deploy-prod.ps1 -Stop
+./scripts/deploy-prod.ps1 -SkipPublish -Start
+```
+
+**Linux / macOS:**
+
+```bash
+chmod +x scripts/deploy-prod.sh
+./scripts/deploy-prod.sh
+./scripts/deploy-prod.sh --self-contained --output-dir /opt/mezube
+./scripts/deploy-prod.sh --install-service --start   # cần sudo + systemd
+./scripts/deploy-prod.sh --stop
+```
+
+Cross-compile ví dụ (build trên Windows cho Linux server):
+
+```powershell
+./scripts/deploy-prod.ps1 -Runtime linux-x64 -SelfContained -OutputDir .\publish\linux
+# copy publish/linux lên server, rồi: ./run.sh
+```
+
+Output mặc định: `publish/prod`. Secrets nên đặt `appsettings.prod.local.json` (gitignore) cạnh DLL hoặc dùng env `Mezon__Token`, …

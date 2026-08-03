@@ -35,18 +35,7 @@ internal static class Program
         options.Validate();
         builder.Services.AddSingleton(options);
         PlayerMessageBuilder.Configure(options);
-        builder.Logging.ClearProviders();
-        builder.Logging.SetMinimumLevel(LogLevel.Trace);
-        builder.Logging.AddFilter("Microsoft", LogLevel.Warning);
-        builder.Logging.AddFilter("System", LogLevel.Warning);
-        builder.Logging.AddFilter("Mezube", LogLevel.Trace);
-        builder.Logging.AddFilter("Mezon", (LogLevel)(int)options.MezonNetLogLevel);
-        builder.Logging.AddSimpleConsole(o =>
-        {
-            o.SingleLine = true;
-            o.TimestampFormat = "HH:mm:ss ";
-            o.IncludeScopes = true;
-        });
+        ConfigureLogging(builder.Logging, builder.Configuration, options);
 
         builder.Services.AddHttpClient<StnRestClientV2>();
         builder.Services.AddHttpClient<StnWhipClient>();
@@ -87,6 +76,31 @@ internal static class Program
         RegisterMediaCleanup(host);
         await host.RunAsync().ConfigureAwait(false);
     }
+
+    private static void ConfigureLogging(
+        ILoggingBuilder logging,
+        IConfiguration configuration,
+        BotOptions options)
+    {
+        logging.ClearProviders();
+        logging.AddConfiguration(configuration.GetSection("Logging"));
+        logging.SetMinimumLevel(ParseLogLevel(configuration["Logging:LogLevel:Default"], LogLevel.Information));
+        logging.AddFilter("Microsoft", ParseLogLevel(configuration["Logging:LogLevel:Microsoft"], LogLevel.Warning));
+        logging.AddFilter("System", ParseLogLevel(configuration["Logging:LogLevel:System"], LogLevel.Warning));
+        logging.AddFilter("Mezube", ParseLogLevel(configuration["Logging:LogLevel:Mezube"], LogLevel.Information));
+        logging.AddFilter("Mezon", (LogLevel)(int)options.MezonNetLogLevel);
+        logging.AddSimpleConsole(o =>
+        {
+            o.SingleLine = true;
+            o.TimestampFormat = "HH:mm:ss ";
+            o.IncludeScopes = true;
+        });
+    }
+
+    private static LogLevel ParseLogLevel(string? text, LogLevel fallback)
+        => !string.IsNullOrWhiteSpace(text) && Enum.TryParse(text, ignoreCase: true, out LogLevel level)
+            ? level
+            : fallback;
 
     private static void RegisterMediaCleanup(IHost host)
     {

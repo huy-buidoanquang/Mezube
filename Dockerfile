@@ -1,19 +1,17 @@
-# Build from parent folder:
-#   docker build -f Mezube/Dockerfile -t mezube .
+# Build from this directory:
+#   docker build -t mezube .
+# Run:
+#   docker run --rm -e DOTNET_ENVIRONMENT=prod \
+#     -v "$PWD/appsettings.prod.local.json:/app/appsettings.prod.local.json:ro" \
+#     -v mezube-data:/app/data -v mezube-temp:/app/temp mezube
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
-COPY Mezon.Net/src/Mezon.Net.Generators ./Mezon.Net/src/Mezon.Net.Generators
-COPY Mezon.Net/src/Mezon.Net.Core ./Mezon.Net/src/Mezon.Net.Core
-COPY Mezon.Net/src/Mezon.Net.Transport ./Mezon.Net/src/Mezon.Net.Transport
-COPY Mezon.Net/src/Mezon.Net.Client ./Mezon.Net/src/Mezon.Net.Client
-COPY Mezon.Net/src/Mezon.Net.Mmn ./Mezon.Net/src/Mezon.Net.Mmn
-COPY Mezon.Net/src/Mezon.Net.Sdk ./Mezon.Net/src/Mezon.Net.Sdk
-COPY Mezube ./Mezube
-
-WORKDIR /src/Mezube
+COPY Mezube.csproj ./
 RUN dotnet restore Mezube.csproj
-RUN dotnet publish Mezube.csproj -c Release -o /app/publish --no-restore
+
+COPY . ./
+RUN dotnet publish Mezube.csproj -c Release -o /app/publish --no-restore /p:UseAppHost=false
 
 FROM mcr.microsoft.com/dotnet/runtime:10.0 AS final
 WORKDIR /app
@@ -27,7 +25,9 @@ COPY --from=build /app/publish .
 ENV DOTNET_ENVIRONMENT=prod \
     Mezube__YtDlpPath=yt-dlp \
     Mezube__FfmpegPath=ffmpeg \
-    Mezube__TempDir=/app/temp
+    Mezube__TempDir=/app/temp \
+    Mezube__TracksDbPath=/app/data/tracks.db
 
 RUN mkdir -p /app/temp /app/data
+VOLUME ["/app/temp", "/app/data"]
 ENTRYPOINT ["dotnet", "Mezube.dll"]

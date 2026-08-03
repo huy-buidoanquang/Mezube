@@ -1,3 +1,5 @@
+publish/
+artifacts/
 bin/
 obj/
 .vs/
