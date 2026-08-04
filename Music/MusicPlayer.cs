@@ -415,26 +415,14 @@ public sealed class MusicPlayer
     {
         var clanId = ctx.Clan?.Id ?? ctx.Channel.ClanId;
         var outcome = await TrySkipAsync(ctx.Client, clanId, ctx.Author.Id, cancellationToken).ConfigureAwait(false);
-        if (!outcome.Allowed)
-        {
-            await ctx.ReplyAsync(outcome.Content).ConfigureAwait(false);
-            return;
-        }
-
-        await PublishControlOutcomeAsync(ctx, clanId, outcome.Content).ConfigureAwait(false);
+        await ctx.ReplyAsync(outcome.Content).ConfigureAwait(false);
     }
 
     public async Task StopAsync(ICommandContext ctx, CancellationToken cancellationToken = default)
     {
         var clanId = ctx.Clan?.Id ?? ctx.Channel.ClanId;
         var outcome = await TryStopAsync(ctx.Client, clanId, ctx.Author.Id, cancellationToken).ConfigureAwait(false);
-        if (!outcome.Allowed)
-        {
-            await ctx.ReplyAsync(outcome.Content).ConfigureAwait(false);
-            return;
-        }
-
-        await PublishControlOutcomeAsync(ctx, clanId, outcome.Content).ConfigureAwait(false);
+        await ctx.ReplyAsync(outcome.Content).ConfigureAwait(false);
     }
 
     public async Task PauseAsync(ICommandContext ctx, CancellationToken cancellationToken = default)
@@ -567,37 +555,6 @@ public sealed class MusicPlayer
         state.CancelTrack();
         state.IsPlaying = false;
         ScheduleIdleDestroy(clanId, state);
-    }
-
-    private async Task PublishControlOutcomeAsync(
-        ICommandContext ctx,
-        long clanId,
-        Mezon.Net.Client.MessageContent content)
-    {
-        var state = GetState(clanId);
-        if (state.ControlMessageId is long messageId
-            && state.NotifyClient is not null
-            && state.NotifyChannelId is long channelId)
-        {
-            try
-            {
-                var channel = await state.NotifyClient.GetChannelAsync(channelId, ctx.CancellationToken)
-                    .ConfigureAwait(false);
-                await channel.UpdateMessageAsync(
-                        messageId,
-                        content,
-                        hideEdited: true,
-                        createTimeSeconds: state.ControlMessageCreateTimeSeconds)
-                    .ConfigureAwait(false);
-                return;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to update control message {MessageId} after skip/stop", messageId);
-            }
-        }
-
-        await ctx.ReplyAsync(content).ConfigureAwait(false);
     }
 
     private async Task<bool> SkipStateAsync(ClanPlayerState state, CancellationToken cancellationToken)
