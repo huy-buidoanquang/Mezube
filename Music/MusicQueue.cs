@@ -45,6 +45,21 @@ public sealed class MusicQueue
         }
     }
 
+    public void EnqueueFront(QueuedPlay item)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        lock (_gate)
+        {
+            var kept = _items.ToArray();
+            _items.Clear();
+            _items.Enqueue(item);
+            foreach (var existing in kept)
+            {
+                _items.Enqueue(existing);
+            }
+        }
+    }
+
     public bool TryRemovePending(Func<QueuedPlay, bool> predicate)
     {
         ArgumentNullException.ThrowIfNull(predicate);

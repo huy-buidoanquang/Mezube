@@ -31,7 +31,8 @@ public sealed class DirectUrlTrackResolver : ITrackResolver
         var host = uri.Host.ToLowerInvariant();
         if (host.Contains("youtube.com", StringComparison.Ordinal)
             || host.Contains("youtu.be", StringComparison.Ordinal)
-            || host.Contains("music.youtube.com", StringComparison.Ordinal))
+            || host.Contains("music.youtube.com", StringComparison.Ordinal)
+            || host.Contains("soundcloud.com", StringComparison.Ordinal))
         {
             return false;
         }

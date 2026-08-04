@@ -70,7 +70,7 @@ public sealed class PlayableMediaProcessor
                     _options.MaxAudioBytes);
             }
 
-            if (stored?.HasPlayableUrl == true)
+            if (stored is not null && PlayableUrlHelper.IsPreparedPlayableUrl(stored.PlayableUrl))
             {
                 if (await _uploader.IsReachableAsync(stored.PlayableUrl!, cancellationToken).ConfigureAwait(false))
                 {
@@ -93,11 +93,32 @@ public sealed class PlayableMediaProcessor
                     id.Source,
                     id.ExternalId);
             }
+            else if (stored is not null && !string.IsNullOrWhiteSpace(stored.PlayableUrl))
+            {
+                _logger.LogWarning(
+                    "Ignoring invalid playable_url cache (not prepared CDN ogg/opus) {Source}/{Id}: {Url}",
+                    id.Source,
+                    id.ExternalId,
+                    stored.PlayableUrl);
+                try
+                {
+                    await _store.ClearPlayableUrlAsync(id.Source, id.ExternalId, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Failed to clear invalid playable_url for {Source}/{Id}", id.Source, id.ExternalId);
+                }
+            }
         }
 
         if (!NeedsRepackage(track.MediaUrl))
         {
-            if (identity is { } readyId)
+            if (!PlayableUrlHelper.IsPreparedPlayableUrl(track.MediaUrl))
+            {
+                // Fall through to full prep — never persist a non-CDN URL as playable.
+            }
+            else if (identity is { } readyId)
             {
                 await _store.SetPlayableUrlAsync(
                         readyId.Source,
@@ -107,14 +128,23 @@ public sealed class PlayableMediaProcessor
                     .ConfigureAwait(false);
                 await _store.TouchPlayedAsync(readyId.Source, readyId.ExternalId, cancellationToken)
                     .ConfigureAwait(false);
-            }
 
-            _logger.LogDebug(
-                "Playable media already direct for {Title} elapsedMs={ElapsedMs} url={Url}",
-                track.Title,
-                stopwatch.ElapsedMilliseconds,
-                track.MediaUrl);
-            return track;
+                _logger.LogDebug(
+                    "Playable media already direct for {Title} elapsedMs={ElapsedMs} url={Url}",
+                    track.Title,
+                    stopwatch.ElapsedMilliseconds,
+                    track.MediaUrl);
+                return track;
+            }
+            else
+            {
+                _logger.LogDebug(
+                    "Playable media already direct for {Title} elapsedMs={ElapsedMs} url={Url}",
+                    track.Title,
+                    stopwatch.ElapsedMilliseconds,
+                    track.MediaUrl);
+                return track;
+            }
         }
 
         _logger.LogDebug("Preparing CDN media for {Title}", track.Title);

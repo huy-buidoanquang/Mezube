@@ -37,7 +37,8 @@ public sealed class WhipFfmpegPublisher
         string mediaUrl,
         string whipUrl,
         string authorizationToken,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        long startOffsetMs = 0)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(roomName);
         ArgumentException.ThrowIfNullOrWhiteSpace(mediaUrl);
@@ -66,7 +67,7 @@ public sealed class WhipFfmpegPublisher
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        AddFfmpegArgs(psi, settings, authorizationToken);
+        AddFfmpegArgs(psi, settings, authorizationToken, startOffsetMs);
 
         _logger.LogDebug(
             "WHIP publish config room={Room} endpoint={Endpoint} mediaUrl={MediaUrl} encoderDisabled={EncoderDisabled} codecMode={CodecMode} bitrateKbps={BitrateKbps} sampleRate={SampleRate} channels={Channels} opusApplication={Application} vbr={Vbr} complexity={Complexity} fec={Fec} packetLossPercent={PacketLossPercent} handshakeTimeoutMs={HandshakeTimeoutMs}",
@@ -99,6 +100,22 @@ public sealed class WhipFfmpegPublisher
 
         var active = new ActivePublish(process, lifetime, publishing, ended, settings);
         _byRoom[roomName] = active;
+
+        // Play CT cancel (!skip/!stop) must kill ffmpeg immediately — do not wait for StopAsync.
+        lifetime.Token.Register(static state =>
+        {
+            var proc = (Process)state!;
+            try
+            {
+                if (!proc.HasExited)
+                {
+                    proc.Kill(entireProcessTree: true);
+                }
+            }
+            catch
+            {
+            }
+        }, process);
 
         _ = Task.Run(() => PumpStderrAsync(roomName, process, publishing, lifetime.Token), CancellationToken.None);
         _ = Task.Run(() => AwaitExitAsync(roomName, process, publishing, ended, lifetime), CancellationToken.None);
@@ -393,13 +410,22 @@ public sealed class WhipFfmpegPublisher
         }
     }
 
-    private static void AddFfmpegArgs(ProcessStartInfo psi, ResolvedWhipSettings settings, string authorizationToken)
+    private static void AddFfmpegArgs(
+        ProcessStartInfo psi,
+        ResolvedWhipSettings settings,
+        string authorizationToken,
+        long startOffsetMs = 0)
     {
         // Real-time pace from CDN/local audio into WHIP, either by Opus re-encode or stream copy.
         psi.ArgumentList.Add("-hide_banner");
         psi.ArgumentList.Add("-loglevel");
         psi.ArgumentList.Add("info");
         psi.ArgumentList.Add("-re");
+        if (startOffsetMs > 0)
+        {
+            psi.ArgumentList.Add("-ss");
+            psi.ArgumentList.Add((startOffsetMs / 1000.0).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture));
+        }
         psi.ArgumentList.Add("-i");
         psi.ArgumentList.Add(settings.MediaUrl);
         psi.ArgumentList.Add("-vn");

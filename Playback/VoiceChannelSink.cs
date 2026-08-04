@@ -46,7 +46,14 @@ public sealed class VoiceChannelSink : IPlaybackSink
 
     public string Name => "voice";
 
-    public async Task PlayAsync(PlaybackTarget target, TrackInfoEntity track, CancellationToken cancellationToken = default)
+    public Task PlayAsync(PlaybackTarget target, TrackInfoEntity track, CancellationToken cancellationToken = default)
+        => PlayAsync(target, track, cancellationToken, startOffsetMs: 0);
+
+    public async Task PlayAsync(
+        PlaybackTarget target,
+        TrackInfoEntity track,
+        CancellationToken cancellationToken,
+        long startOffsetMs)
     {
         var roomName = string.IsNullOrWhiteSpace(target.RoomName)
             ? target.ChannelId.ToString()
@@ -87,6 +94,11 @@ public sealed class VoiceChannelSink : IPlaybackSink
         var participantIdentity = StnRestClientV2.NewPublisherIdentity(client.BotId);
 
         var useWhip = _options.StnWhipEnabled;
+        if (startOffsetMs > 0 && !(useWhip && _whipPublisher.IsAvailable))
+        {
+            throw new InvalidOperationException("Seek requires WHIP voice playback.");
+        }
+
         if (useWhip && !_whipPublisher.IsAvailable)
         {
             _logger.LogWarning(
@@ -111,7 +123,8 @@ public sealed class VoiceChannelSink : IPlaybackSink
                         participantIdentity,
                         playable.MediaUrl,
                         playable.Title,
-                        cancellationToken)
+                        cancellationToken,
+                        startOffsetMs)
                     .ConfigureAwait(false);
                 transport = "whip";
             }
@@ -180,12 +193,48 @@ public sealed class VoiceChannelSink : IPlaybackSink
             ? target.ChannelId.ToString()
             : target.RoomName!;
 
-        var client = _holder.GetClient();
-        var authToken = await client.GetAuthTokenAsync().ConfigureAwait(false);
+        await StopRoomAsync(roomName, cancellationToken).ConfigureAwait(false);
+    }
 
+    /// <summary>
+    /// Hard-stop every active voice room (ffmpeg first, then STN). Used on host shutdown.
+    /// </summary>
+    public async Task StopAllAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await _whipPublisher.StopAllAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "WHIP StopAll during voice StopAll failed");
+        }
+
+        var rooms = _roomTransport.Keys
+            .Concat(_whip.ActiveRooms)
+            .Concat(_voiceV2.ActiveRooms)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        foreach (var room in rooms)
+        {
+            try
+            {
+                await StopRoomAsync(room, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Voice StopAll room failed room={Room}", room);
+            }
+        }
+    }
+
+    private async Task StopRoomAsync(string roomName, CancellationToken cancellationToken)
+    {
         _roomTransport.TryRemove(roomName, out var transport);
         _logger.LogDebug("Voice stop requested room={Room} transport={Transport}", roomName, transport);
 
+        // Kill local media first — must not depend on auth/network or audio keeps playing.
         try
         {
             await _whipPublisher.StopAsync(roomName).ConfigureAwait(false);
@@ -195,16 +244,28 @@ public sealed class VoiceChannelSink : IPlaybackSink
             _logger.LogDebug(ex, "WHIP ffmpeg stop failed room={Room}", roomName);
         }
 
-        if (_whip.TryGetSession(roomName, out _) || transport == VoiceTransport.Whip)
+        string? authToken = null;
+        try
         {
-            try
-            {
-                await _whip.StopAsync(authToken, roomName, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogDebug(ex, "WHIP STN stop failed room={Room}", roomName);
-            }
+            authToken = await _holder.GetClient().GetAuthTokenAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Voice stop auth token unavailable room={Room}", roomName);
+        }
+
+        if (authToken is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _whip.StopAsync(authToken, roomName, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "WHIP STN stop failed room={Room}", roomName);
         }
 
         try
@@ -243,7 +304,8 @@ public sealed class VoiceChannelSink : IPlaybackSink
         string participantIdentity,
         string mediaUrl,
         string title,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        long startOffsetMs = 0)
     {
         var session = await _whip.StartAsync(
                 authToken,
@@ -260,7 +322,8 @@ public sealed class VoiceChannelSink : IPlaybackSink
                     mediaUrl,
                     session.WhipUrl,
                     session.Token,
-                    cancellationToken)
+                    cancellationToken,
+                    startOffsetMs)
                 .ConfigureAwait(false);
             _roomTransport[roomName] = VoiceTransport.Whip;
             _logger.LogInformation(

@@ -26,8 +26,9 @@ ENV DOTNET_ENVIRONMENT=prod \
     Mezube__YtDlpPath=yt-dlp \
     Mezube__FfmpegPath=ffmpeg \
     Mezube__TempDir=/app/temp \
-    Mezube__TracksDbPath=/app/data/tracks.db
+    Mezube__PostgresConnectionString=Host=postgres;Port=5432;Database=mezube;Username=mezube;Password=mezube \
+    Mezube__RedisConnectionString=redis:6379
 
-RUN mkdir -p /app/temp /app/data
-VOLUME ["/app/temp", "/app/data"]
+RUN mkdir -p /app/temp
+VOLUME ["/app/temp"]
 ENTRYPOINT ["dotnet", "Mezube.dll"]

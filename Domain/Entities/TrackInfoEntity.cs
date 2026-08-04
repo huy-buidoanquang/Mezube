@@ -2,6 +2,7 @@ namespace Mezube.Domain.Entities;
 
 public sealed class TrackInfoEntity
 {
+    public long? TrackId { get; init; }
     public required string Title { get; init; }
     public required string MediaUrl { get; init; }
     public string? WebpageUrl { get; init; }
@@ -26,6 +27,7 @@ public sealed class TrackInfoEntity
     public TrackInfoEntity WithRequester(long userId, string? displayName)
         => new()
         {
+            TrackId = TrackId,
             Title = Title,
             MediaUrl = MediaUrl,
             WebpageUrl = WebpageUrl,

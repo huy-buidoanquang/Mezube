@@ -14,10 +14,10 @@ public static class CommandReplyTracker
     {
         public long MessageId { get; init; }
         public uint? CreateTimeSeconds { get; init; }
-        public TextChannel Channel { get; init; } = null!;
+        public Channel Channel { get; init; } = null!;
     }
 
-    public static void Remember(long messageId, uint? createTimeSeconds, TextChannel channel)
+    public static void Remember(long messageId, uint? createTimeSeconds, Channel channel)
         => Current.Value = new Slot
         {
             MessageId = messageId,

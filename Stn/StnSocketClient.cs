@@ -41,7 +41,8 @@ public sealed class StnSocketClient : IAsyncDisposable
 
     public bool IsPaused => _paused;
 
-    public async Task EnsureConnectedAsync(
+    /// <returns><see langword="true"/> when a new WebSocket was opened this call.</returns>
+    public async Task<bool> EnsureConnectedAsync(
         string authToken,
         long botUserId,
         string? username = null,
@@ -63,7 +64,7 @@ public sealed class StnSocketClient : IAsyncDisposable
             // Receive loop must outlive per-track CTS (skip cancels trackCts). If it
             // somehow exited while the socket stayed Open, restart it on this session.
             EnsureReceiveLoop();
-            return;
+            return false;
         }
 
         _token = authToken;
@@ -81,6 +82,7 @@ public sealed class StnSocketClient : IAsyncDisposable
             // (ws_close) → kicks every listener on skip/next.
             EnsureReceiveLoop();
             _logger.LogInformation("STN publisher WS connected via {Base}", _wsBase);
+            return true;
         }
         catch (Exception ex)
         {

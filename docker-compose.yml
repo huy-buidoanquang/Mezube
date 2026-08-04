@@ -1,0 +1,50 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: mezube
+      POSTGRES_PASSWORD: mezube
+      POSTGRES_DB: mezube
+    ports:
+      - "5432:5432"
+    volumes:
+      - mezube-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mezube -d mezube"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - mezube-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mezube:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DOTNET_ENVIRONMENT: prod
+      Mezube__PostgresConnectionString: Host=postgres;Port=5432;Database=mezube;Username=mezube;Password=mezube
+      Mezube__RedisConnectionString: redis:6379
+      Mezube__TempDir: /app/temp
+    volumes:
+      - ./appsettings.prod.local.json:/app/appsettings.prod.local.json:ro
+      - mezube-temp:/app/temp
+
+volumes:
+  mezube-pg:
+  mezube-redis:
+  mezube-temp:

@@ -111,7 +111,7 @@ Mô hình kiểu JMusicBot (chưa có vote-skip):
 | Max audio size | 100MB | Quá → Searching cập nhật `Copyright strikes again! I can’t play this song right now.` |
 | Inter-track delay | 2s | Sau mỗi lần stop sink trước bài kế |
 
-Audio được **process ngầm** ngay khi vào queue (không đợi đến lượt phát). Persistence dùng service/repository (`ITrackLibraryService` / SQLite) — có thể thay Postgres sau.
+Audio được **process ngầm** ngay khi vào queue (không đợi đến lượt phát). Persistence: **PostgreSQL** (track library, clan settings, playlists, history) + **Redis** (player/queue session). Xem `docker-compose.yml` và `Mezube:PostgresConnectionString` / `Mezube:RedisConnectionString`.
 
 ## Lệnh
 

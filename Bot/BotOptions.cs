@@ -44,7 +44,12 @@ public sealed class BotOptions
     public string YtDlpPath { get; set; } = "yt-dlp";
     public string FfmpegPath { get; set; } = "ffmpeg";
     public string TempDir { get; set; } = "temp";
+    /// <summary>Legacy SQLite path (migration script only). Runtime uses Postgres.</summary>
     public string TracksDbPath { get; set; } = "data/tracks.db";
+    /// <summary>Npgsql connection string, e.g. Host=localhost;Database=mezube;Username=mezube;Password=…</summary>
+    public string PostgresConnectionString { get; set; } = string.Empty;
+    /// <summary>StackExchange.Redis configuration string, e.g. localhost:6379</summary>
+    public string RedisConnectionString { get; set; } = "localhost:6379";
     public int PreparedAudioBitrateKbps { get; set; } = DefaultAudioBitrateKbps;
     public int PreparedAudioChannels { get; set; } = DefaultAudioChannels;
     public int PreparedAudioSampleRate { get; set; } = DefaultAudioSampleRate;
@@ -129,6 +134,16 @@ public sealed class BotOptions
         if (string.IsNullOrWhiteSpace(CdnBaseUrl))
         {
             throw new InvalidOperationException("Mezube:CdnBaseUrl is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(PostgresConnectionString))
+        {
+            throw new InvalidOperationException("Mezube:PostgresConnectionString is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(RedisConnectionString))
+        {
+            throw new InvalidOperationException("Mezube:RedisConnectionString is required.");
         }
 
         ValidateAudioSettings();

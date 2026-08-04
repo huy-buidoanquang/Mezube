@@ -1,9 +1,13 @@
 using Mezon.Net.Core;
 using Mezon.Net.Models;
 using Mezon.Net.Sdk;
+using Mezon.Net.Sdk.Caching;
 using Mezon.Net.Sdk.Commands;
 using Mezon.Net.Sdk.Interactions;
+using Mezube.Application;
 using Mezube.Helpers;
+using Mezube.Infrastructure.Caching;
+using Mezube.Infrastructure.Caching.Snapshots;
 using Mezube.Music;
 using Mezube.Ui;
 using Microsoft.Extensions.Hosting;
@@ -16,7 +20,6 @@ namespace Mezube.Bot;
 public sealed class MezubeBot : BackgroundService
 {
     private static readonly AsyncLocal<(long ClanId, long ChannelId)?> RateLimitNotifyTarget = new();
-    private static readonly TimeSpan ClanRefreshDebounce = TimeSpan.FromSeconds(3);
 
     private readonly BotOptions _options;
     private readonly MusicPlayer _player;
@@ -24,12 +27,17 @@ public sealed class MezubeBot : BackgroundService
     private readonly StreamingChannelSinkHolder _streamingHolder;
     private readonly VoiceChannelSinkHolder _voiceHolder;
     private readonly MusicVizAssets _viz;
+    private readonly IClanSettingsService _clanSettings;
+    private readonly MezonEntityCacheBridge _entityCache;
+    private readonly IEntitySnapshotStore _snapshots;
+    private readonly MezonSnapshotKeyFactory _snapshotKeys;
+    private readonly PlaybackAccess _access;
     private readonly ILogger<MezubeBot> _logger;
     private readonly ILogger _mezonLogger;
     private readonly ConcurrentDictionary<(long ClanId, long MessageId), byte> _controlOneShot = new();
+    private readonly ConcurrentDictionary<long, byte> _ownerHydrateInFlight = new();
     private MezonClient? _client;
     private long _lastRateLimitNotifyMs;
-    private int _clanRefreshGeneration;
 
     public MezubeBot(
         BotOptions options,
@@ -38,6 +46,11 @@ public sealed class MezubeBot : BackgroundService
         StreamingChannelSinkHolder streamingHolder,
         VoiceChannelSinkHolder voiceHolder,
         MusicVizAssets viz,
+        IClanSettingsService clanSettings,
+        MezonEntityCacheBridge entityCache,
+        IEntitySnapshotStore snapshots,
+        MezonSnapshotKeyFactory snapshotKeys,
+        PlaybackAccess access,
         ILogger<MezubeBot> logger,
         ILoggerFactory loggerFactory)
     {
@@ -47,6 +60,11 @@ public sealed class MezubeBot : BackgroundService
         _streamingHolder = streamingHolder;
         _voiceHolder = voiceHolder;
         _viz = viz;
+        _clanSettings = clanSettings;
+        _entityCache = entityCache;
+        _snapshots = snapshots;
+        _snapshotKeys = snapshotKeys;
+        _access = access;
         _logger = logger;
         _mezonLogger = loggerFactory.CreateLogger("Mezon");
     }
@@ -72,6 +90,7 @@ public sealed class MezubeBot : BackgroundService
         _streamingHolder.SetClient(client);
         _voiceHolder.SetClient(client);
         WireClientLog(client);
+        await _entityCache.AttachAsync(client, stoppingToken).ConfigureAwait(false);
 
         var commands = new CommandService(_options.CommandPrefix);
         commands.Use(async (ctx, next) =>
@@ -208,25 +227,30 @@ public sealed class MezubeBot : BackgroundService
             {
                 _logger.LogWarning(ex, "Music viz warm-up failed");
             }
+            // Owner sync is post-login connect-init only (no REST from Ready — Sdk hard rule).
         };
 
         client.ClanJoined += data =>
         {
             ClanJoinResponse joined = data;
-            // ClanJoin is also the JoinClanChat ack. Only refresh for clans not already cached
-            // (true mid-session invite); otherwise Refresh → JoinClanChat → ClanJoin loops forever.
-            if (client.Clans.TryGet(joined.ClanId, out _))
+            // Event path: L1 only. Stub installs have CreatorId=0 — hydrate in background.
+            TrySyncOwnerFromL1(client, joined.ClanId, stoppingToken);
+            ScheduleOwnerHydrateIfNeeded(client, joined.ClanId, stoppingToken);
+            return Task.CompletedTask;
+        };
+
+        client.ClanUserAdded += data =>
+        {
+            AddClanUserEventResponse added = data;
+            if (added.User.UserId == client.BotId && added.ClanId != 0)
             {
-                _logger.LogDebug(
-                    "ClanJoin ack for known clanId={ClanId}; skipping membership refresh",
-                    joined.ClanId);
-                return Task.CompletedTask;
+                _logger.LogInformation(
+                    "Bot installed into clan={ClanId}; scheduling owner hydrate",
+                    added.ClanId);
+                TrySyncOwnerFromL1(client, added.ClanId, stoppingToken);
+                ScheduleOwnerHydrateIfNeeded(client, added.ClanId, stoppingToken);
             }
 
-            _logger.LogInformation(
-                "Clan joined mid-session clanId={ClanId}; refreshing membership",
-                joined.ClanId);
-            ScheduleClanMembershipRefresh(client, stoppingToken);
             return Task.CompletedTask;
         };
 
@@ -296,7 +320,7 @@ public sealed class MezubeBot : BackgroundService
             return;
         }
 
-        _ = EnsureClansJoinedLoopAsync(client, stoppingToken);
+        _ = EnsureClansJoinedAndSyncOwnersAsync(client, stoppingToken);
 
         try
         {
@@ -305,6 +329,10 @@ public sealed class MezubeBot : BackgroundService
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
             _logger.LogInformation("Shutdown requested.");
+        }
+        finally
+        {
+            await _entityCache.DisposeAsync().ConfigureAwait(false);
         }
     }
 
@@ -316,44 +344,6 @@ public sealed class MezubeBot : BackgroundService
         }
 
         return ctx.RespondAsync(content);
-    }
-
-    private void ScheduleClanMembershipRefresh(MezonClient client, CancellationToken stoppingToken)
-    {
-        var generation = Interlocked.Increment(ref _clanRefreshGeneration);
-        _ = DebouncedRefreshClanMembershipAsync(client, generation, stoppingToken);
-    }
-
-    private async Task DebouncedRefreshClanMembershipAsync(
-        MezonClient client,
-        int generation,
-        CancellationToken stoppingToken)
-    {
-        try
-        {
-            await Task.Delay(ClanRefreshDebounce, stoppingToken).ConfigureAwait(false);
-            if (generation != Volatile.Read(ref _clanRefreshGeneration))
-            {
-                return;
-            }
-
-            await client.RefreshClanMembershipAsync(stoppingToken).ConfigureAwait(false);
-            _logger.LogInformation(
-                "Clan membership refreshed after invite: {Count} clan(s)",
-                client.Clans.Count);
-        }
-        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-        {
-            // shutdown
-        }
-        catch (OperationCanceledException)
-        {
-            // superseded debounce (should not happen with generation gate)
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Mid-session clan membership refresh failed");
-        }
     }
 
     private async Task TransportRateLimitedHandlerAsync(IRateLimitInfo info)
@@ -393,34 +383,247 @@ public sealed class MezubeBot : BackgroundService
         }
     }
 
-    private async Task EnsureClansJoinedLoopAsync(MezonClient client, CancellationToken cancellationToken)
+    /// <summary>Event-safe: only reads L1 cache; never calls REST.</summary>
+    private void TrySyncOwnerFromL1(MezonClient client, long clanId, CancellationToken cancellationToken)
     {
-        // Login/Connected already seeds clans via JoinClanChat. Only retry when still empty.
-        if (client.Clans.Count > 0)
+        if (!client.Clans.TryGet(clanId, out var clan) || clan.CreatorId == 0)
         {
-            _logger.LogInformation("Clan membership already ready: {Count} clan(s)", client.Clans.Count);
             return;
         }
 
-        for (var attempt = 1; attempt <= 12 && !cancellationToken.IsCancellationRequested; attempt++)
+        _ = PersistOwnerAsync(clanId, clan.CreatorId, cancellationToken);
+    }
+
+    /// <summary>
+    /// Fire-and-forget app-owned hydrate when L1 is a stub (CreatorId=0).
+    /// Does not block the event dispatch path (Sdk hard rule).
+    /// </summary>
+    private void ScheduleOwnerHydrateIfNeeded(MezonClient client, long clanId, CancellationToken cancellationToken)
+    {
+        if (clanId == 0)
         {
+            return;
+        }
+
+        if (client.Clans.TryGet(clanId, out var clan) && clan.CreatorId != 0)
+        {
+            return;
+        }
+
+        if (!_ownerHydrateInFlight.TryAdd(clanId, 0))
+        {
+            return;
+        }
+
+        _ = HydrateClanOwnerAsync(client, clanId, cancellationToken);
+    }
+
+    private async Task HydrateClanOwnerAsync(MezonClient client, long clanId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var existing = await _clanSettings.GetOwnerIdAsync(clanId, cancellationToken).ConfigureAwait(false);
+            if (existing is long ownerId && ownerId != 0)
+            {
+                return;
+            }
+
+            // Prefer L2 before REST.
             try
             {
-                await client.RefreshClanMembershipAsync(cancellationToken).ConfigureAwait(false);
-                if (client.Clans.Count > 0)
+                var snapshot = await _snapshots.GetAsync<ClanSnapshotDto>(_snapshotKeys.Clan(clanId), cancellationToken)
+                    .ConfigureAwait(false);
+                if (snapshot is { CreatorId: not 0 })
                 {
-                    _logger.LogInformation("Clan membership ready: {Count} clan(s)", client.Clans.Count);
+                    await PersistOwnerAsync(clanId, snapshot.CreatorId, cancellationToken).ConfigureAwait(false);
+                    _logger.LogInformation(
+                        "Owner hydrated from L2 clan={ClanId} owner={OwnerId}",
+                        clanId,
+                        snapshot.CreatorId);
                     return;
                 }
-
-                _logger.LogWarning("Clan list empty (attempt {Attempt}/12). Invite bot to a clan if needed.", attempt);
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Clan join retry {Attempt}/12 failed", attempt);
+                _logger.LogDebug(ex, "L2 owner hydrate miss clan={ClanId}", clanId);
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(Math.Min(30, attempt * 3)), cancellationToken).ConfigureAwait(false);
+            // App-owned background REST. Do NOT use GetClanAsync here: L1 already holds a stub
+            // (CreatorId=0) from ClanJoined, so GetOrFetch would never hit the API.
+            var list = await client.ListClanDescsAsync(new ListClanDescParams()).ConfigureAwait(false);
+            for (var i = 0; i < list.Clandesc.Count; i++)
+            {
+                var desc = list.Clandesc[i];
+                if (desc.ClanId != clanId || desc.CreatorId == 0)
+                {
+                    continue;
+                }
+
+                await PersistOwnerAndSnapshotAsync(desc.ClanId, desc.CreatorId, desc.ClanName, cancellationToken)
+                    .ConfigureAwait(false);
+                _logger.LogInformation(
+                    "Owner hydrated after mid-session install clan={ClanId} owner={OwnerId}",
+                    clanId,
+                    desc.CreatorId);
+                return;
+            }
+
+            _logger.LogWarning("Owner hydrate found no CreatorId for clan={ClanId}", clanId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Owner hydrate failed clan={ClanId}", clanId);
+        }
+        finally
+        {
+            _ownerHydrateInFlight.TryRemove(clanId, out _);
+        }
+    }
+
+    private async Task PersistOwnerAndSnapshotAsync(
+        long clanId,
+        long ownerId,
+        string? name,
+        CancellationToken cancellationToken)
+    {
+        await PersistOwnerAsync(clanId, ownerId, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var revision = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            await _snapshots.SetAsync(
+                    _snapshotKeys.Clan(clanId),
+                    new ClanSnapshotDto
+                    {
+                        ClanId = clanId,
+                        CreatorId = ownerId,
+                        Name = string.IsNullOrWhiteSpace(name) ? null : name,
+                        Revision = revision,
+                    },
+                    new CacheEntryOptions
+                    {
+                        AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(1),
+                        Revision = revision,
+                    },
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "L2 clan snapshot after owner hydrate failed clan={ClanId}", clanId);
+        }
+    }
+
+    private async Task PersistOwnerAsync(long clanId, long ownerId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _clanSettings.EnsureOwnerAsync(clanId, ownerId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Owner persist failed clan={ClanId}", clanId);
+        }
+    }
+
+    /// <summary>
+    /// Connect-init path (allowed to call ListClanDescs / Refresh). Seeds Postgres owner_id.
+    /// </summary>
+    private async Task EnsureClansJoinedAndSyncOwnersAsync(MezonClient client, CancellationToken cancellationToken)
+    {
+        if (client.Clans.Count == 0)
+        {
+            for (var attempt = 1; attempt <= 12 && !cancellationToken.IsCancellationRequested; attempt++)
+            {
+                try
+                {
+                    await client.RefreshClanMembershipAsync(cancellationToken).ConfigureAwait(false);
+                    if (client.Clans.Count > 0)
+                    {
+                        _logger.LogInformation("Clan membership ready: {Count} clan(s)", client.Clans.Count);
+                        break;
+                    }
+
+                    _logger.LogWarning(
+                        "Clan list empty (attempt {Attempt}/12). Invite bot to a clan if needed.",
+                        attempt);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Clan join retry {Attempt}/12 failed", attempt);
+                }
+
+                await Task.Delay(TimeSpan.FromSeconds(Math.Min(30, attempt * 3)), cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+        else
+        {
+            _logger.LogInformation("Clan membership already ready: {Count} clan(s)", client.Clans.Count);
+        }
+
+        await SyncOwnersAndWarmDjAsync(client, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Connect-init only: one ListClanDescs for owner_id + L2 clan DTOs.
+    /// DJ roles: warm only clans that already have dj_role_id (no blanket ListRoles / LoadChannels).
+    /// </summary>
+    private async Task SyncOwnersAndWarmDjAsync(MezonClient client, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var clans = await client.ListClanDescsAsync(new ListClanDescParams()).ConfigureAwait(false);
+            var revision = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            for (var i = 0; i < clans.Clandesc.Count; i++)
+            {
+                var desc = clans.Clandesc[i];
+                if (desc.ClanId == 0)
+                {
+                    continue;
+                }
+
+                if (desc.CreatorId != 0)
+                {
+                    await _clanSettings.EnsureOwnerAsync(desc.ClanId, desc.CreatorId, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+
+                try
+                {
+                    await _snapshots.SetAsync(
+                            _snapshotKeys.Clan(desc.ClanId),
+                            new ClanSnapshotDto
+                            {
+                                ClanId = desc.ClanId,
+                                CreatorId = desc.CreatorId,
+                                Name = string.IsNullOrWhiteSpace(desc.ClanName) ? null : desc.ClanName,
+                                Revision = revision + i,
+                            },
+                            new CacheEntryOptions
+                            {
+                                AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(1),
+                                Revision = revision + i,
+                            },
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "L2 clan seed failed clan={ClanId}", desc.ClanId);
+                }
+
+                var djRoleId = await _clanSettings.GetDjRoleIdAsync(desc.ClanId, cancellationToken)
+                    .ConfigureAwait(false);
+                if (djRoleId is long roleId)
+                {
+                    await _access.WarmDjRoleMembershipAsync(client, desc.ClanId, roleId, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Post-login owner/DJ warm failed");
         }
     }
 

@@ -6,9 +6,11 @@ public interface ITrackRepository
 {
     Task<TrackEntity?> TryGetAsync(string source, string externalId, CancellationToken cancellationToken = default);
 
+    Task<TrackEntity?> TryGetByIdAsync(long trackId, CancellationToken cancellationToken = default);
+
     Task<TrackEntity?> TryGetByAliasAsync(string aliasKey, CancellationToken cancellationToken = default);
 
-    Task UpsertMetadataAsync(TrackEntity track, CancellationToken cancellationToken = default);
+    Task<long> UpsertMetadataAsync(TrackEntity track, CancellationToken cancellationToken = default);
 
     Task SetPlayableUrlAsync(
         string source,
@@ -23,6 +25,8 @@ public interface ITrackRepository
         CancellationToken cancellationToken = default);
 
     Task TouchPlayedAsync(string source, string externalId, CancellationToken cancellationToken = default);
+
+    Task ClearPlayableUrlAsync(string source, string externalId, CancellationToken cancellationToken = default);
 
     Task MarkTooLargeAsync(
         string source,

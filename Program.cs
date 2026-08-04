@@ -1,16 +1,20 @@
 ﻿using Mezube.Application;
 using Mezube.Bot;
+using Mezube.Infrastructure.Caching;
 using Mezube.Infrastructure.Persistence;
-using Mezube.Infrastructure.Persistence.Sqlite;
+using Mezube.Infrastructure.Persistence.Postgres;
+using Mezube.Infrastructure.Persistence.Redis;
 using Mezube.Media;
 using Mezube.Music;
 using Mezube.Playback;
 using Mezube.Stn;
 using Mezube.Ui;
+using Mezon.Net.Sdk.Caching.Redis;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using StackExchange.Redis;
 
 namespace Mezube;
 
@@ -49,20 +53,56 @@ internal static class Program
         builder.Services.AddSingleton<MezonCdnUploader>();
         builder.Services.AddSingleton<MusicVizAssets>();
 
-        builder.Services.AddSingleton<SqliteDbConnectionFactory>();
-        builder.Services.AddSingleton<ITrackRepository, SqliteTrackRepository>();
-        builder.Services.AddSingleton<IClanSettingsRepository, SqliteClanSettingsRepository>();
+        builder.Services.AddSingleton<PostgresDbConnectionFactory>();
+        builder.Services.AddSingleton<ITrackRepository, PostgresTrackRepository>();
+        builder.Services.AddSingleton<IClanSettingsRepository, PostgresClanSettingsRepository>();
+        builder.Services.AddSingleton<ICommandChannelRepository, PostgresCommandChannelRepository>();
+        builder.Services.AddSingleton<IPlayHistoryRepository, PostgresPlayHistoryRepository>();
+        builder.Services.AddSingleton<IPlaylistRepository, PostgresPlaylistRepository>();
         builder.Services.AddSingleton<ITrackLibraryService, TrackLibraryService>();
         builder.Services.AddSingleton<IClanSettingsService, ClanSettingsService>();
+
+        if (string.IsNullOrWhiteSpace(options.RedisConnectionString))
+        {
+            throw new InvalidOperationException("Mezube:RedisConnectionString is required.");
+        }
+
+        var redisMux = ConnectionMultiplexer.Connect(options.RedisConnectionString);
+        builder.Services.AddSingleton<IConnectionMultiplexer>(redisMux);
+        builder.Services.AddSingleton<RedisConnection>(sp =>
+            new RedisConnection(
+                sp.GetRequiredService<IConnectionMultiplexer>(),
+                sp.GetRequiredService<ILogger<RedisConnection>>(),
+                ownsMultiplexer: false));
+        builder.Services.AddMezonRedisEntitySnapshotStore(redisMux, o =>
+        {
+            o.KeyPrefix = "mezon:snapshot";
+            o.InvalidationChannel = "mezon:snapshot:invalidate";
+            o.DefaultAbsoluteExpirationRelativeToNow = TimeSpan.FromHours(1);
+        });
+        builder.Services.AddMezonRedisSnapshotInvalidationListener(redisMux, o =>
+        {
+            o.KeyPrefix = "mezon:snapshot";
+            o.InvalidationChannel = "mezon:snapshot:invalidate";
+            o.DefaultAbsoluteExpirationRelativeToNow = TimeSpan.FromHours(1);
+        });
+        builder.Services.AddSingleton<MezonSnapshotKeyFactory>();
+        builder.Services.AddSingleton<MezonEntityCacheBridge>();
+
+        builder.Services.AddSingleton<IClanPlayerStore, RedisClanPlayerStore>();
+        builder.Services.AddSingleton<IVoiceBindStore, RedisVoiceBindStore>();
+        builder.Services.AddSingleton<IVoteSkipStore, RedisVoteSkipStore>();
 
         builder.Services.AddSingleton<PlayableMediaProcessor>();
         builder.Services.AddSingleton<TrackPrepService>();
         builder.Services.AddSingleton<YoutubeTrackResolver>();
         builder.Services.AddSingleton<DirectUrlTrackResolver>();
+        builder.Services.AddSingleton<SoundCloudTrackResolver>();
         builder.Services.AddSingleton<ITrackResolver>(sp =>
             new CompositeTrackResolver(
             [
                 sp.GetRequiredService<YoutubeTrackResolver>(),
+                sp.GetRequiredService<SoundCloudTrackResolver>(),
                 sp.GetRequiredService<DirectUrlTrackResolver>(),
             ]));
         builder.Services.AddSingleton<BindStore>();
@@ -70,6 +110,7 @@ internal static class Program
         builder.Services.AddSingleton<VoiceChannelSink>();
         builder.Services.AddSingleton<PlaybackAccess>();
         builder.Services.AddSingleton<MusicPlayer>();
+        builder.Services.AddHostedService<PersistenceInitializer>();
         builder.Services.AddHostedService<MezubeBot>();
 
         var host = builder.Build();
@@ -106,11 +147,22 @@ internal static class Program
     {
         var lifetime = host.Services.GetRequiredService<IHostApplicationLifetime>();
         var publisher = host.Services.GetRequiredService<WhipFfmpegPublisher>();
+        var voiceSink = host.Services.GetRequiredService<VoiceChannelSink>();
         var streamingSessions = host.Services.GetRequiredService<StnStreamingSessionManager>();
         var logger = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Mezube.MediaCleanup");
 
         lifetime.ApplicationStopping.Register(() =>
         {
+            try
+            {
+                logger.LogDebug("Stopping all voice rooms during host shutdown");
+                voiceSink.StopAllAsync().GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to stop voice rooms during shutdown");
+            }
+
             try
             {
                 logger.LogDebug("Stopping all active WHIP publishers during host shutdown");
@@ -129,6 +181,15 @@ internal static class Program
             catch (Exception ex)
             {
                 logger.LogWarning(ex, "Failed to dispose STN streaming sessions during shutdown");
+            }
+
+            try
+            {
+                host.Services.GetRequiredService<IConnectionMultiplexer>().Dispose();
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "Redis multiplexer dispose ignored");
             }
         });
     }

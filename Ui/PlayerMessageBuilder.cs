@@ -178,7 +178,7 @@ public static class PlayerMessageBuilder
         return trimmed[..(NextTitleMaxChars - 3)] + "...";
     }
 
-    public static MessageContent Queued(TrackInfoEntity track, int position, long? channelId = null)
+    public static MessageContent Queued(TrackInfoEntity track, int position, string? channelLabel = null)
     {
         var fields = new List<MessageEmbedField>
         {
@@ -186,9 +186,9 @@ public static class PlayerMessageBuilder
             new("Duration", track.DisplayDuration, inline: true),
             new("Source", track.Source, inline: true),
         };
-        if (channelId is long ch)
+        if (!string.IsNullOrWhiteSpace(channelLabel))
         {
-            fields.Add(new("Channel", $"{ch}", inline: true));
+            fields.Add(new("Channel", Escape(FormatChannelMention(channelLabel)), inline: true));
         }
 
         return Build(
@@ -201,7 +201,7 @@ public static class PlayerMessageBuilder
             fields);
     }
 
-    public static MessageContent UpNext(TrackInfoEntity track, int secondsRemaining = 10, long? channelId = null)
+    public static MessageContent UpNext(TrackInfoEntity track, int secondsRemaining = 10, string? channelLabel = null)
     {
         var fields = new List<MessageEmbedField>
         {
@@ -209,9 +209,9 @@ public static class PlayerMessageBuilder
             new("Duration", track.DisplayDuration, inline: true),
             new("Source", track.Source, inline: true),
         };
-        if (channelId is long ch)
+        if (!string.IsNullOrWhiteSpace(channelLabel))
         {
-            fields.Add(new("Channel", $"{ch}", inline: true));
+            fields.Add(new("Channel", Escape(FormatChannelMention(channelLabel)), inline: true));
         }
 
         if (!string.IsNullOrWhiteSpace(track.RequestedBy))
@@ -286,12 +286,22 @@ public static class PlayerMessageBuilder
     public static string FormatDestination(string mode, string? channelLabel)
         => string.IsNullOrWhiteSpace(channelLabel)
             ? mode
-            : $"{mode} · #{channelLabel}";
+            : $"{mode} · {FormatChannelMention(channelLabel)}";
+
+    /// <summary>Display form <c>#channel_label</c> (strips a leading # if already present).</summary>
+    public static string FormatChannelMention(string? channelLabel, long? channelId = null)
+    {
+        if (!string.IsNullOrWhiteSpace(channelLabel))
+        {
+            var label = channelLabel.Trim().TrimStart('#');
+            return string.IsNullOrEmpty(label) ? (channelId is long id ? $"#{id}" : "#unknown") : $"#{label}";
+        }
+
+        return channelId is long fallback ? $"#{fallback}" : "#unknown";
+    }
 
     private static string FormatChannelLabel(PlaybackTarget target)
-        => string.IsNullOrWhiteSpace(target.ChannelLabel)
-            ? target.ChannelId.ToString()
-            : target.ChannelLabel!;
+        => FormatChannelMention(target.ChannelLabel, target.ChannelId);
 
     public static MessageContent NotAllowed(string description)
         => Error("Not allowed", description);
@@ -350,7 +360,8 @@ public static class PlayerMessageBuilder
         {
             new("Voice", $"{p}play [#voice] <url|query>"),
             new("Streaming", $"{p}stream [#stream] <url|query>"),
-            new("Controls", $"{p}skip · {p}pause · {p}resume · {p}stop · {p}queue · {p}np"),
+            new("Controls", $"{p}skip · {p}voteskip · {p}pause · {p}resume · {p}stop · {p}queue · {p}np · {p}loop · {p}seek"),
+            new("Library", $"{p}playlist · {p}musicchannel · {p}setdj · {p}settings"),
             new("DJ", $"{p}setdj @role|roleId|none · {p}settings"),
         };
 
