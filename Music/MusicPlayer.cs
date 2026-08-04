@@ -891,6 +891,33 @@ public sealed class MusicPlayer
                         _logger.LogWarning(ex, "Stop sink failed channel={ChannelId}", target.ChannelId);
                     }
                 }
+                catch (OperationCanceledException) when (trackCts.IsCancellationRequested)
+                {
+                    // !skip / !stop cancelled prepare/play. The command already replied —
+                    // do NOT treat this as playback failure (that was sending a second bot message).
+                    try
+                    {
+                        if (mode == PlaybackMode.Streaming)
+                        {
+                            if (state.LastDestroyReason == PlayerDestroyReason.UserStop)
+                            {
+                                await _streamingSink.StopAsync(target, CancellationToken.None).ConfigureAwait(false);
+                            }
+                            else
+                            {
+                                await _streamingSink.EndTrackAsync(target, CancellationToken.None).ConfigureAwait(false);
+                            }
+                        }
+                        else
+                        {
+                            await _voiceSink.StopAsync(target, CancellationToken.None).ConfigureAwait(false);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Teardown after skip/stop cancel ignored channel={ChannelId}", target.ChannelId);
+                    }
+                }
                 catch (AudioTooLargeException)
                 {
                     await NotifyCopyrightBlockedAsync(state, item).ConfigureAwait(false);
@@ -1189,6 +1216,11 @@ public sealed class MusicPlayer
 
     private async Task NotifyPlaybackFailureAsync(ClanPlayerState state, TrackInfoEntity track, Exception ex)
     {
+        if (ex is OperationCanceledException)
+        {
+            return;
+        }
+
         if (state.NotifyClient is null || state.NotifyChannelId is not long channelId)
         {
             return;
