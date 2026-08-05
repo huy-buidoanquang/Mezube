@@ -358,8 +358,7 @@ public static class PlayerMessageBuilder
         var p = prefix;
         var fields = new List<MessageEmbedField>
         {
-            new("Voice", $"{p}play [#voice] <url|query>"),
-            new("Streaming", $"{p}stream [#stream] <url|query>"),
+            new("Play", $"{p}play [#voice|#stream] <url | query>"),
             new("Controls", $"{p}skip · {p}voteskip · {p}pause · {p}resume · {p}stop · {p}queue · {p}np · {p}loop · {p}seek"),
             new("Library", $"{p}playlist · {p}musicchannel · {p}setdj · {p}settings"),
             new("DJ", $"{p}setdj @role|roleId|none · {p}settings"),

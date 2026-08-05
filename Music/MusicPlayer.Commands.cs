@@ -291,7 +291,7 @@ public sealed partial class MusicPlayer
                     {
                         await ctx.ReplyAsync(PlayerMessageBuilder.Error(
                                 "Missing args",
-                                "playlist add <name> <url|query>"))
+                                "playlist add <name> <url | query>"))
                             .ConfigureAwait(false);
                         return;
                     }

@@ -18,7 +18,6 @@ public sealed class MusicCommandModule
     public void Register(CommandService commands)
     {
         commands.AddCommand("play", HandlePlayAsync).WithAlias("p");
-        commands.AddCommand("stream", HandleStreamAsync).WithAlias("s");
         commands.AddCommand("skip", ctx => _player.SkipAsync(ctx, ctx.CancellationToken)).WithAlias("sk");
         commands.AddCommand("voteskip", ctx => _player.VoteSkipAsync(ctx, ctx.CancellationToken)).WithAlias("vskip");
         commands.AddCommand("stop", ctx => _player.StopAsync(ctx, ctx.CancellationToken)).WithAlias("st");
@@ -44,24 +43,10 @@ public sealed class MusicCommandModule
         {
             return ctx.ReplyAsync(PlayerMessageBuilder.Error(
                 "Missing track",
-                $"Example: `{_prefix}play #voice_channel never gonna give you up`"));
+                $"Example: `{_prefix}play #voice | stream_channel never gonna give you up`"));
         }
 
-        return _player.PlayVoiceAsync(ctx, query, channelId, ctx.CancellationToken);
-    }
-
-    private Task HandleStreamAsync(ICommandContext ctx)
-    {
-        var channelId = ChannelTargetParser.TryGetHashtagChannelId(ctx);
-        var query = ChannelTargetParser.BuildQuery(ctx.Args);
-        if (string.IsNullOrWhiteSpace(query))
-        {
-            return ctx.ReplyAsync(PlayerMessageBuilder.Error(
-                "Missing track",
-                $"Example: `{_prefix}stream #stream_channel never gonna give you up`"));
-        }
-
-        return _player.PlayStreamingAsync(ctx, query, channelId, ctx.CancellationToken);
+        return _player.PlayAutoAsync(ctx, query, channelId, ctx.CancellationToken);
     }
 
     private Task HandleHelpAsync(ICommandContext ctx)

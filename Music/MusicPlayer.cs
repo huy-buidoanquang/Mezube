@@ -68,6 +68,79 @@ public sealed partial class MusicPlayer
         _playSlots = new SemaphoreSlim(Math.Max(1, options.MaxConcurrentPlayback));
     }
 
+    /// <summary>
+    /// Auto-mode for <c>!play</c>:
+    /// - If a hashtag is present, use channel type to choose voice vs streaming.
+    /// - Otherwise, prefer <c>default_stream_channel_id</c>, then user's voice presence.
+    /// </summary>
+    public async Task PlayAutoAsync(
+        ICommandContext ctx,
+        string query,
+        long? hashtagChannelId,
+        CancellationToken cancellationToken = default)
+    {
+        // Keep command-channel allowlist check consistent with PlayVoice/PlayStreaming.
+        if (!await EnsureCommandChannelAsync(ctx, cancellationToken).ConfigureAwait(false))
+        {
+            return;
+        }
+
+        if (hashtagChannelId is long id)
+        {
+            Mezon.Net.Sdk.Entities.Channel channel;
+            try
+            {
+                channel = await ctx.Client.GetChannelAsync(id, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                await ctx.ReplyAsync(PlayerMessageBuilder.Awkward()).ConfigureAwait(false);
+                return;
+            }
+
+            if (channel.Type == (int)ChannelType.Streaming)
+            {
+                await PlayStreamingAsync(ctx, query, id, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            if (channel.Type is (int)ChannelType.MezonVoice or (int)ChannelType.GmeetVoice)
+            {
+                await PlayVoiceAsync(ctx, query, id, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                    "Invalid request",
+                    "Mention a voice or stream channel hashtag."))
+                .ConfigureAwait(false);
+            return;
+        }
+
+        var clanId = ctx.Clan?.Id ?? ctx.Channel.ClanId;
+
+        // 1) default_stream_channel_id
+        var defaultStreamChannelId = await _binds.TryGetDefaultStreamChannelAsync(clanId, cancellationToken)
+            .ConfigureAwait(false);
+        if (defaultStreamChannelId is long ds)
+        {
+            await PlayStreamingAsync(ctx, query, ds, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        // 2) user's voice presence
+        if (_binds.TryGetUserVoiceChannel(clanId, ctx.Author.Id, out var voiceId))
+        {
+            await PlayVoiceAsync(ctx, query, voiceId, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                "Invalid request",
+                "Join a voice channel first, or specify the target channel with a hashtag (#voice / #stream)."))
+            .ConfigureAwait(false);
+    }
+
     public async Task PlayStreamingAsync(
         ICommandContext ctx,
         string query,
@@ -175,7 +248,7 @@ public sealed partial class MusicPlayer
                         preparing.MessageId,
                         PlayerMessageBuilder.Error(
                             "Mode conflict",
-                            "This clan is playing voice. Use !play to queue, or !stop before !stream."),
+                            "This clan is playing voice. Use !play #stream <url | query> to queue streaming, or !stop before switching."),
                         preparingCreateTime)
                     .ConfigureAwait(false);
                 return;
@@ -329,7 +402,7 @@ public sealed partial class MusicPlayer
                         preparing.MessageId,
                         PlayerMessageBuilder.Error(
                             "Mode conflict",
-                            "This clan is streaming. Use !stream to queue, or !stop before !play."),
+                            "This clan is streaming. Use !play #voice <url | query> to queue voice, or !stop before switching."),
                         preparingCreateTime)
                     .ConfigureAwait(false);
                 return;
@@ -521,7 +594,7 @@ public sealed partial class MusicPlayer
         {
             return ControlOutcome.Denied(PlayerMessageBuilder.Error(
                 "Pause is streaming-only",
-                "Use !stream. Voice pause is not supported yet."));
+                    "Use !play #stream. Voice pause is not supported yet."));
         }
 
         if (!state.IsPlaying || state.Target is null)
