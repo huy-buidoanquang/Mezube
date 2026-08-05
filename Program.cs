@@ -51,6 +51,7 @@ internal static class Program
         builder.Services.AddSingleton<FfmpegProcessor>();
         builder.Services.AddSingleton<WhipFfmpegPublisher>();
         builder.Services.AddSingleton<MezonCdnUploader>();
+        builder.Services.AddSingleton<PipelineProcessor>();
         builder.Services.AddSingleton<MusicVizAssets>();
 
         builder.Services.AddSingleton<PostgresDbConnectionFactory>();

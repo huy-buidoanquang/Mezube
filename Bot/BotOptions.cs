@@ -72,6 +72,8 @@ public sealed class BotOptions
     public string VizPositionUrl { get; set; } = string.Empty;
     /// <summary>Public CDN base used after UploadAttachmentFile PUT.</summary>
     public string CdnBaseUrl { get; set; } = string.Empty;
+    /// <summary>Multipart part size for Cloudflare R2 (S3-compatible; minimum 5 MiB except last part).</summary>
+    public int MultipartUploadPartBytes { get; set; } = 5 * 1024 * 1024;
 
     public int MaxPrepConcurrency { get; set; } = MezubeConstants.MaxPrepConcurrency;
     public int MaxConcurrentPlayback { get; set; } = MezubeConstants.MaxConcurrentPlayback;
@@ -201,6 +203,11 @@ public sealed class BotOptions
         if (MaxAudioBytes < 1)
         {
             throw new InvalidOperationException("Mezube:MaxAudioBytes must be >= 1.");
+        }
+
+        if (MultipartUploadPartBytes < 5 * 1024 * 1024)
+        {
+            throw new InvalidOperationException("Mezube:MultipartUploadPartBytes must be >= 5 MiB (Cloudflare R2 / S3 multipart minimum).");
         }
 
         if (InterTrackDelayMs < 0)

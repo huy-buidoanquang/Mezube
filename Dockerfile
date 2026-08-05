@@ -3,7 +3,7 @@
 # Run:
 #   docker run --rm -e DOTNET_ENVIRONMENT=prod \
 #     -v "$PWD/appsettings.prod.local.json:/app/appsettings.prod.local.json:ro" \
-#     -v mezube-data:/app/data -v mezube-temp:/app/temp mezube
+#     -v mezube-temp:/app/temp mezube
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
