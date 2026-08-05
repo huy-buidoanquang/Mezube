@@ -125,7 +125,7 @@ Audio được **process ngầm** ngay khi vào queue (không đợi đến lư�
 
 ## Docker
 
-Build từ thư mục `Mezube` (NuGet `Mezon.Net.Sdk`, không cần sibling source):
+Build từ thư mục `Mezube` (NuGet `Mezon.Net.Sdk`, không cần sibling source). Image biên dịch **FFmpeg 8.0.1** từ `Assets/ffmpeg/ffmpeg_8.0.1.orig.tar.xz` với OpenSSL + `whip`, libopus, và codec video phổ biến (libx264 / libx265 / libvpx VP8·VP9 / libaom·libdav1d·libsvtav1 AV1); không dùng `apt` ffmpeg (thiếu WHIP).
 
 ```powershell
 docker build -t mezube .

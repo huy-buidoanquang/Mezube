@@ -8,7 +8,7 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
     <DockerfileContext>.</DockerfileContext>
-    <DefaultItemExcludes>$(DefaultItemExcludes);temp/**;WsProbe/**</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);temp/**;WsProbe/**;Assets/ffmpeg/**/*.tar.xz</DefaultItemExcludes>
     <UserSecretsId>a33dd819-d2e8-4fa1-b6a7-148a2549b598</UserSecretsId>
   </PropertyGroup>
 
@@ -47,6 +47,10 @@
     <None Update="Assets\viz\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="Assets\ffmpeg\" />
   </ItemGroup>
 
 </Project>
