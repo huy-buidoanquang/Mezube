@@ -70,8 +70,9 @@ public sealed partial class MusicPlayer
 
     /// <summary>
     /// Auto-mode for <c>!play</c>:
-    /// - If a hashtag is present, use channel type to choose voice vs streaming.
-    /// - Otherwise, prefer <c>default_stream_channel_id</c>, then user's voice presence.
+    /// - Hashtag present → voice/stream by that channel's type.
+    /// - Else if the message channel is voice/stream → play there.
+    /// - Else prefer <c>default_stream_channel_id</c>, then user's voice presence.
     /// </summary>
     public async Task PlayAutoAsync(
         ICommandContext ctx,
@@ -79,7 +80,6 @@ public sealed partial class MusicPlayer
         long? hashtagChannelId,
         CancellationToken cancellationToken = default)
     {
-        // Keep command-channel allowlist check consistent with PlayVoice/PlayStreaming.
         if (!await EnsureCommandChannelAsync(ctx, cancellationToken).ConfigureAwait(false))
         {
             return;
@@ -117,9 +117,22 @@ public sealed partial class MusicPlayer
             return;
         }
 
+        // No hashtag: if the command was sent in a stream/voice channel, play there.
+        if (ctx.Channel.Type == (int)ChannelType.Streaming)
+        {
+            await PlayStreamingAsync(ctx, query, ctx.Channel.Id, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (ctx.Channel.Type is (int)ChannelType.MezonVoice or (int)ChannelType.GmeetVoice)
+        {
+            await PlayVoiceAsync(ctx, query, ctx.Channel.Id, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         var clanId = ctx.Clan?.Id ?? ctx.Channel.ClanId;
 
-        // 1) default_stream_channel_id
+        // Fallback: default_stream_channel_id
         var defaultStreamChannelId = await _binds.TryGetDefaultStreamChannelAsync(clanId, cancellationToken)
             .ConfigureAwait(false);
         if (defaultStreamChannelId is long ds)
@@ -128,7 +141,7 @@ public sealed partial class MusicPlayer
             return;
         }
 
-        // 2) user's voice presence
+        // Fallback: user's voice presence
         if (_binds.TryGetUserVoiceChannel(clanId, ctx.Author.Id, out var voiceId))
         {
             await PlayVoiceAsync(ctx, query, voiceId, cancellationToken).ConfigureAwait(false);
