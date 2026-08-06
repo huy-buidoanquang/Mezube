@@ -4,6 +4,8 @@ public interface IClanPlayerStore
 {
     Task TouchTtlAsync(long clanId, CancellationToken cancellationToken = default);
 
+    Task<IReadOnlyList<long>> ListActiveClanIdsAsync(CancellationToken cancellationToken = default);
+
     Task EnqueueAsync(long clanId, QueuedTrackPayload item, CancellationToken cancellationToken = default);
 
     Task<long> QueueLengthAsync(long clanId, CancellationToken cancellationToken = default);
