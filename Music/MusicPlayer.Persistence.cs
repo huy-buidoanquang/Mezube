@@ -35,7 +35,8 @@ public sealed partial class MusicPlayer
                 mode,
                 play.Target,
                 play.ReplyMessageId,
-                play.ReplyCreateTimeSeconds);
+                play.ReplyCreateTimeSeconds,
+                play.IsFromDefault);
             await _playerStore.EnqueueAsync(clanId, payload).ConfigureAwait(false);
             await _playerStore.TouchTtlAsync(clanId).ConfigureAwait(false);
         }
@@ -123,7 +124,8 @@ public sealed partial class MusicPlayer
                         mode,
                         play.Target,
                         play.ReplyMessageId,
-                        play.ReplyCreateTimeSeconds),
+                        play.ReplyCreateTimeSeconds,
+                        play.IsFromDefault),
                     cancellationToken)
                 .ConfigureAwait(false);
             return historyId;

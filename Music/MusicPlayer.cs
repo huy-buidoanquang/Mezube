@@ -903,12 +903,18 @@ public sealed partial class MusicPlayer
 
     public async Task<int> ArmDefaultAutoplayOnStartupAsync(
         MezonClient client,
+        IReadOnlySet<long>? excludedClanIds = null,
         CancellationToken cancellationToken = default)
     {
         var clanIds = await _playlists.ListDefaultClanIdsAsync(cancellationToken).ConfigureAwait(false);
         var armed = 0;
         foreach (var clanId in clanIds)
         {
+            if (excludedClanIds?.Contains(clanId) == true)
+            {
+                continue;
+            }
+
             if (await ArmDefaultAutoplayForClanAsync(clanId, client, cancellationToken).ConfigureAwait(false))
             {
                 armed++;
@@ -947,6 +953,23 @@ public sealed partial class MusicPlayer
         }
 
         return true;
+    }
+
+    public async Task<IReadOnlySet<long>> RestoreSessionsOnStartupAsync(
+        MezonClient client,
+        CancellationToken cancellationToken = default)
+    {
+        var restored = new HashSet<long>();
+        var clanIds = await _playerStore.ListActiveClanIdsAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var clanId in clanIds)
+        {
+            if (await TryRestoreClanSessionAsync(clanId, client, cancellationToken).ConfigureAwait(false))
+            {
+                restored.Add(clanId);
+            }
+        }
+
+        return restored;
     }
 
     private static Mezon.Net.Client.MessageContent BuildNowPlayingContent(
@@ -1507,6 +1530,116 @@ public sealed partial class MusicPlayer
 
         return false;
     }
+
+    private async Task<bool> TryRestoreClanSessionAsync(
+        long clanId,
+        MezonClient client,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var current = await _playerStore.GetCurrentAsync(clanId, cancellationToken).ConfigureAwait(false);
+            var pending = await _playerStore.SnapshotQueueAsync(clanId, cancellationToken).ConfigureAwait(false);
+            if (current is null && pending.Count == 0)
+            {
+                return false;
+            }
+
+            var state = GetState(clanId);
+            state.CancelIdleDestroy();
+            state.Queue.Clear();
+            state.ClanId = clanId;
+            state.NotifyClient = client;
+            state.ControlMessageId = null;
+            state.ControlMessageCreateTimeSeconds = null;
+            state.ControlMessageHasButtons = false;
+            state.ControlUserId = null;
+            state.PlayHistoryId = null;
+            state.PlayingDefaultPlaylist = false;
+            state.DefaultAutoplayArmed = false;
+            state.DefaultPlaylistCursor = 0;
+            state.LastDestroyReason = PlayerDestroyReason.None;
+
+            QueuedPlay? first = null;
+            if (current is not null)
+            {
+                first = ToQueuedPlay(clanId, current);
+                state.Mode = ParsePlaybackMode(current.Mode);
+                state.Target = first.Target;
+                state.Queue.Enqueue(first);
+            }
+
+            foreach (var item in pending)
+            {
+                state.Queue.Enqueue(ToQueuedPlay(clanId, item));
+            }
+
+            if (current is null && pending.Count > 0)
+            {
+                state.Mode = ParsePlaybackMode(pending[0].Mode);
+                state.Target = pending[0].ToTarget(clanId);
+            }
+
+            await _history.CloseOpenForClanAsync(clanId, PlayEndReason.Restart, cancellationToken).ConfigureAwait(false);
+            await _playerStore.SetPlayHistoryIdAsync(clanId, null, cancellationToken).ConfigureAwait(false);
+            await _playerStore.SetPositionAsync(clanId, 0, 0, paused: false, cancellationToken).ConfigureAwait(false);
+
+            if (!state.HoldsPlaySlot && !await TryAcquirePlaySlotAsync().ConfigureAwait(false))
+            {
+                _logger.LogWarning("Restore skipped for clan={ClanId}: playback slots full", clanId);
+                state.Queue.Clear();
+                return false;
+            }
+
+            state.HoldsPlaySlot = true;
+            ResetPrepToken(state);
+            if (state.NotifyClient is not null)
+            {
+                var snapshot = state.Queue.Snapshot();
+                for (var i = 0; i < snapshot.Count; i++)
+                {
+                    StartBackgroundPrep(state.NotifyClient, state, snapshot[i]);
+                }
+            }
+
+            _logger.LogInformation(
+                "Restored playback session clan={ClanId} current={HasCurrent} pending={PendingCount} mode={Mode}",
+                clanId,
+                current is not null,
+                pending.Count,
+                state.Mode);
+            _ = PumpAsync(state, clanId, cancellationToken);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to restore playback session clan={ClanId}", clanId);
+            try
+            {
+                await _history.CloseOpenForClanAsync(clanId, PlayEndReason.Restart, cancellationToken).ConfigureAwait(false);
+                await _playerStore.ClearSessionAsync(clanId, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception clearEx)
+            {
+                _logger.LogWarning(clearEx, "Failed to clear broken restored session clan={ClanId}", clanId);
+            }
+
+            return false;
+        }
+    }
+
+    private static QueuedPlay ToQueuedPlay(long clanId, QueuedTrackPayload payload)
+        => new(
+            payload.ToTrackInfo(),
+            payload.ToTarget(clanId),
+            payload.ReplyMessageId,
+            payload.ReplyCreateTimeSecs,
+            payload.IsFromDefault);
+
+    private static PlaybackMode ParsePlaybackMode(string? mode)
+        => string.Equals(mode, "voice", StringComparison.OrdinalIgnoreCase)
+            ? PlaybackMode.Voice
+            : PlaybackMode.Streaming;
 
     private async Task TearDownStreamingIdleAsync(PlaybackTarget target)
     {

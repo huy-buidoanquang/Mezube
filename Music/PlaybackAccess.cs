@@ -223,72 +223,10 @@ public sealed class PlaybackAccess
 
         try
         {
-            // Prefer L1 role membership (filled by Sdk Role* events).
-            if (client.Roles.TryGet(roleId, out var cachedRole) && cachedRole.MemberIds.Contains(userId))
+            var members = await TryResolveDjRoleMembersAsync(client, clanId, roleId, cancellationToken).ConfigureAwait(false);
+            if (members.Contains(userId))
             {
                 return true;
-            }
-
-            if (client.Clans.TryGet(clanId, out var cachedClan)
-                && cachedClan.Roles.TryGet(roleId, out var clanRole)
-                && clanRole.MemberIds.Contains(userId))
-            {
-                return true;
-            }
-
-            // L2 role snapshot before REST.
-            var snapshot = await _snapshots.GetAsync<RoleSnapshotDto>(_snapshotKeys.Role(roleId), cancellationToken)
-                .ConfigureAwait(false);
-            if (snapshot?.MemberIds is { Length: > 0 } && snapshot.MemberIds.Contains(userId))
-            {
-                return true;
-            }
-
-            var clan = await client.GetClanAsync(clanId, cancellationToken).ConfigureAwait(false);
-
-            if (clan.Roles.TryGet(roleId, out var afterFetch) && afterFetch.MemberIds.Contains(userId))
-            {
-                return true;
-            }
-
-            string? cursor = null;
-            for (var page = 0; page < 20; page++)
-            {
-                var users = await clan.ListRoleUsersAsync(roleId, limit: 200, cursor: cursor)
-                    .ConfigureAwait(false);
-                foreach (var user in users.RoleUsers)
-                {
-                    if (user.Id == userId)
-                    {
-                        // Opportunistic full warm so sibling DJs hit L2 next time.
-                        _ = WarmDjRoleMembershipAsync(client, clanId, roleId, CancellationToken.None);
-                        return true;
-                    }
-                }
-
-                if (string.IsNullOrEmpty(users.Cursor) || users.Cursor == cursor)
-                {
-                    break;
-                }
-
-                cursor = users.Cursor;
-            }
-
-            var roles = await clan.ListRolesAsync(limit: 100).ConfigureAwait(false);
-            foreach (var role in roles.Roles.Roles)
-            {
-                if (role.Id != roleId)
-                {
-                    continue;
-                }
-
-                foreach (var user in role.RoleUserList.RoleUsers)
-                {
-                    if (user.Id == userId)
-                    {
-                        return true;
-                    }
-                }
             }
         }
         catch (Exception ex)
@@ -305,20 +243,124 @@ public sealed class PlaybackAccess
         long userId,
         CancellationToken cancellationToken)
     {
+        var ownerId = await TryResolveClanOwnerAsync(client, clanId, cancellationToken).ConfigureAwait(false);
+        return ownerId is long owner && owner == userId;
+    }
+
+    private async Task<HashSet<long>> TryResolveDjRoleMembersAsync(
+        MezonClient client,
+        long clanId,
+        long roleId,
+        CancellationToken cancellationToken)
+    {
+        // L1 role cache first.
+        if (client.Roles.TryGet(roleId, out var cachedRole) && cachedRole.MemberIds.Count > 0)
+        {
+            return cachedRole.MemberIds.ToHashSet();
+        }
+
+        if (client.Clans.TryGet(clanId, out var cachedClan)
+            && cachedClan.Roles.TryGet(roleId, out var clanRole)
+            && clanRole.MemberIds.Count > 0)
+        {
+            return clanRole.MemberIds.ToHashSet();
+        }
+
+        // L2 snapshot next.
+        try
+        {
+            var snapshot = await _snapshots.GetAsync<RoleSnapshotDto>(_snapshotKeys.Role(roleId), cancellationToken)
+                .ConfigureAwait(false);
+            if (snapshot?.MemberIds is { Length: > 0 })
+            {
+                return snapshot.MemberIds.ToHashSet();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "L2 role membership lookup failed clan={ClanId} role={RoleId}", clanId, roleId);
+        }
+
+        // Source of truth last.
+        var clan = await client.GetClanAsync(clanId, cancellationToken).ConfigureAwait(false);
+        if (clan.Roles.TryGet(roleId, out var afterFetch) && afterFetch.MemberIds.Count > 0)
+        {
+            return afterFetch.MemberIds.ToHashSet();
+        }
+
+        string? cursor = null;
+        var members = new HashSet<long>();
+        for (var page = 0; page < 20; page++)
+        {
+            var users = await clan.ListRoleUsersAsync(roleId, limit: 200, cursor: cursor)
+                .ConfigureAwait(false);
+            foreach (var user in users.RoleUsers)
+            {
+                if (user.Id != 0)
+                {
+                    members.Add(user.Id);
+                }
+            }
+
+            if (string.IsNullOrEmpty(users.Cursor) || users.Cursor == cursor)
+            {
+                break;
+            }
+
+            cursor = users.Cursor;
+        }
+
+        if (members.Count > 0)
+        {
+            _ = WarmDjRoleMembershipAsync(client, clanId, roleId, CancellationToken.None);
+            return members;
+        }
+
+        var roles = await clan.ListRolesAsync(limit: 100).ConfigureAwait(false);
+        foreach (var role in roles.Roles.Roles)
+        {
+            if (role.Id != roleId)
+            {
+                continue;
+            }
+
+            foreach (var user in role.RoleUserList.RoleUsers)
+            {
+                if (user.Id != 0)
+                {
+                    members.Add(user.Id);
+                }
+            }
+        }
+
+        if (members.Count > 0)
+        {
+            _ = WarmDjRoleMembershipAsync(client, clanId, roleId, CancellationToken.None);
+        }
+
+        return members;
+    }
+
+    private async Task<long?> TryResolveClanOwnerAsync(
+        MezonClient client,
+        long clanId,
+        CancellationToken cancellationToken)
+    {
+        // Nearest cache: persisted owner row.
         var cached = await _settings.GetOwnerIdAsync(clanId, cancellationToken).ConfigureAwait(false);
         if (cached is long ownerId && ownerId != 0)
         {
-            return ownerId == userId;
+            return ownerId;
         }
 
-        // L1 without REST.
+        // L1 cache without REST.
         if (client.Clans.TryGet(clanId, out var l1Clan) && l1Clan.CreatorId != 0)
         {
             await _settings.EnsureOwnerAsync(clanId, l1Clan.CreatorId, cancellationToken).ConfigureAwait(false);
-            return l1Clan.CreatorId == userId;
+            return l1Clan.CreatorId;
         }
 
-        // L2 clan snapshot before REST.
+        // L2 snapshot before REST.
         try
         {
             var snapshot = await _snapshots.GetAsync<ClanSnapshotDto>(_snapshotKeys.Clan(clanId), cancellationToken)
@@ -326,7 +368,7 @@ public sealed class PlaybackAccess
             if (snapshot is { CreatorId: not 0 })
             {
                 await _settings.EnsureOwnerAsync(clanId, snapshot.CreatorId, cancellationToken).ConfigureAwait(false);
-                return snapshot.CreatorId == userId;
+                return snapshot.CreatorId;
             }
         }
         catch (Exception ex)
@@ -334,8 +376,7 @@ public sealed class PlaybackAccess
             _logger.LogDebug(ex, "L2 clan owner lookup failed clan={ClanId}", clanId);
         }
 
-        // Command-path REST. Avoid GetClanAsync when L1 already has a CreatorId=0 stub —
-        // EntityCache GetOrFetch would never refresh from ListClanDescs.
+        // Source of truth last. Avoid GetClanAsync when L1 already has a stub.
         try
         {
             var list = await client.ListClanDescsAsync(new Mezon.Net.Models.ListClanDescParams())
@@ -349,7 +390,7 @@ public sealed class PlaybackAccess
                 }
 
                 await _settings.EnsureOwnerAsync(clanId, desc.CreatorId, cancellationToken).ConfigureAwait(false);
-                return desc.CreatorId == userId;
+                return desc.CreatorId;
             }
         }
         catch (Exception ex)
@@ -357,6 +398,6 @@ public sealed class PlaybackAccess
             _logger.LogWarning(ex, "Clan creator check failed clan={ClanId}", clanId);
         }
 
-        return false;
+        return null;
     }
 }

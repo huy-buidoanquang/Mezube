@@ -230,7 +230,13 @@ public sealed class MezubeBot : BackgroundService
 
             try
             {
-                var armed = await _player.ArmDefaultAutoplayOnStartupAsync(client, stoppingToken).ConfigureAwait(false);
+                var restored = await _player.RestoreSessionsOnStartupAsync(client, stoppingToken).ConfigureAwait(false);
+                _logger.LogInformation(
+                    "Playback sessions restored for {ClanCount} clan(s) after startup",
+                    restored.Count);
+
+                var armed = await _player.ArmDefaultAutoplayOnStartupAsync(client, cancellationToken: stoppingToken)
+                    .ConfigureAwait(false);
                 _logger.LogInformation(
                     "Default playlist autoplay armed for {ClanCount} clan(s) after startup",
                     armed);

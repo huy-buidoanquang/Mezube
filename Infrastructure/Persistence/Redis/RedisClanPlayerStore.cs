@@ -94,6 +94,39 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
         await db.KeyExpireAsync(RedisKeyNames.Queue(clanId), ttl).ConfigureAwait(false);
     }
 
+    public async Task<IReadOnlyList<long>> ListActiveClanIdsAsync(CancellationToken cancellationToken = default)
+    {
+        var ids = new HashSet<long>();
+        foreach (var endpoint in _redis.Multiplexer.GetEndPoints())
+        {
+            var server = _redis.Multiplexer.GetServer(endpoint);
+            if (!server.IsConnected)
+            {
+                continue;
+            }
+
+            foreach (var key in server.Keys(pattern: $"{RedisKeyNames.Prefix}player:*"))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (TryParseClanId((string?)key, "player", out var clanId))
+                {
+                    ids.Add(clanId);
+                }
+            }
+
+            foreach (var key in server.Keys(pattern: $"{RedisKeyNames.Prefix}queue:*"))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (TryParseClanId((string?)key, "queue", out var clanId))
+                {
+                    ids.Add(clanId);
+                }
+            }
+        }
+
+        return ids.OrderBy(x => x).ToArray();
+    }
+
     public async Task EnqueueAsync(long clanId, QueuedTrackPayload item, CancellationToken cancellationToken = default)
     {
         var db = _redis.Db;
@@ -400,5 +433,22 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
         }
 
         await TouchTtlAsync(clanId, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static bool TryParseClanId(string? key, string entity, out long clanId)
+    {
+        clanId = 0;
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            return false;
+        }
+
+        var prefix = $"{RedisKeyNames.Prefix}{entity}:";
+        if (!key.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return long.TryParse(key[prefix.Length..], out clanId) && clanId != 0;
     }
 }

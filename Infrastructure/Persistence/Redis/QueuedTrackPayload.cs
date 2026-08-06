@@ -31,13 +31,15 @@ public sealed class QueuedTrackPayload
     public string? RequestedByName { get; set; }
     public long? ReplyMessageId { get; set; }
     public uint? ReplyCreateTimeSecs { get; set; }
+    public bool IsFromDefault { get; set; }
 
     public static QueuedTrackPayload From(
         TrackInfoEntity track,
         string mode,
         PlaybackTarget target,
         long? replyMessageId,
-        uint? replyCreateTimeSeconds)
+        uint? replyCreateTimeSeconds,
+        bool isFromDefault = false)
         => new()
         {
             TrackId = track.TrackId,
@@ -56,6 +58,7 @@ public sealed class QueuedTrackPayload
             RequestedByName = track.RequestedBy,
             ReplyMessageId = replyMessageId,
             ReplyCreateTimeSecs = replyCreateTimeSeconds,
+            IsFromDefault = isFromDefault,
         };
 
     public TrackInfoEntity ToTrackInfo()
