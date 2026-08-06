@@ -20,7 +20,7 @@ public sealed class PostgresPlaylistRepository : IPlaylistRepository
         await using var cmd = connection.CreateCommand();
         cmd.CommandText =
             """
-            SELECT id, clan_id, name, created_by, created_at, updated_at
+            SELECT id, clan_id, name, is_default, created_by, created_at, updated_at
             FROM playlists
             WHERE clan_id = @clan_id AND lower(name) = lower(@name)
             LIMIT 1;
@@ -33,13 +33,31 @@ public sealed class PostgresPlaylistRepository : IPlaylistRepository
             : null;
     }
 
+    public async Task<PlaylistEntity?> TryGetDefaultAsync(long clanId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _db.DataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText =
+            """
+            SELECT id, clan_id, name, is_default, created_by, created_at, updated_at
+            FROM playlists
+            WHERE clan_id = @clan_id AND is_default
+            LIMIT 1;
+            """;
+        cmd.Parameters.AddWithValue("clan_id", clanId);
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
+            ? ReadPlaylist(reader)
+            : null;
+    }
+
     public async Task<IReadOnlyList<PlaylistEntity>> ListAsync(long clanId, CancellationToken cancellationToken = default)
     {
         await using var connection = await _db.DataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var cmd = connection.CreateCommand();
         cmd.CommandText =
             """
-            SELECT id, clan_id, name, created_by, created_at, updated_at
+            SELECT id, clan_id, name, is_default, created_by, created_at, updated_at
             FROM playlists
             WHERE clan_id = @clan_id
             ORDER BY lower(name);
@@ -67,7 +85,7 @@ public sealed class PostgresPlaylistRepository : IPlaylistRepository
             """
             INSERT INTO playlists (clan_id, name, created_by)
             VALUES (@clan_id, @name, @created_by)
-            RETURNING id, clan_id, name, created_by, created_at, updated_at;
+            RETURNING id, clan_id, name, is_default, created_by, created_at, updated_at;
             """;
         cmd.Parameters.AddWithValue("clan_id", clanId);
         cmd.Parameters.AddWithValue("name", name.Trim());
@@ -93,6 +111,53 @@ public sealed class PostgresPlaylistRepository : IPlaylistRepository
         cmd.Parameters.AddWithValue("clan_id", clanId);
         cmd.Parameters.AddWithValue("name", name);
         return await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) > 0;
+    }
+
+    public async Task SetDefaultAsync(long clanId, long? playlistId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _db.DataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var tx = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using (var clear = connection.CreateCommand())
+            {
+                clear.Transaction = tx;
+                clear.CommandText =
+                    """
+                    UPDATE playlists
+                    SET is_default = FALSE, updated_at = now()
+                    WHERE clan_id = @clan_id AND is_default;
+                    """;
+                clear.Parameters.AddWithValue("clan_id", clanId);
+                await clear.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            if (playlistId is long id)
+            {
+                await using var set = connection.CreateCommand();
+                set.Transaction = tx;
+                set.CommandText =
+                    """
+                    UPDATE playlists
+                    SET is_default = TRUE, updated_at = now()
+                    WHERE id = @id AND clan_id = @clan_id;
+                    """;
+                set.Parameters.AddWithValue("id", id);
+                set.Parameters.AddWithValue("clan_id", clanId);
+                var updated = await set.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                if (updated == 0)
+                {
+                    throw new InvalidOperationException("Playlist not found for clan.");
+                }
+            }
+
+            await tx.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            await tx.RollbackAsync(cancellationToken).ConfigureAwait(false);
+            throw;
+        }
     }
 
     public async Task AddItemAsync(
@@ -180,8 +245,9 @@ public sealed class PostgresPlaylistRepository : IPlaylistRepository
             Id = reader.GetInt64(0),
             ClanId = reader.GetInt64(1),
             Name = reader.GetString(2),
-            CreatedBy = reader.IsDBNull(3) ? null : reader.GetInt64(3),
-            CreatedAt = reader.GetFieldValue<DateTimeOffset>(4),
-            UpdatedAt = reader.GetFieldValue<DateTimeOffset>(5),
+            IsDefault = reader.GetBoolean(3),
+            CreatedBy = reader.IsDBNull(4) ? null : reader.GetInt64(4),
+            CreatedAt = reader.GetFieldValue<DateTimeOffset>(5),
+            UpdatedAt = reader.GetFieldValue<DateTimeOffset>(6),
         };
 }

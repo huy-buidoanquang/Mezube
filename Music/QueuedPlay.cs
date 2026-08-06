@@ -12,4 +12,5 @@ public sealed record QueuedPlay(
     TrackInfoEntity Track,
     PlaybackTarget Target,
     long? ReplyMessageId = null,
-    uint? ReplyCreateTimeSeconds = null);
+    uint? ReplyCreateTimeSeconds = null,
+    bool IsFromDefault = false);

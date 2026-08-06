@@ -5,6 +5,7 @@ public sealed class PlaylistEntity
     public long Id { get; init; }
     public long ClanId { get; init; }
     public required string Name { get; init; }
+    public bool IsDefault { get; init; }
     public long? CreatedBy { get; init; }
     public DateTimeOffset CreatedAt { get; init; }
     public DateTimeOffset UpdatedAt { get; init; }

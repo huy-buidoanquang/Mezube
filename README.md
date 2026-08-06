@@ -120,6 +120,7 @@ Audio được **process ngầm** ngay khi vào queue (không đợi đến lư�
 | `!play [#voice] <url\|query>` | Phát vào **voice** |
 | `!stream [#stream] <url\|query>` | Phát vào **streaming** |
 | `!skip` `!stop` `!queue` `!np` | Điều khiển (skip/stop theo DJ rules) |
+| `!playlist default <name\|none>` | Playlist mặc định (DJ/owner); idle 5 phút tự phát lại trên default stream |
 | `!setdj` `!settings` | Cấu hình DJ role |
 | `!help` | Trợ giúp |
 

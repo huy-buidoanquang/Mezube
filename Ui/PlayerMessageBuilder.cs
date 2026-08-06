@@ -360,7 +360,7 @@ public static class PlayerMessageBuilder
         {
             new("Play", $"{p}play [#voice|#stream] <url | query>"),
             new("Controls", $"{p}skip · {p}voteskip · {p}pause · {p}resume · {p}stop · {p}queue · {p}np · {p}loop · {p}seek"),
-            new("Library", $"{p}playlist · {p}musicchannel · {p}setdj · {p}settings"),
+            new("Library", $"{p}playlist · {p}playlist default · {p}musicchannel · {p}setdj · {p}settings"),
             new("DJ", $"{p}setdj @role|roleId|none · {p}settings"),
         };
 

@@ -267,6 +267,24 @@ public sealed partial class MusicPlayer
                 return;
             }
 
+            var interruptDefault = state.Queue.CurrentItem?.IsFromDefault == true;
+            state.PlayingDefaultPlaylist = false;
+            if (interruptDefault)
+            {
+                state.Queue.EnqueueFront(play);
+                await PersistEnqueueAsync(clanId, play, "streaming").ConfigureAwait(false);
+                StartBackgroundPrep(ctx.Client, state, play);
+                state.LastDestroyReason = PlayerDestroyReason.Skip;
+                state.CancelTrack();
+                await UpdateOrReplyAsync(
+                        ctx,
+                        preparing.MessageId,
+                        PlayerMessageBuilder.Ok("Playing next", $"{track.Title} — interrupted default playlist."),
+                        preparingCreateTime)
+                    .ConfigureAwait(false);
+                return;
+            }
+
             state.Queue.Enqueue(play);
             await PersistEnqueueAsync(clanId, play, "streaming").ConfigureAwait(false);
             StartBackgroundPrep(ctx.Client, state, play);
@@ -291,6 +309,7 @@ public sealed partial class MusicPlayer
         }
 
         state.CancelIdleDestroy();
+        state.PlayingDefaultPlaylist = false;
         state.Queue.Enqueue(play);
         await PersistEnqueueAsync(clanId, play, "streaming").ConfigureAwait(false);
         state.Mode = PlaybackMode.Streaming;
@@ -421,6 +440,7 @@ public sealed partial class MusicPlayer
                 return;
             }
 
+            state.PlayingDefaultPlaylist = false;
             state.Queue.Enqueue(play);
             await PersistEnqueueAsync(clanId, play, "voice").ConfigureAwait(false);
             StartBackgroundPrep(ctx.Client, state, play);
@@ -445,6 +465,7 @@ public sealed partial class MusicPlayer
         }
 
         state.CancelIdleDestroy();
+        state.PlayingDefaultPlaylist = false;
         state.Queue.Enqueue(play);
         await PersistEnqueueAsync(clanId, play, "voice").ConfigureAwait(false);
         state.Mode = PlaybackMode.Voice;
@@ -667,6 +688,8 @@ public sealed partial class MusicPlayer
     {
         var state = GetState(clanId);
         state.Queue.Clear();
+        state.PlayingDefaultPlaylist = false;
+        state.DefaultAutoplayArmed = false;
         state.LastDestroyReason = PlayerDestroyReason.UserStop;
         state.PrepCts?.Cancel();
         await _playerStore.SetLoopModeAsync(clanId, LoopMode.Off, cancellationToken).ConfigureAwait(false);
@@ -870,9 +893,11 @@ public sealed partial class MusicPlayer
             ? "all channels"
             : string.Join(", ", await FormatChannelMentionsAsync(ctx.Client, channels, cancellationToken)
                 .ConfigureAwait(false));
+        var defaultPl = await _playlists.TryGetDefaultAsync(clanId, cancellationToken).ConfigureAwait(false);
+        var defaultText = defaultPl is null ? "none" : defaultPl.Name;
         await ctx.ReplyAsync(PlayerMessageBuilder.Status(
                 "Clan settings",
-                $"DJ role: {djValue}\nLoop: {loop.ToString().ToLowerInvariant()}\nPlay channels: {channelText}"))
+                $"DJ role: {djValue}\nLoop: {loop.ToString().ToLowerInvariant()}\nDefault playlist: {defaultText}\nPlay channels: {channelText}"))
             .ConfigureAwait(false);
     }
 
@@ -994,9 +1019,27 @@ public sealed partial class MusicPlayer
                 var mode = state.Mode;
                 if (item is null)
                 {
+                    if (state.LastDestroyReason == PlayerDestroyReason.UserStop)
+                    {
+                        state.IsPlaying = false;
+                        ScheduleIdleDestroy(clanId, state);
+                        return;
+                    }
+
+                    if (state.PlayingDefaultPlaylist)
+                    {
+                        if (await TryEnqueueNextDefaultTrackAsync(state, clanId, CancellationToken.None)
+                                .ConfigureAwait(false))
+                        {
+                            continue;
+                        }
+
+                        state.PlayingDefaultPlaylist = false;
+                    }
+
                     // Keep the STN publisher WS warm across an empty queue so a re-queue
                     // within IdleSessionTtl reuses the session (no ws_close / channel_closed).
-                    // Teardown happens in ScheduleIdleDestroy after the idle TTL.
+                    // Teardown or default resume happens in ScheduleIdleDestroy after the idle TTL.
                     state.IsPlaying = false;
                     state.LastDestroyReason = PlayerDestroyReason.QueueEmpty;
                     ScheduleIdleDestroy(clanId, state);
@@ -1150,7 +1193,8 @@ public sealed partial class MusicPlayer
                             .ConfigureAwait(false);
                         if (advanced
                             && endReason == PlayEndReason.Completed
-                            && !skipLoop)
+                            && !skipLoop
+                            && !item.IsFromDefault)
                         {
                             var loop = await _playerStore.GetLoopModeAsync(clanId).ConfigureAwait(false);
                             if (loop == LoopMode.Track)
@@ -1164,7 +1208,10 @@ public sealed partial class MusicPlayer
                         }
                     }
 
-                    state.LastDestroyReason = PlayerDestroyReason.None;
+                    if (state.LastDestroyReason != PlayerDestroyReason.UserStop)
+                    {
+                        state.LastDestroyReason = PlayerDestroyReason.None;
+                    }
                 }
 
                 try
@@ -1230,24 +1277,187 @@ public sealed partial class MusicPlayer
                     return;
                 }
 
-                if (_states.TryGetValue(clanId, out var current) && ReferenceEquals(current, state)
-                    && _states.TryRemove(clanId, out _))
+                if (state.LastDestroyReason == PlayerDestroyReason.UserStop || !state.DefaultAutoplayArmed)
                 {
-                    state.LastDestroyReason = PlayerDestroyReason.IdleTimeout;
-                    var target = state.Target;
-                    var mode = state.Mode;
-                    state.Target = null;
-                    _logger.LogDebug(
-                        "Idle player session destroyed clan={ClanId} reason={Reason}",
-                        clanId,
-                        state.LastDestroyReason);
-
-                    if (mode == PlaybackMode.Streaming && target is { })
-                    {
-                        _ = TearDownStreamingIdleAsync(target);
-                    }
+                    TearDownIdleSession(clanId, state);
+                    return;
                 }
+
+                _ = TryResumeDefaultAfterIdleAsync(clanId, state);
             });
+    }
+
+    private void TearDownIdleSession(long clanId, ClanPlayerState state)
+    {
+        if (!_states.TryGetValue(clanId, out var current) || !ReferenceEquals(current, state)
+            || !_states.TryRemove(clanId, out _))
+        {
+            return;
+        }
+
+        state.LastDestroyReason = PlayerDestroyReason.IdleTimeout;
+        var target = state.Target;
+        var mode = state.Mode;
+        state.Target = null;
+        state.PlayingDefaultPlaylist = false;
+        _logger.LogDebug(
+            "Idle player session destroyed clan={ClanId} reason={Reason}",
+            clanId,
+            state.LastDestroyReason);
+
+        if (mode == PlaybackMode.Streaming && target is { })
+        {
+            _ = TearDownStreamingIdleAsync(target);
+        }
+    }
+
+    private async Task TryResumeDefaultAfterIdleAsync(long clanId, ClanPlayerState state)
+    {
+        try
+        {
+            if (state.IsPlaying || state.Queue.Count > 0 || state.Queue.Current is not null)
+            {
+                return;
+            }
+
+            if (state.LastDestroyReason == PlayerDestroyReason.UserStop || !state.DefaultAutoplayArmed)
+            {
+                TearDownIdleSession(clanId, state);
+                return;
+            }
+
+            var started = await TryStartDefaultPlaylistAsync(state, clanId, CancellationToken.None)
+                .ConfigureAwait(false);
+            if (!started)
+            {
+                TearDownIdleSession(clanId, state);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Default playlist idle resume failed clan={ClanId}", clanId);
+            TearDownIdleSession(clanId, state);
+        }
+    }
+
+    /// <summary>
+    /// Arms and starts default playlist autoplay on the clan default stream channel when idle.
+    /// </summary>
+    private async Task<bool> TryStartDefaultPlaylistAsync(
+        ClanPlayerState state,
+        long clanId,
+        CancellationToken cancellationToken)
+    {
+        if (state.IsPlaying || state.Queue.TotalCount > 0)
+        {
+            return false;
+        }
+
+        state.PlayingDefaultPlaylist = true;
+        state.DefaultAutoplayArmed = true;
+        state.Mode = PlaybackMode.Streaming;
+        state.ClanId = clanId;
+        state.LastDestroyReason = PlayerDestroyReason.None;
+
+        if (!state.HoldsPlaySlot && !await TryAcquirePlaySlotAsync().ConfigureAwait(false))
+        {
+            state.PlayingDefaultPlaylist = false;
+            return false;
+        }
+
+        state.HoldsPlaySlot = true;
+        state.CancelIdleDestroy();
+        ResetPrepToken(state);
+
+        if (!await TryEnqueueNextDefaultTrackAsync(state, clanId, cancellationToken).ConfigureAwait(false))
+        {
+            ReleasePlaySlot(state);
+            state.PlayingDefaultPlaylist = false;
+            return false;
+        }
+
+        _ = PumpAsync(state, clanId, cancellationToken);
+        return true;
+    }
+
+    private async Task<bool> TryEnqueueNextDefaultTrackAsync(
+        ClanPlayerState state,
+        long clanId,
+        CancellationToken cancellationToken)
+    {
+        var playlist = await _playlists.TryGetDefaultAsync(clanId, cancellationToken).ConfigureAwait(false);
+        if (playlist is null)
+        {
+            return false;
+        }
+
+        var streamChannelId = await _binds.TryGetDefaultStreamChannelAsync(clanId, cancellationToken)
+            .ConfigureAwait(false);
+        if (streamChannelId is not long channelId)
+        {
+            _logger.LogDebug("Default playlist skipped: no default_stream_channel_id clan={ClanId}", clanId);
+            return false;
+        }
+
+        var items = await _playlists.ListItemsAsync(playlist.Id, cancellationToken).ConfigureAwait(false);
+        if (items.Count == 0)
+        {
+            return false;
+        }
+
+        string? channelLabel = null;
+        if (state.NotifyClient is not null)
+        {
+            try
+            {
+                var channel = await state.NotifyClient.GetChannelAsync(channelId, cancellationToken)
+                    .ConfigureAwait(false);
+                channelLabel = channel.Name;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "GetChannelAsync failed for default stream {ChannelId}", channelId);
+            }
+        }
+
+        var target = new PlaybackTarget(clanId, channelId, ChannelLabel: channelLabel);
+        state.Target = target;
+        state.Mode = PlaybackMode.Streaming;
+
+        // Walk playlist once looking for a playable track from the cursor.
+        for (var attempt = 0; attempt < items.Count; attempt++)
+        {
+            var index = state.DefaultPlaylistCursor % items.Count;
+            if (state.DefaultPlaylistCursor < 0)
+            {
+                index = 0;
+            }
+
+            state.DefaultPlaylistCursor = index + 1;
+            var entry = items[index];
+            if (entry.Track is null || entry.Track.IsTooLarge)
+            {
+                continue;
+            }
+
+            if (entry.Track.SourceBytes is long bytes && bytes > _options.MaxAudioBytes)
+            {
+                continue;
+            }
+
+            var info = entry.Track.ToTrackInfo("Auto");
+            var play = new QueuedPlay(info, target, IsFromDefault: true);
+            state.Queue.Enqueue(play);
+            await PersistEnqueueAsync(clanId, play, "streaming").ConfigureAwait(false);
+            if (state.NotifyClient is not null)
+            {
+                StartBackgroundPrep(state.NotifyClient, state, play);
+            }
+
+            return true;
+        }
+
+        return false;
     }
 
     private async Task TearDownStreamingIdleAsync(PlaybackTarget target)
@@ -1519,6 +1729,11 @@ public sealed partial class MusicPlayer
         public bool HoldsPlaySlot { get; set; }
         public long? PlayHistoryId { get; set; }
         public CancellationTokenSource? PrepCts { get; set; }
+        /// <summary>True while autoplaying the clan default playlist (immediate refill on empty).</summary>
+        public bool PlayingDefaultPlaylist { get; set; }
+        /// <summary>When false (after !stop / default none), idle TTL must not resume default autoplay.</summary>
+        public bool DefaultAutoplayArmed { get; set; }
+        public int DefaultPlaylistCursor { get; set; }
 
         public async Task<bool> TryEnterPumpAsync()
         {

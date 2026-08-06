@@ -227,7 +227,7 @@ public sealed partial class MusicPlayer
         {
             await ctx.ReplyAsync(PlayerMessageBuilder.Error(
                     "Missing args",
-                    $"Usage: {_options.CommandPrefix}playlist create | add | play | list | delete"))
+                    $"Usage: {_options.CommandPrefix}playlist create | add | play | list | delete | default"))
                 .ConfigureAwait(false);
             return;
         }
@@ -240,8 +240,14 @@ public sealed partial class MusicPlayer
                     var lists = await _playlists.ListAsync(clanId, cancellationToken).ConfigureAwait(false);
                     var body = lists.Count == 0
                         ? "No playlists yet."
-                        : string.Join("\n", lists.Select(p => $"• **{p.Name}**"));
+                        : string.Join("\n", lists.Select(p =>
+                            p.IsDefault ? $"• **{p.Name}** (default)" : $"• **{p.Name}**"));
                     await ctx.ReplyAsync(PlayerMessageBuilder.Status("Playlists", body)).ConfigureAwait(false);
+                    return;
+                }
+            case "default":
+                {
+                    await PlaylistDefaultAsync(ctx, clanId, cancellationToken).ConfigureAwait(false);
                     return;
                 }
             case "create":
@@ -397,11 +403,14 @@ public sealed partial class MusicPlayer
                         StartBackgroundPrep(ctx.Client, state, play);
                     }
 
+                    state.PlayingDefaultPlaylist = false;
+
                     if (!state.IsPlaying && state.Queue.Count > 0)
                     {
                         if (await TryAcquirePlaySlotAsync().ConfigureAwait(false))
                         {
                             state.CancelIdleDestroy();
+                            state.PlayingDefaultPlaylist = false;
                             state.Mode = PlaybackMode.Voice;
                             state.Target = target;
                             state.NotifyClient = ctx.Client;
@@ -422,10 +431,109 @@ public sealed partial class MusicPlayer
             default:
                 await ctx.ReplyAsync(PlayerMessageBuilder.Error(
                         "Unknown subcommand",
-                        "create, add, play, list, delete"))
+                        "create, add, play, list, delete, default"))
                     .ConfigureAwait(false);
                 return;
         }
+    }
+
+    private async Task PlaylistDefaultAsync(ICommandContext ctx, long clanId, CancellationToken cancellationToken)
+    {
+        if (ctx.Args.Count < 2)
+        {
+            var current = await _playlists.TryGetDefaultAsync(clanId, cancellationToken).ConfigureAwait(false);
+            await ctx.ReplyAsync(PlayerMessageBuilder.Status(
+                    "Default playlist",
+                    current is null
+                        ? "none — set with !playlist default <name>"
+                        : $"**{current.Name}**"))
+                .ConfigureAwait(false);
+            return;
+        }
+
+        var nameOrNone = string.Join(' ', ctx.Args.Skip(1)).Trim();
+        if (nameOrNone.Equals("none", StringComparison.OrdinalIgnoreCase)
+            || nameOrNone.Equals("clear", StringComparison.OrdinalIgnoreCase)
+            || nameOrNone.Equals("off", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!await _access.CanStopAsync(ctx.Client, clanId, ctx.Author.Id, cancellationToken)
+                    .ConfigureAwait(false))
+            {
+                await ctx.ReplyAsync(PlayerMessageBuilder.NotAllowed(
+                        "Only DJ role or clan owner can clear the default playlist."))
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            await _playlists.SetDefaultAsync(clanId, null, cancellationToken).ConfigureAwait(false);
+            var state = GetState(clanId);
+            state.DefaultAutoplayArmed = false;
+            state.PlayingDefaultPlaylist = false;
+            await ctx.ReplyAsync(PlayerMessageBuilder.Ok("Default playlist", "Cleared.")).ConfigureAwait(false);
+            return;
+        }
+
+        if (!await _access.CanStopAsync(ctx.Client, clanId, ctx.Author.Id, cancellationToken)
+                .ConfigureAwait(false))
+        {
+            await ctx.ReplyAsync(PlayerMessageBuilder.NotAllowed(
+                    "Only DJ role or clan owner can set the default playlist."))
+                .ConfigureAwait(false);
+            return;
+        }
+
+        var pl = await _playlists.TryGetByNameAsync(clanId, nameOrNone, cancellationToken).ConfigureAwait(false);
+        if (pl is null)
+        {
+            await ctx.ReplyAsync(PlayerMessageBuilder.Error("Not found", nameOrNone)).ConfigureAwait(false);
+            return;
+        }
+
+        var items = await _playlists.ListItemsAsync(pl.Id, cancellationToken).ConfigureAwait(false);
+        if (items.Count == 0)
+        {
+            await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                    "Empty playlist",
+                    "Add tracks before setting it as default."))
+                .ConfigureAwait(false);
+            return;
+        }
+
+        var streamId = await _binds.TryGetDefaultStreamChannelAsync(clanId, cancellationToken)
+            .ConfigureAwait(false);
+        if (streamId is null)
+        {
+            await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                    "No stream channel",
+                    "Set a default stream channel before enabling default playlist autoplay."))
+                .ConfigureAwait(false);
+            return;
+        }
+
+        await _playlists.SetDefaultAsync(clanId, pl.Id, cancellationToken).ConfigureAwait(false);
+        var playerState = GetState(clanId);
+        playerState.DefaultPlaylistCursor = 0;
+        playerState.DefaultAutoplayArmed = true;
+        playerState.NotifyClient ??= ctx.Client;
+        playerState.NotifyChannelId ??= ctx.Channel.Id;
+
+        var started = false;
+        if (!playerState.IsPlaying && playerState.Queue.TotalCount == 0)
+        {
+            started = await TryStartDefaultPlaylistAsync(playerState, clanId, cancellationToken)
+                .ConfigureAwait(false);
+            if (!started)
+            {
+                ScheduleIdleDestroy(clanId, playerState);
+            }
+        }
+
+        await ctx.ReplyAsync(PlayerMessageBuilder.Ok(
+                "Default playlist set",
+                started
+                    ? $"**{pl.Name}** — playing on default stream."
+                    : $"**{pl.Name}** — will autoplay after {IdleSessionTtl.TotalMinutes:0} minutes idle."))
+            .ConfigureAwait(false);
     }
 
     private static bool TryParseSeek(string raw, long currentMs, long durationMs, out long targetMs)

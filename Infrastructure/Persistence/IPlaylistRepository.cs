@@ -6,6 +6,8 @@ public interface IPlaylistRepository
 {
     Task<PlaylistEntity?> TryGetByNameAsync(long clanId, string name, CancellationToken cancellationToken = default);
 
+    Task<PlaylistEntity?> TryGetDefaultAsync(long clanId, CancellationToken cancellationToken = default);
+
     Task<IReadOnlyList<PlaylistEntity>> ListAsync(long clanId, CancellationToken cancellationToken = default);
 
     Task<PlaylistEntity> CreateAsync(
@@ -15,6 +17,11 @@ public interface IPlaylistRepository
         CancellationToken cancellationToken = default);
 
     Task<bool> DeleteAsync(long clanId, string name, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Clears default for the clan, then sets <paramref name="playlistId"/> as default when non-null.
+    /// </summary>
+    Task SetDefaultAsync(long clanId, long? playlistId, CancellationToken cancellationToken = default);
 
     Task AddItemAsync(
         long playlistId,
