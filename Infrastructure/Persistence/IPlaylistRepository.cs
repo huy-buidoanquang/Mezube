@@ -8,6 +8,8 @@ public interface IPlaylistRepository
 
     Task<PlaylistEntity?> TryGetDefaultAsync(long clanId, CancellationToken cancellationToken = default);
 
+    Task<IReadOnlyList<long>> ListDefaultClanIdsAsync(CancellationToken cancellationToken = default);
+
     Task<IReadOnlyList<PlaylistEntity>> ListAsync(long clanId, CancellationToken cancellationToken = default);
 
     Task<PlaylistEntity> CreateAsync(

@@ -51,6 +51,27 @@ public sealed class PostgresPlaylistRepository : IPlaylistRepository
             : null;
     }
 
+    public async Task<IReadOnlyList<long>> ListDefaultClanIdsAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _db.DataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText =
+            """
+            SELECT clan_id
+            FROM playlists
+            WHERE is_default
+            ORDER BY clan_id;
+            """;
+        var list = new List<long>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            list.Add(reader.GetInt64(0));
+        }
+
+        return list;
+    }
+
     public async Task<IReadOnlyList<PlaylistEntity>> ListAsync(long clanId, CancellationToken cancellationToken = default)
     {
         await using var connection = await _db.DataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);

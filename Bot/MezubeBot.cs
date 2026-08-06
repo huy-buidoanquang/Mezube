@@ -227,6 +227,19 @@ public sealed class MezubeBot : BackgroundService
             {
                 _logger.LogWarning(ex, "Music viz warm-up failed");
             }
+
+            try
+            {
+                var armed = await _player.ArmDefaultAutoplayOnStartupAsync(client, stoppingToken).ConfigureAwait(false);
+                _logger.LogInformation(
+                    "Default playlist autoplay armed for {ClanCount} clan(s) after startup",
+                    armed);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Default playlist autoplay startup arm failed");
+            }
+
             // Owner sync is post-login connect-init only (no REST from Ready — Sdk hard rule).
         };
 

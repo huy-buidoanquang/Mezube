@@ -901,6 +901,54 @@ public sealed partial class MusicPlayer
             .ConfigureAwait(false);
     }
 
+    public async Task<int> ArmDefaultAutoplayOnStartupAsync(
+        MezonClient client,
+        CancellationToken cancellationToken = default)
+    {
+        var clanIds = await _playlists.ListDefaultClanIdsAsync(cancellationToken).ConfigureAwait(false);
+        var armed = 0;
+        foreach (var clanId in clanIds)
+        {
+            if (await ArmDefaultAutoplayForClanAsync(clanId, client, cancellationToken).ConfigureAwait(false))
+            {
+                armed++;
+            }
+        }
+
+        return armed;
+    }
+
+    public async Task<bool> ArmDefaultAutoplayForClanAsync(
+        long clanId,
+        MezonClient client,
+        CancellationToken cancellationToken = default)
+    {
+        var defaultPl = await _playlists.TryGetDefaultAsync(clanId, cancellationToken).ConfigureAwait(false);
+        if (defaultPl is null)
+        {
+            return false;
+        }
+
+        if (await _binds.TryGetDefaultStreamChannelAsync(clanId, cancellationToken).ConfigureAwait(false) is not long)
+        {
+            _logger.LogDebug("Default autoplay not armed: no default stream channel clan={ClanId}", clanId);
+            return false;
+        }
+
+        var state = GetState(clanId);
+        state.ClanId = clanId;
+        state.NotifyClient ??= client;
+        state.DefaultAutoplayArmed = true;
+        state.PlayingDefaultPlaylist = false;
+
+        if (!state.IsPlaying && state.Queue.TotalCount == 0)
+        {
+            ScheduleIdleDestroy(clanId, state);
+        }
+
+        return true;
+    }
+
     private static Mezon.Net.Client.MessageContent BuildNowPlayingContent(
         ClanPlayerState state,
         long clanId,
