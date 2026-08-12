@@ -48,10 +48,108 @@ public sealed class YtDlpProcessor
             }
         }
 
+        return ParseTrackElement(root, query, requestedBy, InferSource(query, root));
+    }
+
+    /// <summary>Resolve a SoundCloud set/playlist into individual tracks (capped).</summary>
+    public async Task<IReadOnlyList<TrackInfoEntity>> ResolvePlaylistAsync(
+        string playlistUrl,
+        string? requestedBy,
+        int maxTracks,
+        CancellationToken cancellationToken = default)
+    {
+        var end = Math.Max(1, maxTracks);
+        var json = await RunAsync(
+            [
+                "--yes-playlist",
+                "--playlist-end",
+                end.ToString(),
+                "--no-warnings",
+                "-J",
+                "-f", "bestaudio/best",
+                playlistUrl,
+            ],
+            cancellationToken).ConfigureAwait(false);
+
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return [];
+        }
+
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        if (!root.TryGetProperty("entries", out var entries) || entries.ValueKind != JsonValueKind.Array)
+        {
+            var single = ParseTrackElement(root, playlistUrl, requestedBy, TrackIdentityHelper.SourceSoundcloud);
+            return single is null ? [] : [single];
+        }
+
+        var list = new List<TrackInfoEntity>();
+        foreach (var entry in entries.EnumerateArray())
+        {
+            if (list.Count >= maxTracks)
+            {
+                break;
+            }
+
+            if (entry.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+            {
+                continue;
+            }
+
+            var track = ParseTrackElement(entry, playlistUrl, requestedBy, TrackIdentityHelper.SourceSoundcloud);
+            if (track is not null
+                && !string.IsNullOrWhiteSpace(track.WebpageUrl ?? track.MediaUrl))
+            {
+                list.Add(track);
+            }
+        }
+
+        return list;
+    }
+
+    private static string InferSource(string query, JsonElement root)
+    {
+        var extractor = root.TryGetProperty("extractor", out var ex) ? ex.GetString() : null;
+        if (!string.IsNullOrWhiteSpace(extractor)
+            && extractor.Contains("soundcloud", StringComparison.OrdinalIgnoreCase))
+        {
+            return TrackIdentityHelper.SourceSoundcloud;
+        }
+
+        var webpage = root.TryGetProperty("webpage_url", out var w) ? w.GetString() : null;
+        if (TrackIdentityHelper.IsSoundCloudUrl(webpage) || TrackIdentityHelper.IsSoundCloudUrl(query))
+        {
+            return TrackIdentityHelper.SourceSoundcloud;
+        }
+
+        return TrackIdentityHelper.SourceYoutube;
+    }
+
+    private static TrackInfoEntity? ParseTrackElement(
+        JsonElement root,
+        string fallbackQuery,
+        string? requestedBy,
+        string source)
+    {
         var title = root.TryGetProperty("title", out var titleEl) ? titleEl.GetString() : null;
-        var webpageUrl = root.TryGetProperty("webpage_url", out var webEl)
-            ? webEl.GetString()
+        var rawWebpage = root.TryGetProperty("webpage_url", out var webEl) ? webEl.GetString() : null;
+        var rawUrl = root.TryGetProperty("url", out var urlEl) && urlEl.ValueKind == JsonValueKind.String
+            ? urlEl.GetString()
             : root.TryGetProperty("original_url", out var origEl) ? origEl.GetString() : null;
+
+        string? webpageUrl;
+        if (string.Equals(source, TrackIdentityHelper.SourceSoundcloud, StringComparison.Ordinal))
+        {
+            var idHint = root.TryGetProperty("id", out var idHintEl) ? idHintEl.GetString() : null;
+            webpageUrl = TrackIdentityHelper.ResolveSoundCloudEntryUrl(rawWebpage, rawUrl, idHint)
+                         ?? (TryAbsoluteOrNull(rawWebpage) ?? TryAbsoluteOrNull(rawUrl));
+        }
+        else
+        {
+            webpageUrl = TryAbsoluteOrNull(rawWebpage) ?? TryAbsoluteOrNull(rawUrl);
+        }
+
         var thumbnail = TryReadThumbnail(root);
         TimeSpan? duration = null;
         if (root.TryGetProperty("duration", out var durEl) && durEl.TryGetDouble(out var seconds) && seconds > 0)
@@ -74,29 +172,46 @@ public sealed class YtDlpProcessor
         }
 
         if (string.IsNullOrWhiteSpace(externalId)
-            && TrackIdentityHelper.TryParseYoutubeId(query, out var fromQuery))
+            && TrackIdentityHelper.TryParseYoutubeId(fallbackQuery, out var fromQuery))
         {
             externalId = fromQuery;
         }
 
-        // Skip ephemeral -g stream URL: prep downloads from WebpageUrl / CDN cache.
+        if (string.IsNullOrWhiteSpace(externalId)
+            && string.Equals(source, TrackIdentityHelper.SourceSoundcloud, StringComparison.Ordinal)
+            && !string.IsNullOrWhiteSpace(webpageUrl))
+        {
+            externalId = TrackIdentityHelper.ForDirectUrl(
+                TrackIdentityHelper.NormalizeAbsoluteUrl(webpageUrl));
+        }
+
+        if (string.IsNullOrWhiteSpace(webpageUrl) && string.IsNullOrWhiteSpace(externalId))
+        {
+            return null;
+        }
+
         var mediaUrl = !string.IsNullOrWhiteSpace(webpageUrl)
             ? webpageUrl!
-            : TryReadUrlFromJson(root) ?? query;
+            : TryReadUrlFromJson(root) ?? fallbackQuery;
 
         return new TrackInfoEntity
         {
-            Title = string.IsNullOrWhiteSpace(title) ? query : title!,
+            Title = string.IsNullOrWhiteSpace(title) ? fallbackQuery : title!,
             MediaUrl = mediaUrl,
-            WebpageUrl = webpageUrl,
+            WebpageUrl = webpageUrl ?? mediaUrl,
             ThumbnailUrl = thumbnail,
             RequestedBy = requestedBy,
             Duration = duration,
-            Source = TrackIdentityHelper.SourceYoutube,
+            Source = source,
             ExternalId = string.IsNullOrWhiteSpace(externalId) ? null : externalId,
             SourceBytes = sourceBytes,
         };
     }
+
+    private static string? TryAbsoluteOrNull(string? value)
+        => !string.IsNullOrWhiteSpace(value) && value.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+            ? value
+            : null;
 
     private static long? TryReadSourceBytes(JsonElement root)
     {

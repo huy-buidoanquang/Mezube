@@ -12,7 +12,8 @@ namespace Mezube.Stn;
 public sealed class StnRestClientV2
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
-    private static readonly TimeSpan StatusPollInterval = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan StatusPollIntervalMin = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan StatusPollIntervalMax = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan PublishTimeout = TimeSpan.FromSeconds(12);
 
     private readonly HttpClient _http;
@@ -95,6 +96,7 @@ public sealed class StnRestClientV2
             return "stopped";
         }
 
+        var delay = StatusPollIntervalMin;
         while (!cancellationToken.IsCancellationRequested)
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, $"{_statusUri}?job_id={Uri.EscapeDataString(jobId)}");
@@ -123,7 +125,9 @@ public sealed class StnRestClientV2
                     return snapshot.Status ?? "stopped";
             }
 
-            await Task.Delay(StatusPollInterval, cancellationToken).ConfigureAwait(false);
+            await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            var nextMs = Math.Min(delay.TotalMilliseconds * 1.5, StatusPollIntervalMax.TotalMilliseconds);
+            delay = TimeSpan.FromMilliseconds(nextMs);
         }
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -152,6 +156,7 @@ public sealed class StnRestClientV2
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCts.CancelAfter(PublishTimeout);
 
+        var delay = StatusPollIntervalMin;
         while (true)
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, $"{_statusUri}?job_id={Uri.EscapeDataString(jobId)}");
@@ -177,7 +182,9 @@ public sealed class StnRestClientV2
                     throw new InvalidOperationException($"voiceV2 ended before publishing job={jobId} status={snapshot.Status}");
             }
 
-            await Task.Delay(StatusPollInterval, timeoutCts.Token).ConfigureAwait(false);
+            await Task.Delay(delay, timeoutCts.Token).ConfigureAwait(false);
+            var nextMs = Math.Min(delay.TotalMilliseconds * 1.5, StatusPollIntervalMax.TotalMilliseconds);
+            delay = TimeSpan.FromMilliseconds(nextMs);
         }
     }
 

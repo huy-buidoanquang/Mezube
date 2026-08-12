@@ -418,7 +418,7 @@ public sealed partial class MusicPlayer
                             state.ClanId = clanId;
                             state.HoldsPlaySlot = true;
                             ResetPrepToken(state);
-                            _ = PumpAsync(state, clanId, cancellationToken);
+                            StartPump(state, clanId);
                         }
                     }
 

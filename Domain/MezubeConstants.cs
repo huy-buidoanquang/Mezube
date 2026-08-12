@@ -3,10 +3,10 @@ namespace Mezube.Domain;
 /// <summary>Shared limits and fixed user-facing titles for Mezube.</summary>
 public static class MezubeConstants
 {
-    public const int MaxPrepConcurrency = 64;
-    public const int MaxConcurrentPlayback = 64;
+    public const int MaxPrepConcurrency = 8;
+    public const int MaxConcurrentPlayback = 32;
     public const int MaxQueuePerClan = 20;
-    public const long MaxAudioBytes = 100L * 1024 * 1024;
+    public const long MaxAudioBytes = 200L * 1024 * 1024;
     public const int InterTrackDelayMs = 2000;
 
     public const string TitleCopyrightBlocked =

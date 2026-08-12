@@ -9,6 +9,10 @@ public interface IVoiceBindStore
     Task<long?> TryGetUserVoiceChannelAsync(long clanId, long userId, CancellationToken cancellationToken = default);
 
     Task<long> CountAsync(long clanId, CancellationToken cancellationToken = default);
+
+    /// <summary>All voice binds across clans for L1 rehydrate on startup.</summary>
+    Task<IReadOnlyList<(long ClanId, long UserId, long ChannelId)>> SnapshotAllAsync(
+        CancellationToken cancellationToken = default);
 }
 
 public sealed class RedisVoiceBindStore : IVoiceBindStore
@@ -55,4 +59,51 @@ public sealed class RedisVoiceBindStore : IVoiceBindStore
 
     public async Task<long> CountAsync(long clanId, CancellationToken cancellationToken = default)
         => await _redis.Db.HashLengthAsync(RedisKeyNames.Voice(clanId)).ConfigureAwait(false);
+
+    public async Task<IReadOnlyList<(long ClanId, long UserId, long ChannelId)>> SnapshotAllAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var list = new List<(long, long, long)>();
+        foreach (var endpoint in _redis.Multiplexer.GetEndPoints())
+        {
+            var server = _redis.Multiplexer.GetServer(endpoint);
+            if (!server.IsConnected)
+            {
+                continue;
+            }
+
+            await foreach (var key in server.KeysAsync(pattern: $"{RedisKeyNames.Prefix}voice:*")
+                               .WithCancellation(cancellationToken)
+                               .ConfigureAwait(false))
+            {
+                var keyStr = (string?)key;
+                if (string.IsNullOrWhiteSpace(keyStr))
+                {
+                    continue;
+                }
+
+                var prefix = $"{RedisKeyNames.Prefix}voice:";
+                if (!keyStr.StartsWith(prefix, StringComparison.Ordinal)
+                    || !long.TryParse(keyStr[prefix.Length..], out var clanId)
+                    || clanId == 0)
+                {
+                    continue;
+                }
+
+                var entries = await _redis.Db.HashGetAllAsync(key).ConfigureAwait(false);
+                foreach (var e in entries)
+                {
+                    if (long.TryParse((string?)e.Name, out var userId)
+                        && long.TryParse((string?)e.Value, out var channelId)
+                        && userId != 0
+                        && channelId != 0)
+                    {
+                        list.Add((clanId, userId, channelId));
+                    }
+                }
+            }
+        }
+
+        return list;
+    }
 }

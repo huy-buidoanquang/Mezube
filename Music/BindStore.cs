@@ -74,6 +74,15 @@ public sealed class BindStore
     public bool TryGetUserVoiceChannel(long clanId, long userId, out long voiceChannelId)
         => _voiceByClanUser.TryGetValue((clanId, userId), out voiceChannelId);
 
+    public async Task HydrateVoiceFromRedisAsync(CancellationToken cancellationToken = default)
+    {
+        var snapshot = await _voice.SnapshotAllAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var (clanId, userId, channelId) in snapshot)
+        {
+            _voiceByClanUser[(clanId, userId)] = channelId;
+        }
+    }
+
     public Task<long> CountVoiceUsersAsync(long clanId, CancellationToken cancellationToken = default)
     {
         var local = _voiceByClanUser.Keys.Count(k => k.ClanId == clanId);

@@ -77,6 +77,20 @@ public sealed class PlaybackAccess
         CancellationToken cancellationToken = default)
         => IsClanCreatorAsync(client, clanId, userId, cancellationToken);
 
+    public Task<bool> IsDjOrOwnerAsync(
+        MezonClient client,
+        long clanId,
+        long userId,
+        CancellationToken cancellationToken = default)
+        => IsDjOrCreatorAsync(client, clanId, userId, cancellationToken);
+
+    public Task<bool> IsClanOwnerAsync(
+        MezonClient client,
+        long clanId,
+        long userId,
+        CancellationToken cancellationToken = default)
+        => IsClanCreatorAsync(client, clanId, userId, cancellationToken);
+
     public Task<long?> GetDjRoleIdAsync(long clanId, CancellationToken cancellationToken = default)
         => _settings.GetDjRoleIdAsync(clanId, cancellationToken);
 
