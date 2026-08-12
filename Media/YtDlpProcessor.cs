@@ -51,7 +51,62 @@ public sealed class YtDlpProcessor
         return ParseTrackElement(root, query, requestedBy, InferSource(query, root));
     }
 
-    /// <summary>Resolve a SoundCloud set/playlist into individual tracks (capped).</summary>
+    /// <summary>YouTube free-text search returning up to <paramref name="maxResults"/> entries (metadata only).</summary>
+    public async Task<IReadOnlyList<TrackInfoEntity>> SearchTracksAsync(
+        string query,
+        string? requestedBy,
+        int maxResults = 5,
+        CancellationToken cancellationToken = default)
+    {
+        var n = Math.Clamp(maxResults, 1, 10);
+        var input = $"ytsearch{n}:{query.Trim()}";
+        var json = await RunAsync(
+            [
+                "--no-playlist",
+                "--no-warnings",
+                "-J",
+                "-f", "bestaudio/best",
+                input,
+            ],
+            cancellationToken).ConfigureAwait(false);
+
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return [];
+        }
+
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        var list = new List<TrackInfoEntity>();
+        if (root.TryGetProperty("entries", out var entries) && entries.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var entry in entries.EnumerateArray())
+            {
+                if (list.Count >= n)
+                {
+                    break;
+                }
+
+                if (entry.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+                {
+                    continue;
+                }
+
+                var track = ParseTrackElement(entry, query, requestedBy, TrackIdentityHelper.SourceYoutube);
+                if (track is not null)
+                {
+                    list.Add(track);
+                }
+            }
+
+            return list;
+        }
+
+        var single = ParseTrackElement(root, query, requestedBy, TrackIdentityHelper.SourceYoutube);
+        return single is null ? [] : [single];
+    }
+
+    /// <summary>Resolve a playlist/set into individual tracks (capped).</summary>
     public async Task<IReadOnlyList<TrackInfoEntity>> ResolvePlaylistAsync(
         string playlistUrl,
         string? requestedBy,
@@ -78,9 +133,10 @@ public sealed class YtDlpProcessor
 
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
+        var source = InferSource(playlistUrl, root);
         if (!root.TryGetProperty("entries", out var entries) || entries.ValueKind != JsonValueKind.Array)
         {
-            var single = ParseTrackElement(root, playlistUrl, requestedBy, TrackIdentityHelper.SourceSoundcloud);
+            var single = ParseTrackElement(root, playlistUrl, requestedBy, source);
             return single is null ? [] : [single];
         }
 
@@ -97,7 +153,8 @@ public sealed class YtDlpProcessor
                 continue;
             }
 
-            var track = ParseTrackElement(entry, playlistUrl, requestedBy, TrackIdentityHelper.SourceSoundcloud);
+            var entrySource = InferSource(playlistUrl, entry);
+            var track = ParseTrackElement(entry, playlistUrl, requestedBy, entrySource);
             if (track is not null
                 && !string.IsNullOrWhiteSpace(track.WebpageUrl ?? track.MediaUrl))
             {

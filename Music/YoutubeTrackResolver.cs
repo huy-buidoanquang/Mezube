@@ -3,6 +3,7 @@ using Mezube.Bot;
 using Mezube.Domain.Entities;
 using Mezube.Helpers;
 using Mezube.Media;
+using Mezube.Music.Interactive;
 using Microsoft.Extensions.Logging;
 
 namespace Mezube.Music;
@@ -202,6 +203,104 @@ public sealed class YoutubeTrackResolver : ITrackResolver
         }
 
         return resolved;
+    }
+
+    /// <summary>Free-text YouTube search (metadata upsert + size filter). Cap 5.</summary>
+    public async Task<IReadOnlyList<TrackInfoEntity>> SearchAsync(
+        string query,
+        string? requestedBy,
+        int maxResults = SearchPickSession.MaxResults,
+        CancellationToken cancellationToken = default)
+    {
+        var trimmed = query.Trim();
+        IReadOnlyList<TrackInfoEntity> raw;
+        try
+        {
+            raw = await _ytDlp.SearchTracksAsync(trimmed, requestedBy, maxResults, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "YouTube search failed for {Query}", query);
+            return [];
+        }
+
+        var results = new List<TrackInfoEntity>(raw.Count);
+        foreach (var resolved in raw)
+        {
+            try
+            {
+                if (resolved.IsTooLarge
+                    || (resolved.SourceBytes is long b && b > _options.MaxAudioBytes))
+                {
+                    continue;
+                }
+
+                var externalId = !string.IsNullOrWhiteSpace(resolved.ExternalId)
+                    ? resolved.ExternalId!
+                    : TrackIdentityHelper.TryParseYoutubeId(resolved.WebpageUrl ?? resolved.MediaUrl, out var vid)
+                        ? vid
+                        : null;
+                if (string.IsNullOrWhiteSpace(externalId))
+                {
+                    continue;
+                }
+
+                var cached = await _store.TryGetAsync(
+                        TrackIdentityHelper.SourceYoutube,
+                        externalId,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (cached is { IsTooLarge: true })
+                {
+                    continue;
+                }
+
+                if (cached is not null)
+                {
+                    results.Add(cached.ToTrackInfo(requestedBy));
+                    continue;
+                }
+
+                var webpage = resolved.WebpageUrl ?? resolved.MediaUrl;
+                var trackId = await _store.UpsertMetadataAsync(
+                        new TrackEntity
+                        {
+                            Source = TrackIdentityHelper.SourceYoutube,
+                            ExternalId = externalId,
+                            Title = resolved.Title,
+                            WebpageUrl = webpage,
+                            ThumbnailUrl = resolved.ThumbnailUrl,
+                            Duration = resolved.Duration,
+                            PlayableUrl = null,
+                            SourceBytes = resolved.SourceBytes,
+                            IsTooLarge = false,
+                        },
+                        cancellationToken)
+                    .ConfigureAwait(false);
+
+                results.Add(new TrackInfoEntity
+                {
+                    TrackId = trackId,
+                    Title = resolved.Title,
+                    MediaUrl = webpage,
+                    WebpageUrl = webpage,
+                    ThumbnailUrl = resolved.ThumbnailUrl,
+                    RequestedBy = requestedBy,
+                    Duration = resolved.Duration,
+                    Source = TrackIdentityHelper.SourceYoutube,
+                    ExternalId = externalId,
+                    SourceBytes = resolved.SourceBytes,
+                    IsTooLarge = false,
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "YouTube search item skipped");
+            }
+        }
+
+        return results;
     }
 
     private static bool LooksLikeDirectMediaUrl(string query)

@@ -12,4 +12,8 @@ public static class RedisKeyNames
     public static string VoteSkip(long clanId, long playHistoryId) => $"{Prefix}voteskip:{clanId}:{playHistoryId}";
     /// <summary>SET of clan ids with an active player/queue (avoids KEYS scans on restore).</summary>
     public static string ActiveClans => $"{Prefix}active_clans";
+
+    public static readonly TimeSpan InteractiveSessionTtl = TimeSpan.FromMinutes(10);
+    public static string SearchPick(long messageId) => $"{Prefix}pick:{messageId}";
+    public static string PlaylistImport(long messageId) => $"{Prefix}plimport:{messageId}";
 }

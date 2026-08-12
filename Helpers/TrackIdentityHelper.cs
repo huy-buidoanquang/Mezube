@@ -71,6 +71,39 @@ public static class TrackIdentityHelper
     }
 
     /// <summary>
+    /// YouTube playlist URL: <c>/playlist?list=</c> or any youtube URL with a playlist <c>list=</c> id.
+    /// </summary>
+    public static bool IsYoutubePlaylistUrl(string? input)
+    {
+        if (string.IsNullOrWhiteSpace(input)
+            || !Uri.TryCreate(input.Trim(), UriKind.Absolute, out var uri)
+            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+        {
+            return false;
+        }
+
+        var host = uri.Host.ToLowerInvariant();
+        if (!host.Contains("youtube.com", StringComparison.Ordinal)
+            && !host.Contains("youtu.be", StringComparison.Ordinal)
+            && !host.Contains("music.youtube.com", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var path = uri.AbsolutePath.TrimEnd('/').ToLowerInvariant();
+        if (path.Contains("/playlist", StringComparison.Ordinal)
+            && TryGetQueryValue(uri.Query, "list", out _))
+        {
+            return true;
+        }
+
+        return TryGetQueryValue(uri.Query, "list", out var listId) && !string.IsNullOrWhiteSpace(listId);
+    }
+
+    public static bool IsExternalPlaylistUrl(string? input)
+        => IsSoundCloudSetUrl(input) || IsSoundCloudShortUrl(input) || IsYoutubePlaylistUrl(input);
+
+    /// <summary>
     /// Rebuild a playable SoundCloud webpage URL from yt-dlp flat playlist fields
     /// (relative path, track id, or absolute URL).
     /// </summary>

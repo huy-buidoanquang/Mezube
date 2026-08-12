@@ -8,14 +8,27 @@ namespace Mezube.Ui;
 public static class MezubeButtonId
 {
     public const int PlayerControls = 11;
+    public const int SearchPick = 12;
+    public const int PlaylistImport = 13;
+
     public const string ActionSkip = "skip";
     public const string ActionStop = "stop";
+    public const string ActionSubmit = "submit";
+    public const string ActionPrev = "prev";
+    public const string ActionNext = "next";
+    public const string ActionConfirm = "confirm";
+    public const string ActionCancel = "cancel";
+
+    public const string RadioSearch = "mezube_radio_search";
+    public const string RadioPlaylist = "mezube_radio_pl";
 
     private const int FunctionPrefixLength = 2;
     private const int IdLength = 19;
 
     /// <summary>Route prefix for <see cref="InteractionRouter.OnButton"/> (<c>"11*"</c>).</summary>
     public static string PlayerControlsPrefix => $"{PlayerControls.ToString().PadLeft(FunctionPrefixLength, '0')}*";
+    public static string SearchPickPrefix => $"{SearchPick.ToString().PadLeft(FunctionPrefixLength, '0')}*";
+    public static string PlaylistImportPrefix => $"{PlaylistImport.ToString().PadLeft(FunctionPrefixLength, '0')}*";
 
     public static string Create(int interactionFunction, long messageId, long userId, string action, string? extra = null)
     {
@@ -27,6 +40,12 @@ public static class MezubeButtonId
 
     public static string CreatePlayerControl(long messageId, long userId, string action, long? clanId = null)
         => Create(PlayerControls, messageId, userId, action, clanId?.ToString());
+
+    public static string CreateSearchPick(long messageId, long userId, string action)
+        => Create(SearchPick, messageId, userId, action);
+
+    public static string CreatePlaylistImport(long messageId, long userId, string action)
+        => Create(PlaylistImport, messageId, userId, action);
 
     public static bool TryParse(string? buttonId, out Parsed parts)
     {
