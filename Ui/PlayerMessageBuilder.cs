@@ -357,13 +357,17 @@ public static class PlayerMessageBuilder
     /// <param name="isOwner">Clan owner only.</param>
     public static MessageContent Help(string prefix, bool isDjOrOwner = false, bool isOwner = false)
     {
-        var role = isOwner ? "owner" : isDjOrOwner ? "DJ" : "member";
+        var description = isOwner
+            ? "Here’s everything you can run as clan owner — including DJ and channel setup."
+            : isDjOrOwner
+                ? "Here’s what you can do with DJ powers — play, control playback, and manage the default playlist."
+                : "Here’s what you can do — play tracks, check the queue, and manage your own requests.";
         var fields = HelpFields(prefix, isDjOrOwner, isOwner)
             .Select(f => new MessageEmbedField(f.Name, f.Value))
             .ToList();
         return Build(
             "Mezube help",
-            $"Showing commands available to you ({role}).",
+            description,
             ColorInfo,
             thumbnailUrl: null,
             url: null,
