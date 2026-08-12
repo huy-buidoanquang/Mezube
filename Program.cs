@@ -36,6 +36,7 @@ internal static class Program
             reloadOnChange: true);
 
         var options = BotOptions.FromConfiguration(builder.Configuration);
+        CapConcurrencyDefaults(options);
         options.Validate();
         builder.Services.AddSingleton(options);
         PlayerMessageBuilder.Configure(options);
@@ -99,11 +100,12 @@ internal static class Program
         builder.Services.AddSingleton<YoutubeTrackResolver>();
         builder.Services.AddSingleton<DirectUrlTrackResolver>();
         builder.Services.AddSingleton<SoundCloudTrackResolver>();
+        builder.Services.AddSingleton<SoundCloudSetImporter>();
         builder.Services.AddSingleton<ITrackResolver>(sp =>
             new CompositeTrackResolver(
             [
-                sp.GetRequiredService<YoutubeTrackResolver>(),
                 sp.GetRequiredService<SoundCloudTrackResolver>(),
+                sp.GetRequiredService<YoutubeTrackResolver>(),
                 sp.GetRequiredService<DirectUrlTrackResolver>(),
             ]));
         builder.Services.AddSingleton<BindStore>();
@@ -112,11 +114,24 @@ internal static class Program
         builder.Services.AddSingleton<PlaybackAccess>();
         builder.Services.AddSingleton<MusicPlayer>();
         builder.Services.AddHostedService<PersistenceInitializer>();
+        builder.Services.AddHostedService<MediaCleanupHostedService>();
         builder.Services.AddHostedService<MezubeBot>();
 
         var host = builder.Build();
-        RegisterMediaCleanup(host);
         await host.RunAsync().ConfigureAwait(false);
+    }
+
+    private static void CapConcurrencyDefaults(BotOptions options)
+    {
+        if (options.MaxPrepConcurrency > 16)
+        {
+            options.MaxPrepConcurrency = Math.Clamp(Environment.ProcessorCount, 2, 8);
+        }
+
+        if (options.MaxConcurrentPlayback > 32)
+        {
+            options.MaxConcurrentPlayback = Math.Clamp(Environment.ProcessorCount * 2, 4, 32);
+        }
     }
 
     private static void ConfigureLogging(
@@ -143,55 +158,4 @@ internal static class Program
         => !string.IsNullOrWhiteSpace(text) && Enum.TryParse(text, ignoreCase: true, out LogLevel level)
             ? level
             : fallback;
-
-    private static void RegisterMediaCleanup(IHost host)
-    {
-        var lifetime = host.Services.GetRequiredService<IHostApplicationLifetime>();
-        var publisher = host.Services.GetRequiredService<WhipFfmpegPublisher>();
-        var voiceSink = host.Services.GetRequiredService<VoiceChannelSink>();
-        var streamingSessions = host.Services.GetRequiredService<StnStreamingSessionManager>();
-        var logger = host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Mezube.MediaCleanup");
-
-        lifetime.ApplicationStopping.Register(() =>
-        {
-            try
-            {
-                logger.LogDebug("Stopping all voice rooms during host shutdown");
-                voiceSink.StopAllAsync().GetAwaiter().GetResult();
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Failed to stop voice rooms during shutdown");
-            }
-
-            try
-            {
-                logger.LogDebug("Stopping all active WHIP publishers during host shutdown");
-                publisher.StopAllAsync().GetAwaiter().GetResult();
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Failed to stop all WHIP publishers during shutdown");
-            }
-
-            try
-            {
-                logger.LogDebug("Disposing all STN streaming sessions during host shutdown");
-                streamingSessions.DisposeAllAsync().GetAwaiter().GetResult();
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Failed to dispose STN streaming sessions during shutdown");
-            }
-
-            try
-            {
-                host.Services.GetRequiredService<IConnectionMultiplexer>().Dispose();
-            }
-            catch (Exception ex)
-            {
-                logger.LogDebug(ex, "Redis multiplexer dispose ignored");
-            }
-        });
-    }
 }

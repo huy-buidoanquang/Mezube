@@ -1,5 +1,5 @@
 using Mezube.Application;
-using Mezube.Domain;
+using Mezube.Bot;
 using Mezube.Domain.Entities;
 using Mezube.Helpers;
 using Mezube.Media;
@@ -11,15 +11,18 @@ public sealed class YoutubeTrackResolver : ITrackResolver
 {
     private readonly YtDlpProcessor _ytDlp;
     private readonly ITrackLibraryService _store;
+    private readonly BotOptions _options;
     private readonly ILogger<YoutubeTrackResolver> _logger;
 
     public YoutubeTrackResolver(
         YtDlpProcessor ytDlp,
         ITrackLibraryService store,
+        BotOptions options,
         ILogger<YoutubeTrackResolver> logger)
     {
         _ytDlp = ytDlp;
         _store = store;
+        _options = options;
         _logger = logger;
     }
 
@@ -158,7 +161,7 @@ public sealed class YoutubeTrackResolver : ITrackResolver
                         IsTooLarge = resolved.IsTooLarge
                             || (existing?.IsTooLarge ?? false)
                             || (resolved.SourceBytes is long bytes
-                                && bytes > MezubeConstants.MaxAudioBytes),
+                                && bytes > _options.MaxAudioBytes),
                     },
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -173,7 +176,7 @@ public sealed class YoutubeTrackResolver : ITrackResolver
                     .ConfigureAwait(false);
             }
 
-            if (resolved.SourceBytes is long overBytes && overBytes > MezubeConstants.MaxAudioBytes)
+            if (resolved.SourceBytes is long overBytes && overBytes > _options.MaxAudioBytes)
             {
                 await _store.MarkTooLargeAsync(
                         TrackIdentityHelper.SourceYoutube,

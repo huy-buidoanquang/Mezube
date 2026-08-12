@@ -353,25 +353,118 @@ public static class PlayerMessageBuilder
             "Taking a quick breather! You’re typing faster than we can think.",
             "Please take a 30-second breather and try again.");
 
-    public static MessageContent Help(string prefix)
+    /// <param name="isDjOrOwner">DJ role member or clan owner.</param>
+    /// <param name="isOwner">Clan owner only.</param>
+    public static MessageContent Help(string prefix, bool isDjOrOwner = false, bool isOwner = false)
     {
-        var p = prefix;
-        var fields = new List<MessageEmbedField>
-        {
-            new("Play", $"{p}play [#voice|#stream] <url | query>"),
-            new("Controls", $"{p}skip · {p}voteskip · {p}pause · {p}resume · {p}stop · {p}queue · {p}np · {p}loop · {p}seek"),
-            new("Library", $"{p}playlist · {p}playlist default · {p}musicchannel · {p}setdj · {p}settings"),
-            new("DJ", $"{p}setdj @role|roleId|none · {p}settings"),
-        };
-
+        var role = isOwner ? "owner" : isDjOrOwner ? "DJ" : "member";
+        var fields = HelpFields(prefix, isDjOrOwner, isOwner)
+            .Select(f => new MessageEmbedField(f.Name, f.Value))
+            .ToList();
         return Build(
             "Mezube help",
-            "Mention the target with a channel hashtag.\n E.g. !play #music never gonna give you up.",
+            $"Showing commands available to you ({role}).",
             ColorInfo,
             thumbnailUrl: null,
             url: null,
             includeControls: false,
             fields);
+    }
+
+    /// <summary>Role-filtered help fields (testable without Mezon message parse).</summary>
+    public static IReadOnlyList<(string Name, string Value)> HelpFields(
+        string prefix,
+        bool isDjOrOwner = false,
+        bool isOwner = false)
+    {
+        var p = prefix;
+        var fields = new List<(string Name, string Value)>
+        {
+            (
+                "Play",
+                $"""
+                · {p}play <query>
+                · {p}play #channel <query>
+                Alias: {p}p — run {p}play alone for YouTube / SoundCloud examples
+                """),
+            (
+                "Controls",
+                isDjOrOwner
+                    ? $"""
+                      · {p}skip · {p}pause · {p}resume · {p}stop
+                      · {p}voteskip · {p}queue · {p}np · {p}loop · {p}seek
+                      """
+                    : $"""
+                      · {p}voteskip · {p}queue · {p}np · {p}loop · {p}seek
+                      · {p}skip · {p}pause · {p}resume — your track only
+                      """),
+            (
+                "Playlist",
+                isDjOrOwner
+                    ? $"""
+                      · {p}playlist create | add | play | list | delete
+                      · {p}playlist default <name|none>
+                      """
+                    : $"· {p}playlist create | add | play | list | delete"),
+            (
+                "Info",
+                $"· {p}settings"),
+        };
+
+        if (isOwner)
+        {
+            fields.Add((
+                "Admin",
+                $"""
+                · {p}setdj @role | none
+                · {p}musicchannel add | remove | list | clear
+                """));
+        }
+
+        return fields;
+    }
+
+    /// <summary>Shown when <c>!play</c> is invoked with no query.</summary>
+    public static MessageContent PlayUsage(string prefix)
+    {
+        var fields = PlayUsageFields(prefix)
+            .Select(f => new MessageEmbedField(f.Name, f.Value))
+            .ToList();
+
+        return Build(
+            "Missing track",
+            string.Empty,
+            ColorError,
+            thumbnailUrl: null,
+            url: null,
+            includeControls: false,
+            fields);
+    }
+
+    public static IReadOnlyList<(string Name, string Value)> PlayUsageFields(string prefix)
+    {
+        var p = prefix;
+        return
+        [
+            (
+                "YouTube",
+                $"""
+                · {p}play never gonna give you up
+                · {p}play https://youtu.be/dQw4w9WgXcQ
+                · {p}play https://www.youtube.com/watch?v=dQw4w9WgXcQ
+                · {p}play https://music.youtube.com/watch?v=…
+                """),
+            (
+                "SoundCloud",
+                $"""
+                · {p}play https://soundcloud.com/artist/track
+                · {p}play https://soundcloud.com/artist/sets/playlist-name
+                · {p}play https://on.soundcloud.com/…
+                """),
+            (
+                "Channel",
+                $"· {p}play #voice-or-stream <query>"),
+        ];
     }
 
     public static MessageContent Text(string title, string description)

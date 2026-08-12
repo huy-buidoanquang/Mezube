@@ -133,7 +133,7 @@ public sealed class MezubeBot : BackgroundService
                 RateLimitNotifyTarget.Value = null;
             }
         });
-        new MusicCommandModule(_player, _options.CommandPrefix).Register(commands);
+        new MusicCommandModule(_player, _access, _options.CommandPrefix).Register(commands);
         client.UseCommands(commands);
 
         var interactions = new InteractionRouter();
@@ -171,6 +171,7 @@ public sealed class MezubeBot : BackgroundService
                             }
 
                             await UpdateControlMessageAsync(ctx, outcome.Content).ConfigureAwait(false);
+                            ScheduleOneShotRelease(lockKey);
                             break;
                         }
                     case MezubeButtonId.ActionStop:
@@ -186,6 +187,7 @@ public sealed class MezubeBot : BackgroundService
                             }
 
                             await UpdateControlMessageAsync(ctx, outcome.Content).ConfigureAwait(false);
+                            ScheduleOneShotRelease(lockKey);
                             break;
                         }
                     default:
@@ -195,6 +197,13 @@ public sealed class MezubeBot : BackgroundService
             }
             catch (Exception ex) when (!ctx.CancellationToken.IsCancellationRequested)
             {
+                if (MezubeButtonId.TryParse(ctx.Interaction.CustomId, out var failParts))
+                {
+                    var failClan = failParts.ClanId ?? ctx.Channel.ClanId;
+                    var failMsg = ctx.Message?.Id ?? failParts.MessageId;
+                    _controlOneShot.TryRemove((failClan, failMsg), out _);
+                }
+
                 _logger.LogError(ex, "Button {ButtonId} failed", ctx.Interaction.CustomId);
                 try
                 {
@@ -226,6 +235,15 @@ public sealed class MezubeBot : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Music viz warm-up failed");
+            }
+
+            try
+            {
+                await _binds.HydrateVoiceFromRedisAsync(stoppingToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Voice bind hydrate from Redis failed");
             }
 
             try
@@ -644,6 +662,23 @@ public sealed class MezubeBot : BackgroundService
         {
             _logger.LogDebug(ex, "Post-login owner/DJ warm failed");
         }
+    }
+
+    private void ScheduleOneShotRelease((long ClanId, long MessageId) lockKey)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromMinutes(10)).ConfigureAwait(false);
+            }
+            catch
+            {
+                // ignored
+            }
+
+            _controlOneShot.TryRemove(lockKey, out _);
+        });
     }
 
     private void WireClientLog(MezonClient client)

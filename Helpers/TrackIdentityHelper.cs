@@ -14,6 +14,132 @@ public static class TrackIdentityHelper
         @"^[A-Za-z0-9_-]{11}$",
         RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
+    public static bool IsSoundCloudHost(string? host)
+    {
+        if (string.IsNullOrWhiteSpace(host))
+        {
+            return false;
+        }
+
+        var h = host.ToLowerInvariant();
+        return h is "soundcloud.com" or "www.soundcloud.com" or "m.soundcloud.com"
+               or "on.soundcloud.com"
+               || h.EndsWith(".soundcloud.com", StringComparison.Ordinal);
+    }
+
+    public static bool IsSoundCloudUrl(string? input)
+    {
+        if (string.IsNullOrWhiteSpace(input)
+            || !Uri.TryCreate(input.Trim(), UriKind.Absolute, out var uri))
+        {
+            return false;
+        }
+
+        return (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)
+               && IsSoundCloudHost(uri.Host);
+    }
+
+    /// <summary>Short links (<c>on.soundcloud.com/…</c>) — resolve via playlist path (may be track or set).</summary>
+    public static bool IsSoundCloudShortUrl(string? input)
+    {
+        if (!IsSoundCloudUrl(input) || !Uri.TryCreate(input!.Trim(), UriKind.Absolute, out var uri))
+        {
+            return false;
+        }
+
+        return uri.Host.Equals("on.soundcloud.com", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>True for SoundCloud playlist/set URLs (<c>/sets/…</c>).</summary>
+    public static bool IsSoundCloudSetUrl(string? input)
+    {
+        if (!IsSoundCloudUrl(input) || !Uri.TryCreate(input!.Trim(), UriKind.Absolute, out var uri))
+        {
+            return false;
+        }
+
+        var segments = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        for (var i = 0; i < segments.Length; i++)
+        {
+            if (string.Equals(segments[i], "sets", StringComparison.OrdinalIgnoreCase))
+            {
+                return i + 1 < segments.Length;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Rebuild a playable SoundCloud webpage URL from yt-dlp flat playlist fields
+    /// (relative path, track id, or absolute URL).
+    /// </summary>
+    public static string? ResolveSoundCloudEntryUrl(string? webpageUrl, string? urlField, string? id = null)
+    {
+        if (TryAbsoluteHttp(webpageUrl, out var fromWeb))
+        {
+            return NormalizeAbsoluteUrl(fromWeb);
+        }
+
+        if (TryAbsoluteHttp(urlField, out var fromUrl))
+        {
+            return NormalizeAbsoluteUrl(fromUrl);
+        }
+
+        var relative = FirstNonEmpty(webpageUrl, urlField);
+        if (!string.IsNullOrWhiteSpace(relative) && relative.Contains('/'))
+        {
+            return NormalizeAbsoluteUrl("https://soundcloud.com/" + relative.TrimStart('/'));
+        }
+
+        var trackId = FirstNonEmpty(id, relative);
+        if (!string.IsNullOrWhiteSpace(trackId) && IsAllDigits(trackId))
+        {
+            return $"https://api.soundcloud.com/tracks/{trackId}";
+        }
+
+        return null;
+    }
+
+    private static bool TryAbsoluteHttp(string? value, out string absolute)
+    {
+        absolute = string.Empty;
+        if (string.IsNullOrWhiteSpace(value)
+            || !value.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        absolute = value;
+        return true;
+    }
+
+    private static string? FirstNonEmpty(params string?[] values)
+    {
+        foreach (var v in values)
+        {
+            if (!string.IsNullOrWhiteSpace(v))
+            {
+                return v.Trim();
+            }
+        }
+
+        return null;
+    }
+
+    private static bool IsAllDigits(string value)
+    {
+        for (var i = 0; i < value.Length; i++)
+        {
+            if (!char.IsDigit(value[i]))
+            {
+                return false;
+            }
+        }
+
+        return value.Length > 0;
+    }
+
     public static bool TryParseYoutubeId(string? input, out string videoId)
     {
         videoId = string.Empty;
@@ -60,7 +186,6 @@ public static class TrackIdentityHelper
             return true;
         }
 
-        // /embed/ID, /shorts/ID, /live/ID
         var segments = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
         if (segments.Length >= 2
             && segments[0] is "embed" or "shorts" or "live" or "v"

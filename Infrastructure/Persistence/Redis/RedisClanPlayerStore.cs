@@ -92,9 +92,41 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
         var ttl = RedisKeyNames.PlayerTtl;
         await db.KeyExpireAsync(RedisKeyNames.Player(clanId), ttl).ConfigureAwait(false);
         await db.KeyExpireAsync(RedisKeyNames.Queue(clanId), ttl).ConfigureAwait(false);
+        await db.SetAddAsync(RedisKeyNames.ActiveClans, clanId).ConfigureAwait(false);
     }
 
     public async Task<IReadOnlyList<long>> ListActiveClanIdsAsync(CancellationToken cancellationToken = default)
+    {
+        var members = await _redis.Db.SetMembersAsync(RedisKeyNames.ActiveClans).ConfigureAwait(false);
+        var ids = new HashSet<long>();
+        foreach (var m in members)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (long.TryParse((string?)m, out var clanId) && clanId != 0)
+            {
+                // Drop stale index entries whose player+queue keys are gone.
+                var playerExists = await _redis.Db.KeyExistsAsync(RedisKeyNames.Player(clanId)).ConfigureAwait(false);
+                var queueLen = await _redis.Db.ListLengthAsync(RedisKeyNames.Queue(clanId)).ConfigureAwait(false);
+                if (!playerExists && queueLen == 0)
+                {
+                    await _redis.Db.SetRemoveAsync(RedisKeyNames.ActiveClans, clanId).ConfigureAwait(false);
+                    continue;
+                }
+
+                ids.Add(clanId);
+            }
+        }
+
+        if (ids.Count > 0)
+        {
+            return ids.OrderBy(x => x).ToArray();
+        }
+
+        // One-time fallback if index empty but legacy keys remain (pre-migration).
+        return await ListActiveClanIdsByScanAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<IReadOnlyList<long>> ListActiveClanIdsByScanAsync(CancellationToken cancellationToken)
     {
         var ids = new HashSet<long>();
         foreach (var endpoint in _redis.Multiplexer.GetEndPoints())
@@ -105,21 +137,25 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
                 continue;
             }
 
-            foreach (var key in server.Keys(pattern: $"{RedisKeyNames.Prefix}player:*"))
+            await foreach (var key in server.KeysAsync(pattern: $"{RedisKeyNames.Prefix}player:*")
+                               .WithCancellation(cancellationToken)
+                               .ConfigureAwait(false))
             {
-                cancellationToken.ThrowIfCancellationRequested();
                 if (TryParseClanId((string?)key, "player", out var clanId))
                 {
                     ids.Add(clanId);
+                    await _redis.Db.SetAddAsync(RedisKeyNames.ActiveClans, clanId).ConfigureAwait(false);
                 }
             }
 
-            foreach (var key in server.Keys(pattern: $"{RedisKeyNames.Prefix}queue:*"))
+            await foreach (var key in server.KeysAsync(pattern: $"{RedisKeyNames.Prefix}queue:*")
+                               .WithCancellation(cancellationToken)
+                               .ConfigureAwait(false))
             {
-                cancellationToken.ThrowIfCancellationRequested();
                 if (TryParseClanId((string?)key, "queue", out var clanId))
                 {
                     ids.Add(clanId);
+                    await _redis.Db.SetAddAsync(RedisKeyNames.ActiveClans, clanId).ConfigureAwait(false);
                 }
             }
         }
@@ -403,6 +439,7 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
         }
 
         await db.KeyDeleteAsync(keys.ToArray()).ConfigureAwait(false);
+        await db.SetRemoveAsync(RedisKeyNames.ActiveClans, clanId).ConfigureAwait(false);
     }
 
     public async Task RemovePendingMatchingAsync(

@@ -41,12 +41,9 @@ public sealed class TrackPrepService
         var key = BuildKey(track);
         if (key is null)
         {
-            // No stable identity — cannot safely share; still gated to limit blast radius.
             return RunGatedUngatedKeyAsync(client, track, cancellationToken);
         }
 
-        // GetOrAdd may invoke this factory more than once under contention; creating Lazy is cheap.
-        // Only the Lazy that wins the dictionary slot has .Value read — that runs prep exactly once.
         var lazy = _inflight.GetOrAdd(
             key,
             static (k, state) => new Lazy<Task<TrackInfoEntity>>(
@@ -57,7 +54,6 @@ public sealed class TrackPrepService
         return AwaitSharedAsync(lazy.Value, cancellationToken);
     }
 
-    /// <summary>Fire-and-forget prep for a queued item; errors are logged by the caller continuation.</summary>
     public void StartBackgroundPrep(
         MezonClient client,
         TrackInfoEntity track,
@@ -72,7 +68,6 @@ public sealed class TrackPrepService
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                // stop/clear — waiter cancelled; shared prep (if any) may still finish.
             }
             catch (Exception ex)
             {
@@ -88,7 +83,7 @@ public sealed class TrackPrepService
         string key)
     {
         // Shared work must not use a per-caller CT: CancelTrack / PrepCts cancel would abort
-        // Client work for every waiter, and racing factories used to capture different tokens.
+        // shared work for every waiter. Callers still observe cancel via AwaitSharedAsync.
         await _gate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
@@ -158,7 +153,6 @@ public sealed class TrackPrepService
             return $"{TrackIdentityHelper.SourceUrl}:{TrackIdentityHelper.ForDirectUrl(track.MediaUrl)}";
         }
 
-        // Last-resort share key so background + Play still dedupe when ExternalId is missing.
         var url = track.WebpageUrl ?? track.MediaUrl;
         if (!string.IsNullOrWhiteSpace(url))
         {

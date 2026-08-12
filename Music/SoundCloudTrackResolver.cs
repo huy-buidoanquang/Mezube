@@ -1,5 +1,5 @@
 using Mezube.Application;
-using Mezube.Domain;
+using Mezube.Bot;
 using Mezube.Domain.Entities;
 using Mezube.Helpers;
 using Mezube.Media;
@@ -7,38 +7,39 @@ using Microsoft.Extensions.Logging;
 
 namespace Mezube.Music;
 
-/// <summary>Resolves SoundCloud track/set URLs via yt-dlp into the shared track library.</summary>
+/// <summary>
+/// Resolves SoundCloud track URLs via yt-dlp (SoundCloud extractor — audio from SoundCloud, not YouTube).
+/// Sets (<c>/sets/</c>) are handled by <see cref="SoundCloudSetImporter"/>.
+/// </summary>
 public sealed class SoundCloudTrackResolver : ITrackResolver
 {
     private readonly YtDlpProcessor _ytDlp;
     private readonly ITrackLibraryService _store;
+    private readonly BotOptions _options;
     private readonly ILogger<SoundCloudTrackResolver> _logger;
 
     public SoundCloudTrackResolver(
         YtDlpProcessor ytDlp,
         ITrackLibraryService store,
+        BotOptions options,
         ILogger<SoundCloudTrackResolver> logger)
     {
         _ytDlp = ytDlp;
         _store = store;
+        _options = options;
         _logger = logger;
     }
 
     public bool CanResolve(string query)
     {
-        if (!Uri.TryCreate(query.Trim(), UriKind.Absolute, out var uri))
+        if (!TrackIdentityHelper.IsSoundCloudUrl(query))
         {
             return false;
         }
 
-        if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
-        {
-            return false;
-        }
-
-        var host = uri.Host.ToLowerInvariant();
-        return host is "soundcloud.com" or "www.soundcloud.com" or "m.soundcloud.com"
-               || host.EndsWith(".soundcloud.com", StringComparison.Ordinal);
+        // Sets and on.soundcloud.com short links go through the playlist importer.
+        return !TrackIdentityHelper.IsSoundCloudSetUrl(query)
+               && !TrackIdentityHelper.IsSoundCloudShortUrl(query);
     }
 
     public async Task<TrackInfoEntity?> ResolveAsync(
@@ -47,18 +48,12 @@ public sealed class SoundCloudTrackResolver : ITrackResolver
         CancellationToken cancellationToken = default)
     {
         var normalized = TrackIdentityHelper.NormalizeAbsoluteUrl(query);
-        var externalId = TrackIdentityHelper.ForDirectUrl(normalized);
+        var urlAlias = TrackIdentityHelper.NormalizeQueryAlias(normalized);
 
-        var cached = await _store.TryGetAsync(TrackIdentityHelper.SourceSoundcloud, externalId, cancellationToken)
-            .ConfigureAwait(false);
-        if (cached is { IsTooLarge: true })
+        var byAlias = await _store.TryGetByAliasAsync(urlAlias, cancellationToken).ConfigureAwait(false);
+        if (byAlias is not null)
         {
-            return cached.ToTrackInfo(requestedBy);
-        }
-
-        if (cached is { HasPlayableUrl: true })
-        {
-            return cached.ToTrackInfo(requestedBy);
+            return byAlias.ToTrackInfo(requestedBy);
         }
 
         try
@@ -70,36 +65,64 @@ public sealed class SoundCloudTrackResolver : ITrackResolver
                 return null;
             }
 
-            var id = string.IsNullOrWhiteSpace(resolved.ExternalId) ? externalId : resolved.ExternalId!;
+            var externalId = !string.IsNullOrWhiteSpace(resolved.ExternalId)
+                ? resolved.ExternalId!
+                : TrackIdentityHelper.ForDirectUrl(normalized);
+
+            var cached = await _store.TryGetAsync(
+                    TrackIdentityHelper.SourceSoundcloud,
+                    externalId,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (cached is { IsTooLarge: true } or { HasPlayableUrl: true })
+            {
+                await _store.SetAliasAsync(
+                        urlAlias,
+                        TrackIdentityHelper.SourceSoundcloud,
+                        externalId,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                return cached.ToTrackInfo(requestedBy);
+            }
+
+            var webpage = resolved.WebpageUrl ?? normalized;
             var entity = new TrackEntity
             {
                 Source = TrackIdentityHelper.SourceSoundcloud,
-                ExternalId = id,
-                Title = string.IsNullOrWhiteSpace(resolved.Title) ? id : resolved.Title,
-                WebpageUrl = resolved.WebpageUrl ?? normalized,
+                ExternalId = externalId,
+                Title = string.IsNullOrWhiteSpace(resolved.Title) ? externalId : resolved.Title,
+                WebpageUrl = webpage,
                 ThumbnailUrl = resolved.ThumbnailUrl,
                 Duration = resolved.Duration,
                 PlayableUrl = cached?.PlayableUrl,
                 SourceBytes = resolved.SourceBytes ?? cached?.SourceBytes,
                 IsTooLarge = cached?.IsTooLarge == true
                     || resolved.IsTooLarge
-                    || (resolved.SourceBytes is long bytes && bytes > MezubeConstants.MaxAudioBytes),
+                    || (resolved.SourceBytes is long bytes && bytes > _options.MaxAudioBytes),
             };
 
             var trackId = await _store.UpsertMetadataAsync(entity, cancellationToken).ConfigureAwait(false);
-            return new TrackEntity
+            await _store.SetAliasAsync(
+                    urlAlias,
+                    TrackIdentityHelper.SourceSoundcloud,
+                    externalId,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            return new TrackInfoEntity
             {
-                Id = trackId,
-                Source = entity.Source,
-                ExternalId = entity.ExternalId,
+                TrackId = trackId,
                 Title = entity.Title,
-                WebpageUrl = entity.WebpageUrl,
+                MediaUrl = webpage,
+                WebpageUrl = webpage,
                 ThumbnailUrl = entity.ThumbnailUrl,
+                RequestedBy = requestedBy,
                 Duration = entity.Duration,
-                PlayableUrl = entity.PlayableUrl,
+                Source = TrackIdentityHelper.SourceSoundcloud,
+                ExternalId = externalId,
                 SourceBytes = entity.SourceBytes,
                 IsTooLarge = entity.IsTooLarge,
-            }.ToTrackInfo(requestedBy);
+            };
         }
         catch (Exception ex)
         {

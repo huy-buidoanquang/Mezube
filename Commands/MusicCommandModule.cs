@@ -7,11 +7,13 @@ namespace Mezube.Helpers;
 public sealed class MusicCommandModule
 {
     private readonly MusicPlayer _player;
+    private readonly PlaybackAccess _access;
     private readonly string _prefix;
 
-    public MusicCommandModule(MusicPlayer player, string prefix)
+    public MusicCommandModule(MusicPlayer player, PlaybackAccess access, string prefix)
     {
         _player = player;
+        _access = access;
         _prefix = prefix;
     }
 
@@ -41,14 +43,22 @@ public sealed class MusicCommandModule
         var query = ChannelTargetParser.BuildQuery(ctx.Args);
         if (string.IsNullOrWhiteSpace(query))
         {
-            return ctx.ReplyAsync(PlayerMessageBuilder.Error(
-                "Missing track",
-                $"Example: `{_prefix}play #voice | stream_channel never gonna give you up`"));
+            return ctx.ReplyAsync(PlayerMessageBuilder.PlayUsage(_prefix));
         }
 
         return _player.PlayAutoAsync(ctx, query, channelId, ctx.CancellationToken);
     }
 
-    private Task HandleHelpAsync(ICommandContext ctx)
-        => ctx.ReplyAsync(PlayerMessageBuilder.Help(_prefix));
+    private async Task HandleHelpAsync(ICommandContext ctx)
+    {
+        var clanId = ctx.Clan?.Id ?? ctx.Channel.ClanId;
+        var userId = ctx.Author.Id;
+        var isOwner = await _access.IsClanOwnerAsync(ctx.Client, clanId, userId, ctx.CancellationToken)
+            .ConfigureAwait(false);
+        var isDjOrOwner = isOwner
+            || await _access.IsDjOrOwnerAsync(ctx.Client, clanId, userId, ctx.CancellationToken)
+                .ConfigureAwait(false);
+
+        await ctx.ReplyAsync(PlayerMessageBuilder.Help(_prefix, isDjOrOwner, isOwner)).ConfigureAwait(false);
+    }
 }

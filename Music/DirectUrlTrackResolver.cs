@@ -32,7 +32,10 @@ public sealed class DirectUrlTrackResolver : ITrackResolver
         if (host.Contains("youtube.com", StringComparison.Ordinal)
             || host.Contains("youtu.be", StringComparison.Ordinal)
             || host.Contains("music.youtube.com", StringComparison.Ordinal)
-            || host.Contains("soundcloud.com", StringComparison.Ordinal))
+            || host.Contains("soundcloud.com", StringComparison.Ordinal)
+            || host.Contains("spotify.com", StringComparison.Ordinal)
+            || host.Equals("spotify.link", StringComparison.OrdinalIgnoreCase)
+            || host.EndsWith(".spotify.link", StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
