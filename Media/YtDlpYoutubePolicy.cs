@@ -55,7 +55,15 @@ public static class YtDlpYoutubePolicy
     {
         if (string.IsNullOrWhiteSpace(stderr))
         {
-            return true;
+            return false;
+        }
+
+        if (Contains(stderr, "This content isn't available")
+            || Contains(stderr, "Sign in to confirm")
+            || Contains(stderr, "Private video")
+            || Contains(stderr, "Video unavailable"))
+        {
+            return false;
         }
 
         return Contains(stderr, "HTTP Error 403")
@@ -63,12 +71,10 @@ public static class YtDlpYoutubePolicy
                || Contains(stderr, "Forbidden")
                || Contains(stderr, "unable to download video data")
                || Contains(stderr, "download returned no file")
-               || Contains(stderr, "This content isn't available")
                || Contains(stderr, "try again later")
                || Contains(stderr, "nsig")
                || Contains(stderr, "SABR")
-               || Contains(stderr, "Requested format is not available")
-               || Contains(stderr, "Sign in to confirm");
+               || Contains(stderr, "Requested format is not available");
     }
 
     private static bool Contains(string haystack, string needle)

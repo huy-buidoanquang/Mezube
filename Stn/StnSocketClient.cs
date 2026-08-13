@@ -226,7 +226,9 @@ public sealed class StnSocketClient : IAsyncDisposable
         var tcs = _trackEnded;
         if (tcs is null)
         {
-            return Task.Delay(Timeout.Infinite, cancellationToken);
+            return Task.FromCanceled(cancellationToken.CanBeCanceled
+                ? cancellationToken
+                : new CancellationToken(canceled: true));
         }
 
         return tcs.Task.WaitAsync(cancellationToken);
@@ -237,7 +239,9 @@ public sealed class StnSocketClient : IAsyncDisposable
         var tcs = _publisherEnded;
         if (tcs is null)
         {
-            return Task.Delay(Timeout.Infinite, cancellationToken);
+            return Task.FromCanceled(cancellationToken.CanBeCanceled
+                ? cancellationToken
+                : new CancellationToken(canceled: true));
         }
 
         return tcs.Task.WaitAsync(cancellationToken);

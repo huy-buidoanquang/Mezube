@@ -11,6 +11,10 @@ public sealed class BotOptions
     private const int DefaultAudioChannels = 2;
     private const int DefaultAudioSampleRate = 48000;
 
+    public MezonOptions Mezon { get; set; } = new();
+    public MediaOptions Media { get; set; } = new();
+    public PersistenceOptions Persistence { get; set; } = new();
+
     public long BotId { get; set; }
     public string Token { get; set; } = string.Empty;
     /// <summary>Gateway Basic-Auth server key (dev: defaultkey, prod: HTTP3m3zonPr0dkey).</summary>
@@ -103,6 +107,10 @@ public sealed class BotOptions
         var options = new BotOptions();
         configuration.GetSection("Mezon").Bind(options);
         configuration.GetSection("Mezube").Bind(options);
+        configuration.GetSection("Mezon").Bind(options.Mezon);
+        configuration.GetSection("Mezube").Bind(options.Media);
+        configuration.GetSection("Mezube").Bind(options.Persistence);
+        options.CopyToNested();
         options.MezonNetLogLevel = ParseMezonNetLogLevel(configuration);
 
         if (string.IsNullOrWhiteSpace(options.CommandPrefix))
@@ -116,6 +124,48 @@ public sealed class BotOptions
         }
 
         return options;
+    }
+
+    private void CopyToNested()
+    {
+        Mezon.BotId = BotId;
+        Mezon.Token = Token;
+        Mezon.ServerKey = ServerKey;
+        Mezon.Host = Host;
+        Mezon.Port = Port;
+        Mezon.UseSsl = UseSsl;
+
+        Media.YtDlpPath = YtDlpPath;
+        Media.YtDlpPlayerClients = YtDlpPlayerClients;
+        Media.YtDlpJsRuntime = YtDlpJsRuntime;
+        Media.YtDlpJsRuntimePath = YtDlpJsRuntimePath;
+        Media.YtDlpCookiesPath = YtDlpCookiesPath;
+        Media.YtDlpDownloadRetries = YtDlpDownloadRetries;
+        Media.YtDlpRetryDelayMs = YtDlpRetryDelayMs;
+        Media.FfmpegPath = FfmpegPath;
+        Media.TempDir = TempDir;
+        Media.CdnBaseUrl = CdnBaseUrl;
+        Media.MultipartUploadPartBytes = MultipartUploadPartBytes;
+        Media.PreparedAudioBitrateKbps = PreparedAudioBitrateKbps;
+        Media.PreparedAudioChannels = PreparedAudioChannels;
+        Media.PreparedAudioSampleRate = PreparedAudioSampleRate;
+        Media.WhipAudioBitrateKbps = WhipAudioBitrateKbps;
+        Media.WhipAudioChannels = WhipAudioChannels;
+        Media.WhipAudioSampleRate = WhipAudioSampleRate;
+        Media.WhipEncoderDisabled = WhipEncoderDisabled;
+        Media.WhipOpusApplication = WhipOpusApplication;
+        Media.WhipOpusVbr = WhipOpusVbr;
+        Media.WhipOpusComplexity = WhipOpusComplexity;
+        Media.WhipPacketLossPercent = WhipPacketLossPercent;
+        Media.WhipEnableInbandFec = WhipEnableInbandFec;
+        Media.WhipHandshakeTimeoutMs = WhipHandshakeTimeoutMs;
+        Media.StnWhipEnabled = StnWhipEnabled;
+        Media.StnBaseUrl = StnBaseUrl;
+        Media.StnPublisherPassword = StnPublisherPassword;
+
+        Persistence.PostgresConnectionString = PostgresConnectionString;
+        Persistence.RedisConnectionString = RedisConnectionString;
+        Persistence.TracksDbPath = TracksDbPath;
     }
 
     private static LogLevel ParseMezonNetLogLevel(IConfiguration configuration)

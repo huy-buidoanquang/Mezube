@@ -38,6 +38,8 @@ internal static class Program
         var options = BotOptions.FromConfiguration(builder.Configuration);
         CapConcurrencyDefaults(options);
         options.Validate();
+        builder.Services.AddMemoryCache();
+        builder.Services.AddSingleton<MediaConcurrencyGate>();
         builder.Services.AddSingleton(options);
         PlayerMessageBuilder.Configure(options);
         ConfigureLogging(builder.Logging, builder.Configuration, options);
@@ -69,7 +71,12 @@ internal static class Program
             throw new InvalidOperationException("Mezube:RedisConnectionString is required.");
         }
 
-        var redisMux = ConnectionMultiplexer.Connect(options.RedisConnectionString);
+        var redisMux = await ConnectionMultiplexer.ConnectAsync(
+                options.Persistence.RedisConnectionString)
+            .ConfigureAwait(false);
+        builder.Services.AddSingleton(options.Mezon);
+        builder.Services.AddSingleton(options.Media);
+        builder.Services.AddSingleton(options.Persistence);
         builder.Services.AddSingleton<IConnectionMultiplexer>(redisMux);
         builder.Services.AddSingleton<RedisConnection>(sp =>
             new RedisConnection(
@@ -110,6 +117,7 @@ internal static class Program
                 sp.GetRequiredService<YoutubeTrackResolver>(),
                 sp.GetRequiredService<DirectUrlTrackResolver>(),
             ]));
+        builder.Services.AddSingleton<PlayEnqueueService>();
         builder.Services.AddSingleton<BindStore>();
         builder.Services.AddSingleton<StreamingChannelSink>();
         builder.Services.AddSingleton<VoiceChannelSink>();

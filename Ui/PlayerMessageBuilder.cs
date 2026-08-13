@@ -20,6 +20,7 @@ public static class PlayerMessageBuilder
     private const string ColorError = "#dc2626";
 
     private static BotOptions _options = new();
+    private static (string Key, MessageEmbedField Field)? _vizFieldCache;
     private static readonly Lazy<JsonElement> EqualizerPoolInputs = new(BuildEqualizerPoolInputs, LazyThreadSafetyMode.ExecutionAndPublication);
     private static readonly ThreadLocal<ArrayBufferWriter<byte>> EmbedBuffer =
         new(() => new ArrayBufferWriter<byte>(1024));
@@ -983,6 +984,12 @@ public static class PlayerMessageBuilder
         }
 
         // Clone cached pool + inject current CDN URLs (URLs may be filled after viz warm-up).
+        var cacheKey = imageUrl + "\n" + positionUrl;
+        if (_vizFieldCache is { } cached && cached.Key == cacheKey)
+        {
+            return cached.Field;
+        }
+
         using var stream = new MemoryStream();
         using (var writer = new Utf8JsonWriter(stream))
         {
@@ -1000,7 +1007,9 @@ public static class PlayerMessageBuilder
         }
 
         using var doc = JsonDocument.Parse(stream.ToArray());
-        return new MessageEmbedField(string.Empty, string.Empty, inline: false, inputs: doc.RootElement.Clone());
+        var field = new MessageEmbedField(string.Empty, string.Empty, inline: false, inputs: doc.RootElement.Clone());
+        _vizFieldCache = (cacheKey, field);
+        return field;
     }
 
     /// <summary>Cached equalizer pool frames (UTF-8 JSON array) — built once.</summary>

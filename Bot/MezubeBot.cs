@@ -5,6 +5,7 @@ using Mezon.Net.Sdk.Caching;
 using Mezon.Net.Sdk.Commands;
 using Mezon.Net.Sdk.Interactions;
 using Mezube.Application;
+using Mezube.Commands;
 using Mezube.Helpers;
 using Mezube.Infrastructure.Caching;
 using Mezube.Infrastructure.Caching.Snapshots;
@@ -37,6 +38,7 @@ public sealed class MezubeBot : BackgroundService
     private readonly ConcurrentDictionary<(long ClanId, long MessageId), byte> _controlOneShot = new();
     private readonly ConcurrentDictionary<long, byte> _ownerHydrateInFlight = new();
     private MezonClient? _client;
+    private readonly IHostApplicationLifetime _lifetime;
     private long _lastRateLimitNotifyMs;
 
     public MezubeBot(
@@ -51,6 +53,7 @@ public sealed class MezubeBot : BackgroundService
         IEntitySnapshotStore snapshots,
         MezonSnapshotKeyFactory snapshotKeys,
         PlaybackAccess access,
+        IHostApplicationLifetime lifetime,
         ILogger<MezubeBot> logger,
         ILoggerFactory loggerFactory)
     {
@@ -65,6 +68,7 @@ public sealed class MezubeBot : BackgroundService
         _snapshots = snapshots;
         _snapshotKeys = snapshotKeys;
         _access = access;
+        _lifetime = lifetime;
         _logger = logger;
         _mezonLogger = loggerFactory.CreateLogger("Mezon");
     }
@@ -408,12 +412,14 @@ public sealed class MezubeBot : BackgroundService
             if (!await client.LoginAsync(stoppingToken).ConfigureAwait(false))
             {
                 _logger.LogError("Login failed for bot {BotId}.", _options.BotId);
+                _lifetime.StopApplication();
                 return;
             }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Login/initialize failed for bot {BotId}.", _options.BotId);
+            _lifetime.StopApplication();
             return;
         }
 
@@ -730,7 +736,7 @@ public sealed class MezubeBot : BackgroundService
         {
             try
             {
-                await Task.Delay(TimeSpan.FromMinutes(10)).ConfigureAwait(false);
+                await Task.Delay(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
             }
             catch
             {

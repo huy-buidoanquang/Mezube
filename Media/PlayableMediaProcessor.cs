@@ -3,6 +3,7 @@ using Mezube.Application;
 using Mezube.Bot;
 using Mezube.Domain.Entities;
 using Mezube.Helpers;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics;
 
@@ -14,10 +15,13 @@ namespace Mezube.Media;
 /// </summary>
 public sealed class PlayableMediaProcessor
 {
+    private static readonly TimeSpan PlayableCacheTtl = TimeSpan.FromMinutes(15);
+
     private readonly BotOptions _options;
     private readonly PipelineProcessor _pipeline;
     private readonly MezonCdnUploader _uploader;
     private readonly ITrackLibraryService _store;
+    private readonly IMemoryCache _cache;
     private readonly ILogger<PlayableMediaProcessor> _logger;
 
     public PlayableMediaProcessor(
@@ -25,12 +29,14 @@ public sealed class PlayableMediaProcessor
         PipelineProcessor pipeline,
         MezonCdnUploader uploader,
         ITrackLibraryService store,
+        IMemoryCache cache,
         ILogger<PlayableMediaProcessor> logger)
     {
         _options = options;
         _pipeline = pipeline;
         _uploader = uploader;
         _store = store;
+        _cache = cache;
         _logger = logger;
     }
 
@@ -67,8 +73,20 @@ public sealed class PlayableMediaProcessor
 
             if (stored is not null && PlayableUrlHelper.IsPreparedPlayableUrl(stored.PlayableUrl))
             {
+                var cacheKey = PlayableCacheKey(id.Source, id.ExternalId);
+                if (_cache.TryGetValue(cacheKey, out string? fresh) && !string.IsNullOrWhiteSpace(fresh))
+                {
+                    await _store.TouchPlayedAsync(id.Source, id.ExternalId, cancellationToken)
+                        .ConfigureAwait(false);
+                    var cachedHit = stored.ToTrackInfo(track.RequestedBy);
+                    return track.RequestedByUserId is long uid
+                        ? cachedHit.WithRequester(uid, track.RequestedBy)
+                        : cachedHit;
+                }
+
                 if (await _uploader.IsReachableAsync(stored.PlayableUrl!, cancellationToken).ConfigureAwait(false))
                 {
+                    _cache.Set(cacheKey, stored.PlayableUrl!, PlayableCacheTtl);
                     _logger.LogDebug(
                         "Using cached CDN media for {Source}/{Id}: {Url} elapsedMs={ElapsedMs}",
                         id.Source,
@@ -154,9 +172,9 @@ public sealed class PlayableMediaProcessor
                 .ConfigureAwait(false);
             throw;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            throw new InvalidOperationException(
+            throw new MediaPrepException(
                 $"CDN upload failed for '{track.Title}'; cannot play without a public .ogg URL.",
                 ex);
         }
@@ -187,6 +205,7 @@ public sealed class PlayableMediaProcessor
                 .ConfigureAwait(false);
             await _store.TouchPlayedAsync(saveId.Source, saveId.ExternalId, cancellationToken)
                 .ConfigureAwait(false);
+            _cache.Set(PlayableCacheKey(saveId.Source, saveId.ExternalId), prepared.CdnUrl, PlayableCacheTtl);
         }
 
         return new TrackInfoEntity
@@ -287,4 +306,7 @@ public sealed class PlayableMediaProcessor
 
         return !(path.EndsWith(".ogg") || path.EndsWith(".opus"));
     }
+
+    private static string PlayableCacheKey(string source, string externalId)
+        => $"playable:{source}:{externalId}";
 }

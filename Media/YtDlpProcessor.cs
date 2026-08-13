@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Mezube.Bot;
@@ -12,11 +11,16 @@ public sealed class YtDlpProcessor
 {
     private readonly BotOptions _options;
     private readonly ILogger<YtDlpProcessor> _logger;
+    private readonly MediaConcurrencyGate? _gate;
 
-    public YtDlpProcessor(BotOptions options, ILogger<YtDlpProcessor> logger)
+    public YtDlpProcessor(
+        BotOptions options,
+        ILogger<YtDlpProcessor> logger,
+        MediaConcurrencyGate? gate = null)
     {
         _options = options;
         _logger = logger;
+        _gate = gate;
     }
 
     public async Task<TrackInfoEntity?> ResolveTrackAsync(string query, string? requestedBy, CancellationToken cancellationToken = default)
@@ -27,7 +31,7 @@ public sealed class YtDlpProcessor
                 "--no-playlist",
                 "--no-warnings",
                 "-J",
-                "-f", "bestaudio/best",
+                "--flat-playlist",
                 input,
             ],
             cancellationToken).ConfigureAwait(false);
@@ -65,7 +69,7 @@ public sealed class YtDlpProcessor
                 "--no-playlist",
                 "--no-warnings",
                 "-J",
-                "-f", "bestaudio/best",
+                "--flat-playlist",
                 input,
             ],
             cancellationToken).ConfigureAwait(false);
@@ -121,7 +125,7 @@ public sealed class YtDlpProcessor
                 end.ToString(),
                 "--no-warnings",
                 "-J",
-                "-f", "bestaudio/best",
+                "--flat-playlist",
                 playlistUrl,
             ],
             cancellationToken).ConfigureAwait(false);
@@ -347,7 +351,7 @@ public sealed class YtDlpProcessor
                     wait,
                     source);
                 await Task.Delay(wait, cancellationToken).ConfigureAwait(false);
-                DeletePrefixedOutputs(dir, prefix);
+                DownloadedMediaFiles.DeletePrefixed(dir, prefix);
             }
 
             var playerClients = youtube
@@ -359,16 +363,27 @@ public sealed class YtDlpProcessor
                 "--no-warnings",
                 "--retries",
                 "2",
+                "--socket-timeout",
+                "20",
+                "--max-filesize",
+                _options.MaxAudioBytes.ToString(),
                 "-f",
-                "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
+                "bestaudio[acodec=opus]/bestaudio/best",
                 "-o",
                 template,
                 source,
             };
+            if (!string.IsNullOrWhiteSpace(_options.FfmpegPath))
+            {
+                downloadArgs.Insert(0, _options.FfmpegPath);
+                downloadArgs.Insert(0, "--ffmpeg-location");
+            }
 
-            var result = await RunDetailedAsync(downloadArgs, playerClients, cancellationToken)
+            var result = await RunDetailedAsync(downloadArgs, playerClients, occupyGate: false, cancellationToken)
                 .ConfigureAwait(false);
-            var match = FindPrefixedOutput(dir, prefix);
+            var match = result.ExitCode == 0
+                ? DownloadedMediaFiles.FindCompleted(dir, prefix)
+                : null;
             if (match is not null)
             {
                 if (attempt > 0)
@@ -403,36 +418,9 @@ public sealed class YtDlpProcessor
         return null;
     }
 
-    private static string? FindPrefixedOutput(string dir, string prefix)
-        => Directory.Exists(dir)
-            ? Directory.EnumerateFiles(dir, prefix + ".*")
-                .OrderByDescending(File.GetLastWriteTimeUtc)
-                .FirstOrDefault()
-            : null;
-
-    private static void DeletePrefixedOutputs(string dir, string prefix)
-    {
-        if (!Directory.Exists(dir))
-        {
-            return;
-        }
-
-        foreach (var file in Directory.EnumerateFiles(dir, prefix + ".*"))
-        {
-            try
-            {
-                File.Delete(file);
-            }
-            catch
-            {
-                // leftover temp; next attempt still writes a new name via template
-            }
-        }
-    }
-
     private async Task<string?> RunAsync(IReadOnlyList<string> args, CancellationToken cancellationToken)
     {
-        var result = await RunDetailedAsync(args, playerClients: null, cancellationToken).ConfigureAwait(false);
+        var result = await RunDetailedAsync(args, playerClients: null, occupyGate: true, cancellationToken).ConfigureAwait(false);
         return result.ExitCode == 0 ? result.Stdout : null;
     }
 
@@ -441,81 +429,73 @@ public sealed class YtDlpProcessor
     private async Task<YtDlpRun> RunDetailedAsync(
         IReadOnlyList<string> args,
         string? playerClients,
+        bool occupyGate,
         CancellationToken cancellationToken)
     {
         var fullArgs = PrependCommonArgs(args, playerClients);
         var attempts = BuildLaunchAttempts();
         Exception? lastStartError = null;
+        var timeout = args.Any(a => a is "-o" or "--output")
+            ? ChildProcessRunner.DefaultDownloadTimeout
+            : ChildProcessRunner.DefaultMetadataTimeout;
 
-        foreach (var (fileName, prefixArgs) in attempts)
+        if (occupyGate && _gate is not null)
         {
-            var psi = new ProcessStartInfo
-            {
-                FileName = fileName,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
+            await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
 
-            foreach (var arg in prefixArgs)
+        try
+        {
+            foreach (var (fileName, prefixArgs) in attempts)
             {
-                psi.ArgumentList.Add(arg);
-            }
-
-            foreach (var arg in fullArgs)
-            {
-                psi.ArgumentList.Add(arg);
-            }
-
-            using var process = new Process { StartInfo = psi };
-            var stdout = new StringBuilder();
-            var stderr = new StringBuilder();
-
-            process.OutputDataReceived += (_, e) =>
-            {
-                if (e.Data is not null)
+                var psi = new ProcessStartInfo
                 {
-                    stdout.AppendLine(e.Data);
+                    FileName = fileName,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+
+                foreach (var arg in prefixArgs)
+                {
+                    psi.ArgumentList.Add(arg);
                 }
-            };
-            process.ErrorDataReceived += (_, e) =>
-            {
-                if (e.Data is not null)
-                {
-                    stderr.AppendLine(e.Data);
-                }
-            };
 
-            try
-            {
-                if (!process.Start())
+                foreach (var arg in fullArgs)
                 {
-                    _logger.LogWarning("Failed to start media extractor via {File}", fileName);
+                    psi.ArgumentList.Add(arg);
+                }
+
+                ChildProcessResult result;
+                try
+                {
+                    result = await ChildProcessRunner.RunAsync(psi, timeout, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException and not TimeoutException)
+                {
+                    lastStartError = ex;
+                    _logger.LogDebug(ex, "Unable to launch media extractor via {File}", fileName);
                     continue;
                 }
+
+                if (result.ExitCode != 0)
+                {
+                    _logger.LogWarning(
+                        "yt-dlp exited with code {Code} via {File}. stderr={Stderr}",
+                        result.ExitCode,
+                        fileName,
+                        result.Stderr.Trim());
+                }
+
+                return new YtDlpRun(result.ExitCode, result.Stdout.Trim(), result.Stderr);
             }
-            catch (Exception ex)
+        }
+        finally
+        {
+            if (occupyGate)
             {
-                lastStartError = ex;
-                _logger.LogDebug(ex, "Unable to launch media extractor via {File}", fileName);
-                continue;
+                _gate?.Release();
             }
-
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
-
-            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-            if (process.ExitCode != 0)
-            {
-                _logger.LogWarning(
-                    "yt-dlp exited with code {Code} via {File}. stderr={Stderr}",
-                    process.ExitCode,
-                    fileName,
-                    stderr.ToString().Trim());
-            }
-
-            return new YtDlpRun(process.ExitCode, stdout.ToString().Trim(), stderr.ToString());
         }
 
         _logger.LogError(
@@ -636,15 +616,7 @@ public sealed class YtDlpProcessor
 
             if (!process.WaitForExit(3000))
             {
-                try
-                {
-                    process.Kill(entireProcessTree: true);
-                }
-                catch
-                {
-                    // ignore
-                }
-
+                ChildProcessRunner.TryKill(process);
                 return false;
             }
 

@@ -39,13 +39,13 @@ public sealed class FfmpegProcessor
         var psi = new ProcessStartInfo
         {
             FileName = _options.FfmpegPath,
-            RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true,
         };
         // STN streaming expects Ogg Opus 48 kHz stereo (see mezon-media-station README).
         psi.ArgumentList.Add("-y");
         psi.ArgumentList.Add("-hide_banner");
+        psi.ArgumentList.Add("-nostdin");
         psi.ArgumentList.Add("-i");
         psi.ArgumentList.Add(inputPath);
         psi.ArgumentList.Add("-vn");
@@ -69,10 +69,15 @@ public sealed class FfmpegProcessor
             outputSettings.SampleRate,
             outputSettings.Channels);
 
-        Process? process;
+        var convertStopwatch = Stopwatch.StartNew();
+        ChildProcessResult result;
         try
         {
-            process = Process.Start(psi);
+            result = await ChildProcessRunner.RunAsync(
+                    psi,
+                    ChildProcessRunner.DefaultTranscodeTimeout,
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
         catch (Win32Exception ex)
         {
@@ -80,35 +85,60 @@ public sealed class FfmpegProcessor
             return null;
         }
 
-        if (process is null)
+        if (result.ExitCode != 0 || !File.Exists(outputPath))
         {
-            _logger.LogError("Failed to start ffmpeg at {Path}", _options.FfmpegPath);
+            _logger.LogWarning("ffmpeg convert failed: {Stderr}", result.Stderr);
             return null;
         }
 
-        using (process)
-        {
-            var convertStopwatch = Stopwatch.StartNew();
-            var stderr = await process.StandardError.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
-            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-            if (process.ExitCode != 0 || !File.Exists(outputPath))
-            {
-                _logger.LogWarning("ffmpeg convert failed: {Stderr}", stderr);
-                return null;
-            }
-
-            var outputInfo = new FileInfo(outputPath);
-            _logger.LogDebug(
-                "Prepared audio master ready path={Path} bytes={Bytes} bitrateKbps={BitrateKbps} sampleRate={SampleRate} channels={Channels} elapsedMs={ElapsedMs}",
-                outputPath,
-                outputInfo.Length,
-                outputSettings.BitrateKbps,
-                outputSettings.SampleRate,
-                outputSettings.Channels,
-                convertStopwatch.ElapsedMilliseconds);
-        }
+        var outputInfo = new FileInfo(outputPath);
+        _logger.LogDebug(
+            "Prepared audio master ready path={Path} bytes={Bytes} bitrateKbps={BitrateKbps} sampleRate={SampleRate} channels={Channels} elapsedMs={ElapsedMs}",
+            outputPath,
+            outputInfo.Length,
+            outputSettings.BitrateKbps,
+            outputSettings.SampleRate,
+            outputSettings.Channels,
+            convertStopwatch.ElapsedMilliseconds);
 
         return outputPath;
+    }
+
+    public async Task<string?> RemuxOpusToOggAsync(string inputPath, CancellationToken cancellationToken = default)
+    {
+        if (!IsAvailable)
+        {
+            return null;
+        }
+
+        Directory.CreateDirectory(_options.TempDir);
+        var outputPath = Path.Combine(
+            _options.TempDir,
+            Path.GetFileNameWithoutExtension(inputPath) + ".ogg");
+        var psi = new ProcessStartInfo
+        {
+            FileName = _options.FfmpegPath,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        psi.ArgumentList.Add("-y");
+        psi.ArgumentList.Add("-hide_banner");
+        psi.ArgumentList.Add("-nostdin");
+        psi.ArgumentList.Add("-i");
+        psi.ArgumentList.Add(inputPath);
+        psi.ArgumentList.Add("-vn");
+        psi.ArgumentList.Add("-c:a");
+        psi.ArgumentList.Add("copy");
+        psi.ArgumentList.Add("-f");
+        psi.ArgumentList.Add("ogg");
+        psi.ArgumentList.Add(outputPath);
+
+        var result = await ChildProcessRunner.RunAsync(
+                psi,
+                ChildProcessRunner.DefaultTranscodeTimeout,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return result.ExitCode == 0 && File.Exists(outputPath) ? outputPath : null;
     }
 
     private bool ProbeAvailable()
@@ -130,7 +160,12 @@ public sealed class FfmpegProcessor
                 return false;
             }
 
-            process.WaitForExit(3000);
+            if (!process.WaitForExit(3000))
+            {
+                ChildProcessRunner.TryKill(process);
+                return false;
+            }
+
             return process.ExitCode == 0;
         }
         catch (Win32Exception)

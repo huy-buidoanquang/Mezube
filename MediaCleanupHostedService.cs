@@ -1,4 +1,5 @@
 using Mezube.Media;
+using Mezube.Music;
 using Mezube.Playback;
 using Mezube.Stn;
 using Microsoft.Extensions.DependencyInjection;
@@ -24,6 +25,16 @@ public sealed class MediaCleanupHostedService : IHostedService
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
+        try
+        {
+            _logger.LogDebug("Cancelling playback pumps during host shutdown");
+            _services.GetRequiredService<MusicPlayer>().CancelAllSessions();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Cancel playback sessions during shutdown ignored");
+        }
+
         try
         {
             _logger.LogDebug("Stopping all voice rooms during host shutdown");

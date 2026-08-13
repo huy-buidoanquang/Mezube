@@ -38,7 +38,6 @@ public sealed partial class MusicPlayer
                 play.ReplyCreateTimeSeconds,
                 play.IsFromDefault);
             await _playerStore.EnqueueAsync(clanId, payload).ConfigureAwait(false);
-            await _playerStore.TouchTtlAsync(clanId).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

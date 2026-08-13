@@ -30,9 +30,11 @@ public sealed class YtDlpYoutubePolicyTests
     [Theory]
     [InlineData("ERROR: unable to download video data: HTTP Error 403: Forbidden", true)]
     [InlineData("HTTP Error 429: Too Many Requests", true)]
-    [InlineData("This content isn't available, try again later", true)]
+    [InlineData("This content isn't available, try again later", false)]
     [InlineData("ERROR: Private video", false)]
-    [InlineData(null, true)]
+    [InlineData("Sign in to confirm your age", false)]
+    [InlineData(null, false)]
+    [InlineData("", false)]
     public void IsTransientDownloadFailure(string? stderr, bool expected)
         => Assert.Equal(expected, YtDlpYoutubePolicy.IsTransientDownloadFailure(stderr));
 }
