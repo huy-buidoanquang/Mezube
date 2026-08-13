@@ -329,33 +329,121 @@ public sealed class YtDlpProcessor
     {
         Directory.CreateDirectory(Path.GetDirectoryName(outputPathWithoutExt) ?? _options.TempDir);
         var template = outputPathWithoutExt + ".%(ext)s";
-        // Avoid -x/--audio-format (requires ffmpeg). Prefer progressive audio containers.
-        var output = await RunAsync(
-            [
-                "--no-playlist",
-                "--no-warnings",
-                "-f", "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
-                "-o", template,
-                source,
-            ],
-            cancellationToken).ConfigureAwait(false);
-
-        // yt-dlp writes beside the template; find newest matching file.
         var dir = Path.GetDirectoryName(outputPathWithoutExt)!;
         var prefix = Path.GetFileName(outputPathWithoutExt);
-        var match = Directory.EnumerateFiles(dir, prefix + ".*")
-            .OrderByDescending(File.GetLastWriteTimeUtc)
-            .FirstOrDefault();
-        if (match is null)
+        var youtube = YtDlpYoutubePolicy.IsYoutubeSource(source);
+        var attempts = Math.Max(1, _options.YtDlpDownloadRetries);
+        var delayMs = Math.Max(0, _options.YtDlpRetryDelayMs);
+
+        for (var attempt = 0; attempt < attempts; attempt++)
         {
-            _logger.LogWarning("yt-dlp download produced no file for {Source}. stdout={Stdout}", source, output);
+            if (attempt > 0)
+            {
+                var wait = delayMs * attempt;
+                _logger.LogInformation(
+                    "Retrying yt-dlp download attempt {Attempt}/{Attempts} in {DelayMs}ms source={Source}",
+                    attempt + 1,
+                    attempts,
+                    wait,
+                    source);
+                await Task.Delay(wait, cancellationToken).ConfigureAwait(false);
+                DeletePrefixedOutputs(dir, prefix);
+            }
+
+            var playerClients = youtube
+                ? YtDlpYoutubePolicy.PlayerClientsForAttempt(attempt, _options.YtDlpPlayerClients)
+                : null;
+            var downloadArgs = new List<string>
+            {
+                "--no-playlist",
+                "--no-warnings",
+                "--retries",
+                "2",
+                "-f",
+                "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
+                "-o",
+                template,
+                source,
+            };
+
+            var result = await RunDetailedAsync(downloadArgs, playerClients, cancellationToken)
+                .ConfigureAwait(false);
+            var match = FindPrefixedOutput(dir, prefix);
+            if (match is not null)
+            {
+                if (attempt > 0)
+                {
+                    _logger.LogInformation(
+                        "yt-dlp download recovered on attempt {Attempt} clients={Clients} source={Source}",
+                        attempt + 1,
+                        playerClients ?? "(default)",
+                        source);
+                }
+
+                return match;
+            }
+
+            var stderr = result.Stderr;
+            var transient = YtDlpYoutubePolicy.IsTransientDownloadFailure(stderr);
+            _logger.LogWarning(
+                "yt-dlp download produced no file for {Source} attempt={Attempt}/{Attempts} clients={Clients} transient={Transient} stderr={Stderr}",
+                source,
+                attempt + 1,
+                attempts,
+                playerClients ?? "(none)",
+                transient,
+                string.IsNullOrWhiteSpace(stderr) ? "(null)" : stderr.Trim());
+
+            if (!transient)
+            {
+                break;
+            }
         }
 
-        return match;
+        return null;
+    }
+
+    private static string? FindPrefixedOutput(string dir, string prefix)
+        => Directory.Exists(dir)
+            ? Directory.EnumerateFiles(dir, prefix + ".*")
+                .OrderByDescending(File.GetLastWriteTimeUtc)
+                .FirstOrDefault()
+            : null;
+
+    private static void DeletePrefixedOutputs(string dir, string prefix)
+    {
+        if (!Directory.Exists(dir))
+        {
+            return;
+        }
+
+        foreach (var file in Directory.EnumerateFiles(dir, prefix + ".*"))
+        {
+            try
+            {
+                File.Delete(file);
+            }
+            catch
+            {
+                // leftover temp; next attempt still writes a new name via template
+            }
+        }
     }
 
     private async Task<string?> RunAsync(IReadOnlyList<string> args, CancellationToken cancellationToken)
     {
+        var result = await RunDetailedAsync(args, playerClients: null, cancellationToken).ConfigureAwait(false);
+        return result.ExitCode == 0 ? result.Stdout : null;
+    }
+
+    private readonly record struct YtDlpRun(int ExitCode, string Stdout, string Stderr);
+
+    private async Task<YtDlpRun> RunDetailedAsync(
+        IReadOnlyList<string> args,
+        string? playerClients,
+        CancellationToken cancellationToken)
+    {
+        var fullArgs = PrependCommonArgs(args, playerClients);
         var attempts = BuildLaunchAttempts();
         Exception? lastStartError = null;
 
@@ -375,7 +463,7 @@ public sealed class YtDlpProcessor
                 psi.ArgumentList.Add(arg);
             }
 
-            foreach (var arg in args)
+            foreach (var arg in fullArgs)
             {
                 psi.ArgumentList.Add(arg);
             }
@@ -425,16 +513,147 @@ public sealed class YtDlpProcessor
                     process.ExitCode,
                     fileName,
                     stderr.ToString().Trim());
-                return null;
             }
 
-            return stdout.ToString().Trim();
+            return new YtDlpRun(process.ExitCode, stdout.ToString().Trim(), stderr.ToString());
         }
 
         _logger.LogError(
             lastStartError,
             "Unable to launch yt-dlp. Install with: pip install -U yt-dlp (or set MEZUBE_YTDLP_PATH).");
+        return new YtDlpRun(-1, string.Empty, lastStartError?.Message ?? "yt-dlp not launched");
+    }
+
+    private List<string> PrependCommonArgs(IReadOnlyList<string> userArgs, string? playerClients)
+    {
+        var args = new List<string>();
+        var js = ResolveJsRuntimeSpec();
+        if (!string.IsNullOrWhiteSpace(js))
+        {
+            args.Add("--js-runtimes");
+            args.Add(js);
+        }
+
+        var cookies = _options.YtDlpCookiesPath?.Trim();
+        if (!string.IsNullOrWhiteSpace(cookies) && File.Exists(cookies))
+        {
+            args.Add("--cookies");
+            args.Add(cookies);
+        }
+        else if (!string.IsNullOrWhiteSpace(cookies))
+        {
+            _logger.LogDebug("YtDlpCookiesPath set but file missing: {Path}", cookies);
+        }
+
+        var clients = string.IsNullOrWhiteSpace(playerClients)
+            ? _options.YtDlpPlayerClients
+            : playerClients;
+        if (!string.IsNullOrWhiteSpace(clients))
+        {
+            args.Add("--extractor-args");
+            args.Add($"youtube:player_client={clients.Trim()}");
+        }
+
+        args.AddRange(userArgs);
+        return args;
+    }
+
+    private string? _jsRuntimeSpec;
+    private bool _jsRuntimeProbed;
+
+    private string? ResolveJsRuntimeSpec()
+    {
+        if (_jsRuntimeProbed)
+        {
+            return _jsRuntimeSpec;
+        }
+
+        _jsRuntimeProbed = true;
+        var configured = _options.YtDlpJsRuntime?.Trim();
+        if (string.Equals(configured, "none", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(configured, "off", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var path = _options.YtDlpJsRuntimePath?.Trim();
+        var names = new List<string>();
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            names.Add(configured);
+        }
+
+        foreach (var fallback in new[] { "deno", "node", "bun" })
+        {
+            if (!names.Exists(n => string.Equals(n, fallback, StringComparison.OrdinalIgnoreCase)))
+            {
+                names.Add(fallback);
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(path))
+        {
+            var name = names[0];
+            _jsRuntimeSpec = $"{name}:{path}";
+            _logger.LogInformation("yt-dlp JS runtime configured spec={Spec}", _jsRuntimeSpec);
+            return _jsRuntimeSpec;
+        }
+
+        foreach (var name in names)
+        {
+            if (TryProbeCommand(name, "--version"))
+            {
+                _jsRuntimeSpec = name;
+                _logger.LogInformation("yt-dlp JS runtime detected spec={Spec}", name);
+                return _jsRuntimeSpec;
+            }
+        }
+
+        _logger.LogWarning(
+            "No JS runtime found for yt-dlp n-sig (tried {Runtimes}). Install deno or node, or set Mezube:YtDlpJsRuntimePath.",
+            string.Join(", ", names));
         return null;
+    }
+
+    private static bool TryProbeCommand(string fileName, string arguments)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = fileName,
+                Arguments = arguments,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            using var process = Process.Start(psi);
+            if (process is null)
+            {
+                return false;
+            }
+
+            if (!process.WaitForExit(3000))
+            {
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch
+                {
+                    // ignore
+                }
+
+                return false;
+            }
+
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private List<(string FileName, string[] PrefixArgs)> BuildLaunchAttempts()

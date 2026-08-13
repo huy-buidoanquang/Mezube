@@ -42,6 +42,23 @@ public sealed class BotOptions
     /// </summary>
     public string StnPublisherPassword { get; set; } = string.Empty;
     public string YtDlpPath { get; set; } = "yt-dlp";
+    /// <summary>
+    /// YouTube Innertube clients for yt-dlp (<c>--extractor-args youtube:player_client=…</c>).
+    /// Download retries rotate through <see cref="Media.YtDlpYoutubePolicy.FallbackPlayerClients"/>.
+    /// </summary>
+    public string YtDlpPlayerClients { get; set; } = "android,web,mweb";
+    /// <summary>
+    /// JS runtime name for n-sig (<c>deno</c>, <c>node</c>, <c>bun</c>, <c>quickjs</c>). Empty = auto (deno, then node).
+    /// </summary>
+    public string YtDlpJsRuntime { get; set; } = "deno";
+    /// <summary>Optional absolute path to the JS runtime binary (appended as <c>runtime:path</c>).</summary>
+    public string YtDlpJsRuntimePath { get; set; } = string.Empty;
+    /// <summary>Optional Netscape cookies file for yt-dlp (<c>--cookies</c>). Ignored when missing.</summary>
+    public string YtDlpCookiesPath { get; set; } = string.Empty;
+    /// <summary>Download attempts including the first (YouTube 403 / empty output).</summary>
+    public int YtDlpDownloadRetries { get; set; } = 3;
+    /// <summary>Base delay before retry 2; attempt 3 waits 2× this.</summary>
+    public int YtDlpRetryDelayMs { get; set; } = 5000;
     public string FfmpegPath { get; set; } = "ffmpeg";
     public string TempDir { get; set; } = "temp";
     /// <summary>Legacy SQLite path (migration script only). Runtime uses Postgres.</summary>
@@ -213,6 +230,21 @@ public sealed class BotOptions
         if (InterTrackDelayMs < 0)
         {
             throw new InvalidOperationException("Mezube:InterTrackDelayMs must be >= 0.");
+        }
+
+        if (YtDlpDownloadRetries < 1)
+        {
+            throw new InvalidOperationException("Mezube:YtDlpDownloadRetries must be >= 1.");
+        }
+
+        if (YtDlpRetryDelayMs < 0)
+        {
+            throw new InvalidOperationException("Mezube:YtDlpRetryDelayMs must be >= 0.");
+        }
+
+        if (string.IsNullOrWhiteSpace(YtDlpPlayerClients))
+        {
+            YtDlpPlayerClients = "android,web,mweb";
         }
     }
 

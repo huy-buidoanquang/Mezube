@@ -72,12 +72,13 @@ WORKDIR /app
 # Runtime .so for the external codecs linked into the static ffmpeg binary.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        python3 python3-pip ca-certificates \
+        python3 python3-pip ca-certificates curl unzip \
         libssl3t64 libnuma1 \
         libopus0 libmp3lame0 libvorbis0a libvorbisenc2 \
         libx264-164 libx265-199 libvpx9 libaom3 libdav1d7 \
         libsvtav1enc1d1 \
     && pip3 install --break-system-packages --no-cache-dir yt-dlp \
+    && curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ffmpeg-build /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
@@ -85,6 +86,8 @@ COPY --from=build /app/publish .
 
 ENV DOTNET_ENVIRONMENT=prod \
     Mezube__YtDlpPath=yt-dlp \
+    Mezube__YtDlpJsRuntime=deno \
+    Mezube__YtDlpJsRuntimePath=/usr/local/bin/deno \
     Mezube__FfmpegPath=/usr/local/bin/ffmpeg \
     Mezube__TempDir=/app/temp \
     Mezube__PostgresConnectionString=Host=postgres;Port=5432;Database=mezube;Username=mezube;Password=mezube \
@@ -92,7 +95,8 @@ ENV DOTNET_ENVIRONMENT=prod \
 
 RUN mkdir -p /app/temp \
     && /usr/local/bin/ffmpeg -hide_banner -version \
-    && /usr/local/bin/ffmpeg -hide_banner -muxers 2>/dev/null | grep -E '^\s*E\s+whip\b'
+    && /usr/local/bin/ffmpeg -hide_banner -muxers 2>/dev/null | grep -E '^\s*E\s+whip\b' \
+    && /usr/local/bin/deno --version
 
 VOLUME ["/app/temp"]
 ENTRYPOINT ["dotnet", "Mezube.dll"]
