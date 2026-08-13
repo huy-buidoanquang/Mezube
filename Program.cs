@@ -94,6 +94,7 @@ internal static class Program
         builder.Services.AddSingleton<IClanPlayerStore, RedisClanPlayerStore>();
         builder.Services.AddSingleton<IVoiceBindStore, RedisVoiceBindStore>();
         builder.Services.AddSingleton<IVoteSkipStore, RedisVoteSkipStore>();
+        builder.Services.AddSingleton<IInteractiveSessionStore, RedisInteractiveSessionStore>();
 
         builder.Services.AddSingleton<PlayableMediaProcessor>();
         builder.Services.AddSingleton<TrackPrepService>();
@@ -101,6 +102,7 @@ internal static class Program
         builder.Services.AddSingleton<DirectUrlTrackResolver>();
         builder.Services.AddSingleton<SoundCloudTrackResolver>();
         builder.Services.AddSingleton<SoundCloudSetImporter>();
+        builder.Services.AddSingleton<ExternalPlaylistImporter>();
         builder.Services.AddSingleton<ITrackResolver>(sp =>
             new CompositeTrackResolver(
             [

@@ -1,7 +1,9 @@
+using Mezon.Net.Client;
 using Mezon.Net.Sdk.Commands;
 using Mezube.Domain.Entities;
 using Mezube.Helpers;
 using Mezube.Infrastructure.Persistence.Redis;
+using Mezube.Music.Interactive;
 using Mezube.Ui;
 using Microsoft.Extensions.Logging;
 
@@ -44,7 +46,7 @@ public sealed partial class MusicPlayer
         var state = GetState(clanId);
         if (!state.IsPlaying || state.Queue.CurrentItem is null || state.Target is null)
         {
-            await ctx.ReplyAsync(PlayerMessageBuilder.Status("Nothing playing", "Queue is empty."))
+            await ctx.ReplyAsync(PlayerMessageBuilder.NothingPlaying())
                 .ConfigureAwait(false);
             return;
         }
@@ -53,7 +55,7 @@ public sealed partial class MusicPlayer
         {
             await ctx.ReplyAsync(PlayerMessageBuilder.Error(
                     "Seek unavailable",
-                    "Seek is supported for WHIP voice playback only."))
+                    "Jumping in a track only works for voice (WHIP) playback right now."))
                 .ConfigureAwait(false);
             return;
         }
@@ -62,7 +64,10 @@ public sealed partial class MusicPlayer
         {
             await ctx.ReplyAsync(PlayerMessageBuilder.Error(
                     "Missing position",
-                    $"Example: `{_options.CommandPrefix}seek 1:30` \n `{_options.CommandPrefix}seek +15`"))
+                    [
+                        new("Examples", $"{_options.CommandPrefix}seek 1:30"),
+                        new("Relative", $"{_options.CommandPrefix}seek +15  or  {_options.CommandPrefix}seek -10"),
+                    ]))
                 .ConfigureAwait(false);
             return;
         }
@@ -70,7 +75,9 @@ public sealed partial class MusicPlayer
         var durationMs = (long)(state.Queue.Current!.Duration?.TotalMilliseconds ?? 0);
         if (durationMs <= 0)
         {
-            await ctx.ReplyAsync(PlayerMessageBuilder.Error("Seek failed", "Track duration is unknown."))
+            await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                    "Couldn’t seek",
+                    "I don’t know how long this track is."))
                 .ConfigureAwait(false);
             return;
         }
@@ -79,8 +86,8 @@ public sealed partial class MusicPlayer
         if (!TryParseSeek(ctx.Args[0], currentPos, durationMs, out var targetMs))
         {
             await ctx.ReplyAsync(PlayerMessageBuilder.Error(
-                    "Invalid seek",
-                    "Use mm:ss | seconds | relative +N / -N."))
+                    "Hmm, that time doesn’t look right",
+                    "Try mm:ss, plain seconds, or relative +N / -N."))
                 .ConfigureAwait(false);
             return;
         }
@@ -96,14 +103,16 @@ public sealed partial class MusicPlayer
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Seek restart failed clan={ClanId}", clanId);
-            await ctx.ReplyAsync(PlayerMessageBuilder.Error("Seek failed", "Could not restart playback from that position."))
+            await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                    "Couldn’t seek",
+                    "Playback didn’t restart from that spot — try again."))
                 .ConfigureAwait(false);
             return;
         }
 
         await ctx.ReplyAsync(PlayerMessageBuilder.Ok(
-                "Seeked",
-                $"Jumped to {TimeSpan.FromMilliseconds(targetMs):m\\:ss}."))
+                "Jumped ahead",
+                $"Now at {TimeSpan.FromMilliseconds(targetMs):m\\:ss}."))
             .ConfigureAwait(false);
     }
 
@@ -115,7 +124,9 @@ public sealed partial class MusicPlayer
             ?? await _playerStore.GetPlayHistoryIdAsync(clanId, cancellationToken).ConfigureAwait(false);
         if (historyId is not long hid)
         {
-            await ctx.ReplyAsync(PlayerMessageBuilder.Status("Nothing playing", "No active track to vote-skip."))
+            await ctx.ReplyAsync(PlayerMessageBuilder.Status(
+                    "Nothing playing",
+                    "There’s no track to vote on right now."))
                 .ConfigureAwait(false);
             return;
         }
@@ -136,7 +147,9 @@ public sealed partial class MusicPlayer
         {
             await ctx.ReplyAsync(PlayerMessageBuilder.Ok(
                     "Vote recorded",
-                    $"Votes: {votes}/{needed}"))
+                    [
+                        new("Progress", $"{votes}/{needed}"),
+                    ]))
                 .ConfigureAwait(false);
             return;
         }
@@ -145,7 +158,12 @@ public sealed partial class MusicPlayer
         await TryAdvancePersistedAsync(clanId, hid, skipLoop: true, PlayEndReason.VoteSkip, cancellationToken)
             .ConfigureAwait(false);
         await SkipStateAsync(state, cancellationToken).ConfigureAwait(false);
-        await ctx.ReplyAsync(PlayerMessageBuilder.Ok("Vote-skip passed", $"Votes: {votes}/{needed} — skipping."))
+        await ctx.ReplyAsync(PlayerMessageBuilder.Ok(
+                "Skipping!",
+                [
+                    new("Votes", $"{votes}/{needed}"),
+                    new("Next", "Moving on to the next track."),
+                ]))
             .ConfigureAwait(false);
     }
 
@@ -155,7 +173,8 @@ public sealed partial class MusicPlayer
         if (!await _access.CanConfigureDjAsync(ctx.Client, clanId, ctx.Author.Id, cancellationToken)
                 .ConfigureAwait(false))
         {
-            await ctx.ReplyAsync(PlayerMessageBuilder.NotAllowed("Only the clan owner can manage music channels."))
+            await ctx.ReplyAsync(PlayerMessageBuilder.NotAllowed(
+                    "Only the clan owner can manage which channels accept music commands."))
                 .ConfigureAwait(false);
             return;
         }
@@ -167,15 +186,17 @@ public sealed partial class MusicPlayer
                 {
                     var channels = await _commandChannels.ListAsync(clanId, cancellationToken).ConfigureAwait(false);
                     var body = channels.Count == 0
-                        ? "No allowlist — enqueue works in every channel."
+                        ? "Every channel can queue music."
                         : string.Join(", ", await FormatChannelMentionsAsync(ctx.Client, channels, cancellationToken)
                             .ConfigureAwait(false));
-                    await ctx.ReplyAsync(PlayerMessageBuilder.Status("Music channels", body)).ConfigureAwait(false);
+                    await ctx.ReplyAsync(PlayerMessageBuilder.MusicChannelsListed(body)).ConfigureAwait(false);
                     return;
                 }
             case "clear":
                 await _commandChannels.ClearAsync(clanId, cancellationToken).ConfigureAwait(false);
-                await ctx.ReplyAsync(PlayerMessageBuilder.Ok("Music channels", "Allowlist cleared (all channels allowed)."))
+                await ctx.ReplyAsync(PlayerMessageBuilder.Ok(
+                        "Music channels",
+                        "Allowlist cleared — music commands work everywhere again."))
                     .ConfigureAwait(false);
                 return;
             case "add":
@@ -187,7 +208,7 @@ public sealed partial class MusicPlayer
                     {
                         await ctx.ReplyAsync(PlayerMessageBuilder.Error(
                                 "Missing channel",
-                                $"Example: `{_options.CommandPrefix}musicchannel {sub} #channel`"))
+                                $"Tag a channel, e.g. {_options.CommandPrefix}musicchannel {sub} #channel"))
                             .ConfigureAwait(false);
                         return;
                     }
@@ -197,7 +218,9 @@ public sealed partial class MusicPlayer
                         await _commandChannels.AddAsync(clanId, id, ctx.Author.Id, cancellationToken).ConfigureAwait(false);
                         var mention = await FormatChannelMentionAsync(ctx.Client, id, cancellationToken)
                             .ConfigureAwait(false);
-                        await ctx.ReplyAsync(PlayerMessageBuilder.Ok("Music channels", $"Added {mention} to allowlist."))
+                        await ctx.ReplyAsync(PlayerMessageBuilder.Ok(
+                                "Channel allowed",
+                                $"{mention} can now accept music commands."))
                             .ConfigureAwait(false);
                     }
                     else
@@ -205,7 +228,9 @@ public sealed partial class MusicPlayer
                         await _commandChannels.RemoveAsync(clanId, id, cancellationToken).ConfigureAwait(false);
                         var mention = await FormatChannelMentionAsync(ctx.Client, id, cancellationToken)
                             .ConfigureAwait(false);
-                        await ctx.ReplyAsync(PlayerMessageBuilder.Ok("Music channels", $"Removed {mention} from allowlist."))
+                        await ctx.ReplyAsync(PlayerMessageBuilder.Ok(
+                                "Channel removed",
+                                $"{mention} is off the music allowlist."))
                             .ConfigureAwait(false);
                     }
 
@@ -213,7 +238,7 @@ public sealed partial class MusicPlayer
                 }
             default:
                 await ctx.ReplyAsync(PlayerMessageBuilder.Error(
-                        "Unknown subcommand",
+                        "Unknown option",
                         "Use add | remove | list | clear."))
                     .ConfigureAwait(false);
                 return;
@@ -226,8 +251,12 @@ public sealed partial class MusicPlayer
         if (ctx.Args.Count == 0)
         {
             await ctx.ReplyAsync(PlayerMessageBuilder.Error(
-                    "Missing args",
-                    $"Usage: {_options.CommandPrefix}playlist create | add | play | list | delete | default"))
+                    "Need a bit more",
+                    [
+                        new(
+                            "Try",
+                            $"{_options.CommandPrefix}playlist create | add | play | list [name] | delete | default"),
+                    ]))
                 .ConfigureAwait(false);
             return;
         }
@@ -237,12 +266,49 @@ public sealed partial class MusicPlayer
         {
             case "list":
                 {
+                    if (ctx.Args.Count >= 2)
+                    {
+                        var name = string.Join(' ', ctx.Args.Skip(1)).Trim();
+                        var pl = await _playlists.TryGetByNameAsync(clanId, name, cancellationToken)
+                            .ConfigureAwait(false);
+                        if (pl is null)
+                        {
+                            await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                                    "Playlist not found",
+                                    $"I couldn’t find “{name}” in this clan."))
+                                .ConfigureAwait(false);
+                            return;
+                        }
+
+                        var items = await _playlists.ListItemsAsync(pl.Id, cancellationToken)
+                            .ConfigureAwait(false);
+                        const int previewCap = 25;
+                        var preview = items
+                            .Take(previewCap)
+                            .Select(item =>
+                            {
+                                var title = item.Track?.Title ?? $"track#{item.TrackId}";
+                                var dur = item.Track?.Duration is TimeSpan d
+                                    ? (d.TotalHours >= 1 ? d.ToString(@"h\:mm\:ss") : d.ToString(@"m\:ss"))
+                                    : "?:??";
+                                return (title, dur, item.Track?.IsTooLarge == true);
+                            })
+                            .ToList();
+                        await ctx.ReplyAsync(PlayerMessageBuilder.PlaylistTracks(
+                                pl.Name,
+                                pl.IsDefault,
+                                preview,
+                                items.Count,
+                                previewCap))
+                            .ConfigureAwait(false);
+                        return;
+                    }
+
                     var lists = await _playlists.ListAsync(clanId, cancellationToken).ConfigureAwait(false);
-                    var body = lists.Count == 0
-                        ? "No playlists yet."
-                        : string.Join("\n", lists.Select(p =>
-                            p.IsDefault ? $"• **{p.Name}** (default)" : $"• **{p.Name}**"));
-                    await ctx.ReplyAsync(PlayerMessageBuilder.Status("Playlists", body)).ConfigureAwait(false);
+                    await ctx.ReplyAsync(PlayerMessageBuilder.PlaylistCatalog(
+                            lists.Select(p => (p.Name, p.IsDefault)).ToList(),
+                            _options.CommandPrefix))
+                        .ConfigureAwait(false);
                     return;
                 }
             case "default":
@@ -254,21 +320,70 @@ public sealed partial class MusicPlayer
                 {
                     if (ctx.Args.Count < 2)
                     {
-                        await ctx.ReplyAsync(PlayerMessageBuilder.Error("Missing name", "playlist create <name>"))
+                        await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                                "Missing name",
+                                $"Try {_options.CommandPrefix}playlist create <name> — optional YouTube/SoundCloud playlist URL at the end."))
                             .ConfigureAwait(false);
                         return;
                     }
 
-                    var name = string.Join(' ', ctx.Args.Skip(1)).Trim();
+                    // create <name> OR create <name> <url> (url is last absolute http token).
+                    string name;
+                    string? importUrl = null;
+                    if (ctx.Args.Count >= 3
+                        && IsAbsoluteHttpUrl(ctx.Args[^1])
+                        && _externalPlaylists.CanImport(ctx.Args[^1]))
+                    {
+                        importUrl = ctx.Args[^1].Trim();
+                        name = string.Join(' ', ctx.Args.Skip(1).Take(ctx.Args.Count - 2)).Trim();
+                    }
+                    else if (ctx.Args.Count >= 3 && IsAbsoluteHttpUrl(ctx.Args[^1]))
+                    {
+                        await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                                "Link not supported",
+                                "Use a YouTube playlist or SoundCloud set / short link."))
+                            .ConfigureAwait(false);
+                        return;
+                    }
+                    else
+                    {
+                        name = string.Join(' ', ctx.Args.Skip(1)).Trim();
+                    }
+
+                    if (string.IsNullOrWhiteSpace(name))
+                    {
+                        await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                                "Missing name",
+                                $"Try {_options.CommandPrefix}playlist create <name>"))
+                            .ConfigureAwait(false);
+                        return;
+                    }
+
                     try
                     {
-                        await _playlists.CreateAsync(clanId, name, ctx.Author.Id, cancellationToken).ConfigureAwait(false);
-                        await ctx.ReplyAsync(PlayerMessageBuilder.Ok("Playlist created", name)).ConfigureAwait(false);
+                        var created = await _playlists.CreateAsync(clanId, name, ctx.Author.Id, cancellationToken)
+                            .ConfigureAwait(false);
+                        if (importUrl is null)
+                        {
+                            await ctx.ReplyAsync(PlayerMessageBuilder.Ok(
+                                    "Playlist ready",
+                                    [
+                                        new("Name", name),
+                                        new("Next", $"Add songs with {_options.CommandPrefix}playlist add {name} <query>"),
+                                    ]))
+                                .ConfigureAwait(false);
+                            return;
+                        }
+
+                        await BeginPlaylistImportAsync(ctx, created.Id, created.Name, importUrl, cancellationToken)
+                            .ConfigureAwait(false);
                     }
                     catch (Exception ex)
                     {
                         _logger.LogWarning(ex, "Create playlist failed");
-                        await ctx.ReplyAsync(PlayerMessageBuilder.Error("Create failed", "Name may already exist."))
+                        await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                                "Couldn’t create playlist",
+                                "That name might already be taken — try another."))
                             .ConfigureAwait(false);
                     }
 
@@ -278,7 +393,9 @@ public sealed partial class MusicPlayer
                 {
                     if (ctx.Args.Count < 2)
                     {
-                        await ctx.ReplyAsync(PlayerMessageBuilder.Error("Missing name", "playlist delete <name>"))
+                        await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                                "Missing name",
+                                $"Try {_options.CommandPrefix}playlist delete <name>"))
                             .ConfigureAwait(false);
                         return;
                     }
@@ -286,8 +403,8 @@ public sealed partial class MusicPlayer
                     var name = string.Join(' ', ctx.Args.Skip(1)).Trim();
                     var ok = await _playlists.DeleteAsync(clanId, name, cancellationToken).ConfigureAwait(false);
                     await ctx.ReplyAsync(ok
-                            ? PlayerMessageBuilder.Ok("Playlist deleted", name)
-                            : PlayerMessageBuilder.Error("Not found", name))
+                            ? PlayerMessageBuilder.Ok("Playlist deleted", [new("Name", name)])
+                            : PlayerMessageBuilder.Error("Playlist not found", $"I couldn’t find “{name}”."))
                         .ConfigureAwait(false);
                     return;
                 }
@@ -296,8 +413,8 @@ public sealed partial class MusicPlayer
                     if (ctx.Args.Count < 3)
                     {
                         await ctx.ReplyAsync(PlayerMessageBuilder.Error(
-                                "Missing args",
-                                "playlist add <name> <url | query>"))
+                                "Need playlist + track",
+                                $"Try {_options.CommandPrefix}playlist add <name> <url or search>"))
                             .ConfigureAwait(false);
                         return;
                     }
@@ -307,14 +424,17 @@ public sealed partial class MusicPlayer
                     var pl = await _playlists.TryGetByNameAsync(clanId, name, cancellationToken).ConfigureAwait(false);
                     if (pl is null)
                     {
-                        await ctx.ReplyAsync(PlayerMessageBuilder.Error("Not found", name)).ConfigureAwait(false);
+                        await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                                "Playlist not found",
+                                $"I couldn’t find “{name}”."))
+                            .ConfigureAwait(false);
                         return;
                     }
 
                     var (track, err) = await TryResolveAsync(ctx, query, cancellationToken).ConfigureAwait(false);
                     if (track is null)
                     {
-                        await ctx.ReplyAsync(err ?? PlayerMessageBuilder.Error("Not found", "No track matched."))
+                        await ctx.ReplyAsync(err ?? PlayerMessageBuilder.TrackNotFound())
                             .ConfigureAwait(false);
                         return;
                     }
@@ -322,13 +442,20 @@ public sealed partial class MusicPlayer
                     var trackId = await EnsureTrackIdAsync(track, cancellationToken).ConfigureAwait(false);
                     if (trackId == 0)
                     {
-                        await ctx.ReplyAsync(PlayerMessageBuilder.Error("Add failed", "Could not persist track."))
+                        await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                                "Couldn’t save track",
+                                "Something went wrong storing that song — try again."))
                             .ConfigureAwait(false);
                         return;
                     }
 
                     await _playlists.AddItemAsync(pl.Id, trackId, ctx.Author.Id, cancellationToken).ConfigureAwait(false);
-                    await ctx.ReplyAsync(PlayerMessageBuilder.Ok("Added to playlist", $"{track.Title} → {pl.Name}"))
+                    await ctx.ReplyAsync(PlayerMessageBuilder.Ok(
+                            "Added to playlist",
+                            [
+                                new("Track", track.Title),
+                                new("Playlist", pl.Name),
+                            ]))
                         .ConfigureAwait(false);
                     return;
                 }
@@ -339,29 +466,61 @@ public sealed partial class MusicPlayer
                         return;
                     }
 
-                    if (ctx.Args.Count < 2)
+                    var hashtagChannelId = ChannelTargetParser.TryGetHashtagChannelId(ctx);
+                    var name = ChannelTargetParser.BuildQuery(ctx.Args.Skip(1));
+                    if (string.IsNullOrWhiteSpace(name))
                     {
-                        await ctx.ReplyAsync(PlayerMessageBuilder.Error("Missing name", "playlist play <name>"))
+                        await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                                "Missing name",
+                                $"Try {_options.CommandPrefix}playlist play [#channel] <name>"))
                             .ConfigureAwait(false);
                         return;
                     }
 
-                    var name = string.Join(' ', ctx.Args.Skip(1)).Trim();
                     var pl = await _playlists.TryGetByNameAsync(clanId, name, cancellationToken).ConfigureAwait(false);
                     if (pl is null)
                     {
-                        await ctx.ReplyAsync(PlayerMessageBuilder.Error("Not found", name)).ConfigureAwait(false);
+                        await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                                "Playlist not found",
+                                $"I couldn’t find “{name}”."))
+                            .ConfigureAwait(false);
                         return;
                     }
 
                     var items = await _playlists.ListItemsAsync(pl.Id, cancellationToken).ConfigureAwait(false);
                     if (items.Count == 0)
                     {
-                        await ctx.ReplyAsync(PlayerMessageBuilder.Status("Empty playlist", name)).ConfigureAwait(false);
+                        await ctx.ReplyAsync(PlayerMessageBuilder.Status(
+                                "Empty playlist",
+                                [
+                                    new("Playlist", name),
+                                    new("Tip", "Add a few tracks first, then play it."),
+                                ]))
+                            .ConfigureAwait(false);
                         return;
                     }
 
+                    var (dest, destError) = await TryResolvePlayDestinationAsync(ctx, hashtagChannelId, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (destError is not null)
+                    {
+                        await ctx.ReplyAsync(destError).ConfigureAwait(false);
+                        return;
+                    }
+
+                    var resolved = dest!.Value;
+                    var target = resolved.Target;
+                    var mode = resolved.Mode;
+                    var modeKey = mode == PlaybackMode.Voice ? "voice" : "streaming";
+
                     var state = GetState(clanId);
+                    if (state.IsPlaying && state.Mode != mode)
+                    {
+                        await ctx.ReplyAsync(PlayerMessageBuilder.ModeConflict(wantVoice: mode == PlaybackMode.Voice))
+                            .ConfigureAwait(false);
+                        return;
+                    }
+
                     var used = state.Queue.TotalCount;
                     var slots = Math.Max(0, _options.MaxQueuePerClan - used);
                     if (slots == 0)
@@ -371,23 +530,18 @@ public sealed partial class MusicPlayer
                     }
 
                     var take = items.Take(slots).ToList();
-                    // Require a voice/stream target via presence or default — enqueue as voice using presence.
-                    if (!_binds.TryGetUserVoiceChannel(clanId, ctx.Author.Id, out var voiceId))
+                    var startingFresh = !state.IsPlaying;
+                    if (startingFresh && !await TryAcquirePlaySlotAsync().ConfigureAwait(false))
                     {
-                        await ctx.ReplyAsync(PlayerMessageBuilder.Error(
-                                "No destination",
-                                "Join a voice channel (or use !play for single tracks)."))
-                            .ConfigureAwait(false);
+                        await ctx.ReplyAsync(PlayerMessageBuilder.PlaybackSlotsFull()).ConfigureAwait(false);
                         return;
                     }
 
-                    var channel = await ctx.Client.GetChannelAsync(voiceId, cancellationToken).ConfigureAwait(false);
-                    var target = new Playback.PlaybackTarget(
-                        clanId,
-                        voiceId,
-                        RoomName: voiceId.ToString(),
-                        ChannelLabel: channel.Name);
+                    var interruptDefault = state.IsPlaying
+                        && mode == PlaybackMode.Streaming
+                        && state.Queue.CurrentItem?.IsFromDefault == true;
 
+                    var added = 0;
                     foreach (var item in take)
                     {
                         if (item.Track is null)
@@ -397,41 +551,85 @@ public sealed partial class MusicPlayer
 
                         var info = item.Track.ToTrackInfo(ctx.Author.Username)
                             .WithRequester(ctx.Author.Id, ctx.Author.Username);
+                        if (IsTooLarge(info) || info.IsTooLarge)
+                        {
+                            continue;
+                        }
+
                         var play = new QueuedPlay(info, target);
-                        state.Queue.Enqueue(play);
-                        await PersistEnqueueAsync(clanId, play, "voice").ConfigureAwait(false);
+                        if (interruptDefault && added == 0)
+                        {
+                            state.Queue.EnqueueFront(play);
+                        }
+                        else
+                        {
+                            state.Queue.Enqueue(play);
+                        }
+
+                        await PersistEnqueueAsync(clanId, play, modeKey).ConfigureAwait(false);
                         StartBackgroundPrep(ctx.Client, state, play);
+                        added++;
+                    }
+
+                    if (added == 0)
+                    {
+                        if (startingFresh)
+                        {
+                            ReleasePlaySlot(state);
+                        }
+
+                        await ctx.ReplyAsync(PlayerMessageBuilder.TrackNotFound(
+                                "Every track in that playlist was too large or blocked."))
+                            .ConfigureAwait(false);
+                        return;
                     }
 
                     state.PlayingDefaultPlaylist = false;
+                    state.Mode = mode;
+                    state.Target = target;
+                    state.NotifyClient = ctx.Client;
+                    state.NotifyChannelId = ctx.Channel.Id;
+                    state.ClanId = clanId;
+                    state.ControlUserId = ctx.Author.Id;
 
-                    if (!state.IsPlaying && state.Queue.Count > 0)
+                    if (interruptDefault)
                     {
-                        if (await TryAcquirePlaySlotAsync().ConfigureAwait(false))
-                        {
-                            state.CancelIdleDestroy();
-                            state.PlayingDefaultPlaylist = false;
-                            state.Mode = PlaybackMode.Voice;
-                            state.Target = target;
-                            state.NotifyClient = ctx.Client;
-                            state.NotifyChannelId = ctx.Channel.Id;
-                            state.ClanId = clanId;
-                            state.HoldsPlaySlot = true;
-                            ResetPrepToken(state);
-                            StartPump(state, clanId);
-                        }
+                        state.LastDestroyReason = PlayerDestroyReason.Skip;
+                        state.CancelTrack();
+                    }
+                    else if (startingFresh)
+                    {
+                        state.CancelIdleDestroy();
+                        state.HoldsPlaySlot = true;
+                        ResetPrepToken(state);
+                        StartPump(state, clanId);
                     }
 
-                    var msg = take.Count < items.Count
-                        ? $"Added {take.Count} tracks from playlist (queue reached limit {_options.MaxQueuePerClan})."
-                        : $"Added {take.Count} tracks from playlist **{pl.Name}**.";
-                    await ctx.ReplyAsync(PlayerMessageBuilder.Ok("Playlist queued", msg)).ConfigureAwait(false);
+                    await ctx.ReplyAsync(PlayerMessageBuilder.Ok(
+                            interruptDefault ? "Playing next" : "Playlist queued",
+                            [
+                                new("Playlist", pl.Name),
+                                new("Added", $"{added} track(s)"),
+                                new(
+                                    "Destination",
+                                    PlayerMessageBuilder.FormatDestination(
+                                        mode == PlaybackMode.Voice ? "voice" : "streaming",
+                                        target.ChannelLabel)),
+                                new(
+                                    "Note",
+                                    interruptDefault
+                                        ? "Cut in ahead of the default playlist."
+                                        : take.Count < items.Count || added < take.Count
+                                            ? $"Queue hit the {_options.MaxQueuePerClan}-track cap — the rest weren’t added."
+                                            : "You’re all set."),
+                            ]))
+                        .ConfigureAwait(false);
                     return;
                 }
             default:
                 await ctx.ReplyAsync(PlayerMessageBuilder.Error(
-                        "Unknown subcommand",
-                        "create, add, play, list, delete, default"))
+                        "Unknown playlist command",
+                        "create, add, play, list, delete, or default."))
                     .ConfigureAwait(false);
                 return;
         }
@@ -444,9 +642,16 @@ public sealed partial class MusicPlayer
             var current = await _playlists.TryGetDefaultAsync(clanId, cancellationToken).ConfigureAwait(false);
             await ctx.ReplyAsync(PlayerMessageBuilder.Status(
                     "Default playlist",
-                    current is null
-                        ? "none — set with !playlist default <name>"
-                        : $"**{current.Name}**"))
+                    [
+                        new(
+                            "Current",
+                            current is null ? "none" : current.Name),
+                        new(
+                            "Tip",
+                            current is null
+                                ? $"Set one with {_options.CommandPrefix}playlist default <name>"
+                                : "Plays when the queue goes idle (needs a default stream channel)."),
+                    ]))
                 .ConfigureAwait(false);
             return;
         }
@@ -460,7 +665,7 @@ public sealed partial class MusicPlayer
                     .ConfigureAwait(false))
             {
                 await ctx.ReplyAsync(PlayerMessageBuilder.NotAllowed(
-                        "Only DJ role or clan owner can clear the default playlist."))
+                        "Only a DJ or the clan owner can clear the default playlist."))
                     .ConfigureAwait(false);
                 return;
             }
@@ -469,7 +674,10 @@ public sealed partial class MusicPlayer
             var state = GetState(clanId);
             state.DefaultAutoplayArmed = false;
             state.PlayingDefaultPlaylist = false;
-            await ctx.ReplyAsync(PlayerMessageBuilder.Ok("Default playlist", "Cleared.")).ConfigureAwait(false);
+            await ctx.ReplyAsync(PlayerMessageBuilder.Ok(
+                    "Default playlist cleared",
+                    "Idle autoplay won’t kick in anymore."))
+                .ConfigureAwait(false);
             return;
         }
 
@@ -477,7 +685,7 @@ public sealed partial class MusicPlayer
                 .ConfigureAwait(false))
         {
             await ctx.ReplyAsync(PlayerMessageBuilder.NotAllowed(
-                    "Only DJ role or clan owner can set the default playlist."))
+                    "Only a DJ or the clan owner can set the default playlist."))
                 .ConfigureAwait(false);
             return;
         }
@@ -485,7 +693,10 @@ public sealed partial class MusicPlayer
         var pl = await _playlists.TryGetByNameAsync(clanId, nameOrNone, cancellationToken).ConfigureAwait(false);
         if (pl is null)
         {
-            await ctx.ReplyAsync(PlayerMessageBuilder.Error("Not found", nameOrNone)).ConfigureAwait(false);
+            await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                    "Playlist not found",
+                    $"I couldn’t find “{nameOrNone}”."))
+                .ConfigureAwait(false);
             return;
         }
 
@@ -494,7 +705,7 @@ public sealed partial class MusicPlayer
         {
             await ctx.ReplyAsync(PlayerMessageBuilder.Error(
                     "Empty playlist",
-                    "Add tracks before setting it as default."))
+                    "Add a few tracks before making it the default."))
                 .ConfigureAwait(false);
             return;
         }
@@ -504,8 +715,8 @@ public sealed partial class MusicPlayer
         if (streamId is null)
         {
             await ctx.ReplyAsync(PlayerMessageBuilder.Error(
-                    "No stream channel",
-                    "Set a default stream channel before enabling default playlist autoplay."))
+                    "Need a stream channel",
+                    "Pick a default stream channel first, then enable default playlist autoplay."))
                 .ConfigureAwait(false);
             return;
         }
@@ -530,9 +741,14 @@ public sealed partial class MusicPlayer
 
         await ctx.ReplyAsync(PlayerMessageBuilder.Ok(
                 "Default playlist set",
-                started
-                    ? $"**{pl.Name}** — playing on default stream."
-                    : $"**{pl.Name}** — will autoplay after {IdleSessionTtl.TotalMinutes:0} minutes idle."))
+                [
+                    new("Playlist", pl.Name),
+                    new(
+                        "When",
+                        started
+                            ? "Playing now on the default stream channel."
+                            : $"Autoplays after about {IdleSessionTtl.TotalMinutes:0} minutes idle."),
+                ]))
             .ConfigureAwait(false);
     }
 

@@ -15,6 +15,8 @@ public enum PlayerDestroyReason
     UserStop,
     Skip,
     StnFailed,
+    /// <summary>Single-track media prep/download failed — keep STN session, skip to next.</summary>
+    TrackFailed,
     IdleTimeout,
     ModeConflict,
     RoomConflict,

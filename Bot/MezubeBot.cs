@@ -219,6 +219,66 @@ public sealed class MezubeBot : BackgroundService
                 RateLimitNotifyTarget.Value = null;
             }
         });
+        interactions.OnButton(MezubeButtonId.SearchPickPrefix, async ctx =>
+        {
+            if (!MezubeButtonId.TryParse(ctx.Interaction.CustomId, out var parts)
+                || parts.InteractionFunction != MezubeButtonId.SearchPick)
+            {
+                return;
+            }
+
+            RateLimitNotifyTarget.Value = (ctx.Channel.ClanId, ctx.Channel.Id);
+            try
+            {
+                await _player.HandleSearchPickButtonAsync(ctx, parts).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (!ctx.CancellationToken.IsCancellationRequested)
+            {
+                _logger.LogError(ex, "Search pick {ButtonId} failed", ctx.Interaction.CustomId);
+                try
+                {
+                    await ctx.RespondAsync(PlayerMessageBuilder.Awkward()).ConfigureAwait(false);
+                }
+                catch (Exception notifyEx)
+                {
+                    _logger.LogWarning(notifyEx, "Failed to send awkward error reply for search pick");
+                }
+            }
+            finally
+            {
+                RateLimitNotifyTarget.Value = null;
+            }
+        });
+        interactions.OnButton(MezubeButtonId.PlaylistImportPrefix, async ctx =>
+        {
+            if (!MezubeButtonId.TryParse(ctx.Interaction.CustomId, out var parts)
+                || parts.InteractionFunction != MezubeButtonId.PlaylistImport)
+            {
+                return;
+            }
+
+            RateLimitNotifyTarget.Value = (ctx.Channel.ClanId, ctx.Channel.Id);
+            try
+            {
+                await _player.HandlePlaylistImportButtonAsync(ctx, parts).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (!ctx.CancellationToken.IsCancellationRequested)
+            {
+                _logger.LogError(ex, "Playlist import {ButtonId} failed", ctx.Interaction.CustomId);
+                try
+                {
+                    await ctx.RespondAsync(PlayerMessageBuilder.Awkward()).ConfigureAwait(false);
+                }
+                catch (Exception notifyEx)
+                {
+                    _logger.LogWarning(notifyEx, "Failed to send awkward error reply for playlist import");
+                }
+            }
+            finally
+            {
+                RateLimitNotifyTarget.Value = null;
+            }
+        });
         client.UseInteractions(interactions);
 
         client.Ready += async () =>

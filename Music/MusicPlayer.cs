@@ -8,6 +8,7 @@ using Mezube.Helpers;
 using Mezube.Infrastructure.Persistence;
 using Mezube.Infrastructure.Persistence.Redis;
 using Mezube.Media;
+using Mezube.Music.Interactive;
 using Mezube.Playback;
 using Mezube.Ui;
 using Microsoft.Extensions.Logging;
@@ -35,6 +36,9 @@ public sealed partial class MusicPlayer
     private readonly IPlaylistRepository _playlists;
     private readonly ICommandChannelRepository _commandChannels;
     private readonly SoundCloudSetImporter _soundCloudSets;
+    private readonly YoutubeTrackResolver _youtube;
+    private readonly ExternalPlaylistImporter _externalPlaylists;
+    private readonly IInteractiveSessionStore _sessions;
 
     public MusicPlayer(
         ITrackResolver resolver,
@@ -51,6 +55,9 @@ public sealed partial class MusicPlayer
         IPlaylistRepository playlists,
         ICommandChannelRepository commandChannels,
         SoundCloudSetImporter soundCloudSets,
+        YoutubeTrackResolver youtube,
+        ExternalPlaylistImporter externalPlaylists,
+        IInteractiveSessionStore sessions,
         ILogger<MusicPlayer> logger)
     {
         _resolver = resolver;
@@ -67,6 +74,9 @@ public sealed partial class MusicPlayer
         _playlists = playlists;
         _commandChannels = commandChannels;
         _soundCloudSets = soundCloudSets;
+        _youtube = youtube;
+        _externalPlaylists = externalPlaylists;
+        _sessions = sessions;
         _logger = logger;
         _playSlots = new SemaphoreSlim(Math.Max(1, options.MaxConcurrentPlayback));
     }
@@ -88,6 +98,34 @@ public sealed partial class MusicPlayer
             return;
         }
 
+        var (dest, error) = await TryResolvePlayDestinationAsync(ctx, hashtagChannelId, cancellationToken)
+            .ConfigureAwait(false);
+        if (error is not null)
+        {
+            await ctx.ReplyAsync(error).ConfigureAwait(false);
+            return;
+        }
+
+        var resolved = dest!.Value;
+        if (resolved.Mode == PlaybackMode.Streaming)
+        {
+            await PlayStreamingAsync(ctx, query, resolved.Target.ChannelId, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await PlayVoiceAsync(ctx, query, resolved.Target.ChannelId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Same destination rules as <see cref="PlayAutoAsync"/>: hashtag → current channel → default stream → voice presence.
+    /// </summary>
+    private async Task<(ResolvedPlayDestination? Dest, Mezon.Net.Client.MessageContent? Error)> TryResolvePlayDestinationAsync(
+        ICommandContext ctx,
+        long? hashtagChannelId,
+        CancellationToken cancellationToken)
+    {
+        var clanId = ctx.Clan?.Id ?? ctx.Channel.ClanId;
+
         if (hashtagChannelId is long id)
         {
             Mezon.Net.Sdk.Entities.Channel channel;
@@ -97,65 +135,94 @@ public sealed partial class MusicPlayer
             }
             catch (Exception)
             {
-                await ctx.ReplyAsync(PlayerMessageBuilder.Awkward()).ConfigureAwait(false);
-                return;
+                return (null, PlayerMessageBuilder.Awkward());
             }
 
             if (channel.Type == (int)ChannelType.Streaming)
             {
-                await PlayStreamingAsync(ctx, query, id, cancellationToken).ConfigureAwait(false);
-                return;
+                return (ToStreaming(clanId, id, channel.Name), null);
             }
 
             if (channel.Type is (int)ChannelType.MezonVoice or (int)ChannelType.GmeetVoice)
             {
-                await PlayVoiceAsync(ctx, query, id, cancellationToken).ConfigureAwait(false);
-                return;
+                return (ToVoice(clanId, id, channel.Name), null);
             }
 
-            await ctx.ReplyAsync(PlayerMessageBuilder.Error(
-                    "Invalid request",
-                    "Mention a voice or stream channel hashtag."))
-                .ConfigureAwait(false);
-            return;
+            return (null, PlayerMessageBuilder.Error(
+                "Pick a voice or stream channel",
+                "Mention a #voice or #stream channel hashtag."));
         }
 
-        // No hashtag: if the command was sent in a stream/voice channel, play there.
         if (ctx.Channel.Type == (int)ChannelType.Streaming)
         {
-            await PlayStreamingAsync(ctx, query, ctx.Channel.Id, cancellationToken).ConfigureAwait(false);
-            return;
+            return (ToStreaming(clanId, ctx.Channel.Id, ctx.Channel.Name), null);
         }
 
         if (ctx.Channel.Type is (int)ChannelType.MezonVoice or (int)ChannelType.GmeetVoice)
         {
-            await PlayVoiceAsync(ctx, query, ctx.Channel.Id, cancellationToken).ConfigureAwait(false);
-            return;
+            return (ToVoice(clanId, ctx.Channel.Id, ctx.Channel.Name), null);
         }
 
-        var clanId = ctx.Clan?.Id ?? ctx.Channel.ClanId;
-
-        // Fallback: default_stream_channel_id
         var defaultStreamChannelId = await _binds.TryGetDefaultStreamChannelAsync(clanId, cancellationToken)
             .ConfigureAwait(false);
         if (defaultStreamChannelId is long ds)
         {
-            await PlayStreamingAsync(ctx, query, ds, cancellationToken).ConfigureAwait(false);
-            return;
+            Mezon.Net.Sdk.Entities.Channel channel;
+            try
+            {
+                channel = await ctx.Client.GetChannelAsync(ds, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                return (null, PlayerMessageBuilder.Awkward());
+            }
+
+            if (channel.Type != (int)ChannelType.Streaming)
+            {
+                return (null, PlayerMessageBuilder.Error(
+                    "Not a stream channel",
+                    $"{PlayerMessageBuilder.FormatChannelMention(channel.Name, ds)} isn’t a streaming channel."));
+            }
+
+            return (ToStreaming(clanId, ds, channel.Name), null);
         }
 
-        // Fallback: user's voice presence
         if (_binds.TryGetUserVoiceChannel(clanId, ctx.Author.Id, out var voiceId))
         {
-            await PlayVoiceAsync(ctx, query, voiceId, cancellationToken).ConfigureAwait(false);
-            return;
+            Mezon.Net.Sdk.Entities.Channel channel;
+            try
+            {
+                channel = await ctx.Client.GetChannelAsync(voiceId, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                return (null, PlayerMessageBuilder.Awkward());
+            }
+
+            if (channel.Type is not ((int)ChannelType.MezonVoice or (int)ChannelType.GmeetVoice))
+            {
+                return (null, PlayerMessageBuilder.Error(
+                    "Not a voice channel",
+                    $"{PlayerMessageBuilder.FormatChannelMention(channel.Name, voiceId)} isn’t a voice channel."));
+            }
+
+            return (ToVoice(clanId, voiceId, channel.Name), null);
         }
 
-        await ctx.ReplyAsync(PlayerMessageBuilder.Error(
-                "Invalid request",
-                "Join a voice channel first, or specify the target channel with a hashtag (#voice / #stream)."))
-            .ConfigureAwait(false);
+        return (null, PlayerMessageBuilder.Error(
+            "Where should I play?",
+            "Join a voice channel first, or tag a #voice / #stream channel."));
+
+        static ResolvedPlayDestination ToStreaming(long clan, long channelId, string? label)
+            => new(new PlaybackTarget(clan, channelId, ChannelLabel: label), PlaybackMode.Streaming);
+
+        static ResolvedPlayDestination ToVoice(long clan, long channelId, string? label)
+            => new(
+                new PlaybackTarget(clan, channelId, RoomName: channelId.ToString(), ChannelLabel: label),
+                PlaybackMode.Voice);
     }
+
+    private readonly record struct ResolvedPlayDestination(PlaybackTarget Target, PlaybackMode Mode);
 
     public async Task PlayStreamingAsync(
         ICommandContext ctx,
@@ -185,8 +252,8 @@ public sealed partial class MusicPlayer
         else
         {
             await ctx.ReplyAsync(PlayerMessageBuilder.Error(
-                    "Invalid request",
-                    "Mention a stream channel hashtag."))
+                    "Need a stream channel",
+                    "Mention a #stream channel hashtag."))
                 .ConfigureAwait(false);
             return;
         }
@@ -206,8 +273,8 @@ public sealed partial class MusicPlayer
         if (channel.Type != (int)ChannelType.Streaming)
         {
             await ctx.ReplyAsync(PlayerMessageBuilder.Error(
-                    "Invalid request",
-                    $"{PlayerMessageBuilder.FormatChannelMention(channel.Name, channelId)} is not a streaming channel."))
+                    "Not a stream channel",
+                    $"{PlayerMessageBuilder.FormatChannelMention(channel.Name, channelId)} isn’t a streaming channel."))
                 .ConfigureAwait(false);
             return;
         }
@@ -233,13 +300,27 @@ public sealed partial class MusicPlayer
             return;
         }
 
+        if (!IsAbsoluteHttpUrl(query))
+        {
+            await HandleFreeTextPlayAsync(
+                    ctx,
+                    query,
+                    target,
+                    PlaybackMode.Streaming,
+                    preparing.MessageId,
+                    preparingCreateTime,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
         var (track, resolveError) = await TryResolveAsync(ctx, query, cancellationToken).ConfigureAwait(false);
         if (track is null)
         {
             await UpdateOrReplyAsync(
                     ctx,
                     preparing.MessageId,
-                    resolveError ?? PlayerMessageBuilder.Error("Not found", "No track matched that query."),
+                    resolveError ?? PlayerMessageBuilder.TrackNotFound(),
                     preparingCreateTime)
                 .ConfigureAwait(false);
             return;
@@ -276,9 +357,7 @@ public sealed partial class MusicPlayer
                 await UpdateOrReplyAsync(
                         ctx,
                         preparing.MessageId,
-                        PlayerMessageBuilder.Error(
-                            "Mode conflict",
-                            "This clan is playing voice. Use !play #stream <url | query> to queue streaming, or !stop before switching."),
+                        PlayerMessageBuilder.ModeConflict(wantVoice: false),
                         preparingCreateTime)
                     .ConfigureAwait(false);
                 return;
@@ -296,7 +375,9 @@ public sealed partial class MusicPlayer
                 await UpdateOrReplyAsync(
                         ctx,
                         preparing.MessageId,
-                        PlayerMessageBuilder.Ok("Playing next", $"{track.Title} - interrupted default playlist."),
+                        PlayerMessageBuilder.PlayingNext(
+                            track.Title,
+                            "Cut in ahead of the default playlist."),
                         preparingCreateTime)
                     .ConfigureAwait(false);
                 return;
@@ -372,8 +453,8 @@ public sealed partial class MusicPlayer
         else
         {
             await ctx.ReplyAsync(PlayerMessageBuilder.Error(
-                    "Invalid request",
-                    "Join a voice channel, or mention it: !play #voice <query>."))
+                    "Join a voice channel first",
+                    $"Hop into voice, or tag it: {_options.CommandPrefix}play #voice <query>."))
                 .ConfigureAwait(false);
             return;
         }
@@ -393,8 +474,8 @@ public sealed partial class MusicPlayer
         if (channel.Type is not ((int)ChannelType.MezonVoice or (int)ChannelType.GmeetVoice))
         {
             await ctx.ReplyAsync(PlayerMessageBuilder.Error(
-                    "Invalid request",
-                    $"{PlayerMessageBuilder.FormatChannelMention(channel.Name, channelId)} is not a voice channel."))
+                    "Not a voice channel",
+                    $"{PlayerMessageBuilder.FormatChannelMention(channel.Name, channelId)} isn’t a voice channel."))
                 .ConfigureAwait(false);
             return;
         }
@@ -420,13 +501,27 @@ public sealed partial class MusicPlayer
             return;
         }
 
+        if (!IsAbsoluteHttpUrl(query))
+        {
+            await HandleFreeTextPlayAsync(
+                    ctx,
+                    query,
+                    target,
+                    PlaybackMode.Voice,
+                    preparing.MessageId,
+                    preparingCreateTime,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
         var (track, resolveError) = await TryResolveAsync(ctx, query, cancellationToken).ConfigureAwait(false);
         if (track is null)
         {
             await UpdateOrReplyAsync(
                     ctx,
                     preparing.MessageId,
-                    resolveError ?? PlayerMessageBuilder.Error("Not found", "No track matched that query."),
+                    resolveError ?? PlayerMessageBuilder.TrackNotFound(),
                     preparingCreateTime)
                 .ConfigureAwait(false);
             return;
@@ -463,9 +558,7 @@ public sealed partial class MusicPlayer
                 await UpdateOrReplyAsync(
                         ctx,
                         preparing.MessageId,
-                        PlayerMessageBuilder.Error(
-                            "Mode conflict",
-                            "This clan is streaming. Use !play #voice <url | query> to queue voice, or !stop before switching."),
+                        PlayerMessageBuilder.ModeConflict(wantVoice: true),
                         preparingCreateTime)
                     .ConfigureAwait(false);
                 return;
@@ -622,13 +715,13 @@ public sealed partial class MusicPlayer
         if (!await _access.CanSkipAsync(client, clanId, userId, requesterId, cancellationToken).ConfigureAwait(false))
         {
             return ControlOutcome.Denied(PlayerMessageBuilder.NotAllowed(
-                "Only the track requester, DJ role, or clan owner can skip. (Vote-skip coming later.)"));
+                "Only the person who queued this track, a DJ, or the clan owner can skip."));
         }
 
         var skipped = await SkipInternalAsync(clanId, cancellationToken).ConfigureAwait(false);
         return ControlOutcome.Ok(skipped
-            ? PlayerMessageBuilder.Ok("Skipped", "Moved to the next track (if any).")
-            : PlayerMessageBuilder.Status("Nothing playing", "Queue is empty."));
+            ? PlayerMessageBuilder.Ok("Skipped", "On to the next track.")
+            : PlayerMessageBuilder.NothingPlaying());
     }
 
     public async Task<ControlOutcome> TryStopAsync(
@@ -640,11 +733,11 @@ public sealed partial class MusicPlayer
         if (!await _access.CanStopAsync(client, clanId, userId, cancellationToken).ConfigureAwait(false))
         {
             return ControlOutcome.Denied(PlayerMessageBuilder.NotAllowed(
-                "Only DJ role or clan owner can stop playback."));
+                "Only a DJ or the clan owner can stop playback."));
         }
 
         await StopInternalAsync(clanId, cancellationToken).ConfigureAwait(false);
-        return ControlOutcome.Ok(PlayerMessageBuilder.Ok("Stopped", "Playback stopped and queue cleared."));
+        return ControlOutcome.Ok(PlayerMessageBuilder.Ok("Stopped", "Playback stopped and the queue is clear."));
     }
 
     public async Task<ControlOutcome> TrySetPausedAsync(
@@ -658,27 +751,27 @@ public sealed partial class MusicPlayer
         if (state.Mode != PlaybackMode.Streaming)
         {
             return ControlOutcome.Denied(PlayerMessageBuilder.Error(
-                "Pause is streaming-only",
-                    "Use !play #stream. Voice pause is not supported yet."));
+                "Pause is for streams",
+                    "Pause/resume works on stream playback. Voice pause isn’t available yet."));
         }
 
         if (!state.IsPlaying || state.Target is null)
         {
-            return ControlOutcome.Denied(PlayerMessageBuilder.Status("Nothing playing", "Queue is empty."));
+            return ControlOutcome.Denied(PlayerMessageBuilder.NothingPlaying());
         }
 
         var requesterId = state.Queue.CurrentItem?.Track.RequestedByUserId;
         if (!await _access.CanSkipAsync(client, clanId, userId, requesterId, cancellationToken).ConfigureAwait(false))
         {
             return ControlOutcome.Denied(PlayerMessageBuilder.NotAllowed(
-                "Only the track requester, DJ role, or clan owner can pause/resume."));
+                "Only the person who queued this track, a DJ, or the clan owner can pause/resume."));
         }
 
         if (_streamingSink.IsPaused(state.Target.ChannelId) == paused)
         {
             return ControlOutcome.Ok(PlayerMessageBuilder.Status(
                 paused ? "Already paused" : "Already playing",
-                paused ? "Track is already paused." : "Track is already playing."));
+                paused ? "It’s already on pause." : "It’s already playing."));
         }
 
         try
@@ -689,13 +782,13 @@ public sealed partial class MusicPlayer
         {
             _logger.LogWarning(ex, "STN pause failed clan={ClanId} paused={Paused}", clanId, paused);
             return ControlOutcome.Denied(PlayerMessageBuilder.Error(
-                "Pause failed",
-                "STN could not change pause state. Try again."));
+                "Couldn’t pause/resume",
+                "Something went wrong changing playback — try again."));
         }
 
         return ControlOutcome.Ok(PlayerMessageBuilder.Ok(
             paused ? "Paused" : "Resumed",
-            paused ? "Streaming track paused. Use !resume to continue." : "Streaming track resumed."));
+            paused ? "Stream paused. Use !resume when you’re ready." : "Stream is playing again."));
     }
 
     public readonly record struct ControlOutcome(bool Allowed, Mezon.Net.Client.MessageContent Content)
@@ -778,7 +871,7 @@ public sealed partial class MusicPlayer
         var state = GetState(clanId);
         if (state.Queue.Current is null)
         {
-            await ctx.ReplyAsync(PlayerMessageBuilder.Status("Nothing playing", "Queue is empty."))
+            await ctx.ReplyAsync(PlayerMessageBuilder.NothingPlaying())
                 .ConfigureAwait(false);
             return;
         }
@@ -820,7 +913,7 @@ public sealed partial class MusicPlayer
         {
             await ctx.ReplyAsync(PlayerMessageBuilder.Error(
                     "Missing role",
-                    "Usage: !setdj @role | roleId | none"))
+                    $"Try {_options.CommandPrefix}setdj @role  ·  role id  ·  or none"))
                 .ConfigureAwait(false);
             return;
         }
@@ -830,7 +923,9 @@ public sealed partial class MusicPlayer
             || raw.Equals("clear", StringComparison.OrdinalIgnoreCase))
         {
             await _access.SetDjRoleIdAsync(clanId, null, cancellationToken).ConfigureAwait(false);
-            await ctx.ReplyAsync(PlayerMessageBuilder.Ok("DJ role cleared", "Force skip/stop now require clan owner."))
+            await ctx.ReplyAsync(PlayerMessageBuilder.Ok(
+                    "DJ role cleared",
+                    "Force skip/stop now need the clan owner."))
                 .ConfigureAwait(false);
             return;
         }
@@ -880,7 +975,7 @@ public sealed partial class MusicPlayer
         {
             await ctx.ReplyAsync(PlayerMessageBuilder.Error(
                     "Role not found",
-                    "Pass a role mention, numeric role id, or exact role name. Use none to clear."))
+                    "Pass a role mention, numeric id, or exact name. Use none to clear."))
                 .ConfigureAwait(false);
             return;
         }
@@ -909,7 +1004,9 @@ public sealed partial class MusicPlayer
         await _access.SetDjRoleIdAsync(clanId, roleId, cancellationToken).ConfigureAwait(false);
         _ = _access.WarmDjRoleMembershipAsync(ctx.Client, clanId, roleId.Value, CancellationToken.None);
         var label = string.IsNullOrWhiteSpace(roleTitle) ? $"{roleId}" : $"{roleTitle} ({roleId})";
-        await ctx.ReplyAsync(PlayerMessageBuilder.Ok("DJ role set", $"Members with {label} can force-skip and stop."))
+        await ctx.ReplyAsync(PlayerMessageBuilder.Ok(
+                "DJ role set",
+                $"Members with {label} can force-skip and stop."))
             .ConfigureAwait(false);
     }
 
@@ -917,7 +1014,7 @@ public sealed partial class MusicPlayer
     {
         var clanId = ctx.Clan?.Id ?? ctx.Channel.ClanId;
         var djRoleId = await _access.GetDjRoleIdAsync(clanId, cancellationToken).ConfigureAwait(false);
-        var djValue = djRoleId is long id ? $"{id}" : "none (owner only for force skip/stop)";
+        var djValue = djRoleId is long id ? $"{id}" : "none (owner handles force skip/stop)";
         var loop = await _playerStore.GetLoopModeAsync(clanId, cancellationToken).ConfigureAwait(false);
         var channels = await _commandChannels.ListAsync(clanId, cancellationToken).ConfigureAwait(false);
         var channelText = channels.Count == 0
@@ -926,9 +1023,11 @@ public sealed partial class MusicPlayer
                 .ConfigureAwait(false));
         var defaultPl = await _playlists.TryGetDefaultAsync(clanId, cancellationToken).ConfigureAwait(false);
         var defaultText = defaultPl is null ? "none" : defaultPl.Name;
-        await ctx.ReplyAsync(PlayerMessageBuilder.Status(
-                "Clan settings",
-                $"DJ role: {djValue}\nLoop: {loop.ToString().ToLowerInvariant()}\nDefault playlist: {defaultText}\nPlay channels: {channelText}"))
+        await ctx.ReplyAsync(PlayerMessageBuilder.ClanSettings(
+                djValue,
+                loop.ToString().ToLowerInvariant(),
+                defaultText,
+                channelText))
             .ConfigureAwait(false);
     }
 
@@ -1042,7 +1141,7 @@ public sealed partial class MusicPlayer
                 cancellationToken).ConfigureAwait(false);
             if (track is null)
             {
-                return (null, PlayerMessageBuilder.Error("Not found", "No track matched that query."));
+                return (null, PlayerMessageBuilder.TrackNotFound());
             }
 
             return (track.WithRequester(ctx.Author.Id, ctx.Author.Username ?? ctx.Author.Id.ToString()), null);
@@ -1070,11 +1169,7 @@ public sealed partial class MusicPlayer
             await UpdateOrReplyAsync(
                     ctx,
                     preparingMessageId,
-                    PlayerMessageBuilder.Error(
-                        "Mode conflict",
-                        mode == PlaybackMode.Voice
-                            ? "This clan is streaming. Use !play #voice … or !stop before switching."
-                            : "This clan is playing voice. Use !play #stream … or !stop before switching."),
+                    PlayerMessageBuilder.ModeConflict(wantVoice: mode == PlaybackMode.Voice),
                     preparingCreateTime)
                 .ConfigureAwait(false);
             return;
@@ -1138,7 +1233,7 @@ public sealed partial class MusicPlayer
             await UpdateOrReplyAsync(
                     ctx,
                     preparingMessageId,
-                    PlayerMessageBuilder.Error("Not found", "No tracks found in that SoundCloud set."),
+                    PlayerMessageBuilder.TrackNotFound("That SoundCloud set looked empty or had nothing I can play."),
                     preparingCreateTime)
                 .ConfigureAwait(false);
             return;
@@ -1190,7 +1285,7 @@ public sealed partial class MusicPlayer
             await UpdateOrReplyAsync(
                     ctx,
                     preparingMessageId,
-                    PlayerMessageBuilder.Error("Not found", "No playable tracks after size filters."),
+                    PlayerMessageBuilder.TrackNotFound("Every track in that set was too large or blocked."),
                     preparingCreateTime)
                 .ConfigureAwait(false);
             return;
@@ -1207,11 +1302,7 @@ public sealed partial class MusicPlayer
         await UpdateOrReplyAsync(
                 ctx,
                 preparingMessageId,
-                PlayerMessageBuilder.Ok(
-                    interruptDefault ? "Playing next" : "SoundCloud set queued",
-                    interruptDefault
-                        ? $"Added {added} track(s) - interrupted default playlist. Cap {_options.MaxQueuePerClan}."
-                        : $"Added {added} track(s). Cap {_options.MaxQueuePerClan}."),
+                PlayerMessageBuilder.SoundCloudSetQueued(added, _options.MaxQueuePerClan, interruptDefault),
                 preparingCreateTime)
             .ConfigureAwait(false);
 
@@ -1437,23 +1528,49 @@ public sealed partial class MusicPlayer
                 }
                 catch (Exception ex)
                 {
-                    state.LastDestroyReason = PlayerDestroyReason.StnFailed;
+                    // Media prep / single-track failures must NOT call StopAsync — that tears down
+                    // the STN publisher WS (channel_closed) and kicks every listener in the room.
+                    // Soft-end the track and continue the queue.
+                    var mediaFailure = IsMediaPrepFailure(ex);
+                    state.LastDestroyReason = mediaFailure
+                        ? PlayerDestroyReason.TrackFailed
+                        : PlayerDestroyReason.StnFailed;
                     _logger.LogError(ex, "Playback failed for {Title} channel={ChannelId}", track.Title, target.ChannelId);
                     await NotifyPlaybackFailureAsync(state, track, ex).ConfigureAwait(false);
-                    try
-                    {
-                        var sink = mode == PlaybackMode.Voice ? (IPlaybackSink)_voiceSink : _streamingSink;
-                        await sink.StopAsync(target, CancellationToken.None).ConfigureAwait(false);
-                    }
-                    catch (Exception stopEx)
-                    {
-                        _logger.LogDebug(stopEx, "Stop after failure ignored channel={ChannelId}", target.ChannelId);
-                    }
 
-                    if (mode == PlaybackMode.Streaming && IsStnInfrastructureFailure(ex))
+                    if (mediaFailure)
                     {
-                        state.Queue.Clear(clearCurrent: true);
-                        break;
+                        try
+                        {
+                            if (mode == PlaybackMode.Streaming)
+                            {
+                                await _streamingSink.EndTrackAsync(target, CancellationToken.None)
+                                    .ConfigureAwait(false);
+                            }
+                            // Voice: never published if prep failed (prep runs before Stop/publish).
+                        }
+                        catch (Exception endEx)
+                        {
+                            _logger.LogDebug(endEx, "Soft end after media failure ignored channel={ChannelId}", target.ChannelId);
+                        }
+                    }
+                    else
+                    {
+                        try
+                        {
+                            var sink = mode == PlaybackMode.Voice ? (IPlaybackSink)_voiceSink : _streamingSink;
+                            await sink.StopAsync(target, CancellationToken.None).ConfigureAwait(false);
+                        }
+                        catch (Exception stopEx)
+                        {
+                            _logger.LogDebug(stopEx, "Stop after failure ignored channel={ChannelId}", target.ChannelId);
+                        }
+
+                        if (mode == PlaybackMode.Streaming && IsStnInfrastructureFailure(ex))
+                        {
+                            state.Queue.Clear(clearCurrent: true);
+                            break;
+                        }
                     }
                 }
                 finally
@@ -1466,6 +1583,7 @@ public sealed partial class MusicPlayer
                         PlayerDestroyReason.Skip => PlayEndReason.Skip,
                         PlayerDestroyReason.UserStop => PlayEndReason.Stop,
                         PlayerDestroyReason.StnFailed => PlayEndReason.Error,
+                        PlayerDestroyReason.TrackFailed => PlayEndReason.Error,
                         _ => PlayEndReason.Completed,
                     };
                     if (historyId is long hid)
@@ -2061,13 +2179,36 @@ public sealed partial class MusicPlayer
             var channel = await state.NotifyClient.GetChannelAsync(channelId).ConfigureAwait(false);
             var content = ex is AudioTooLargeException
                 ? PlayerMessageBuilder.CopyrightBlocked()
-                : PlayerMessageBuilder.FromStnFailure(ex) ?? PlayerMessageBuilder.Awkward();
+                : PlayerMessageBuilder.FromMediaFailure(ex)
+                    ?? PlayerMessageBuilder.FromStnFailure(ex)
+                    ?? PlayerMessageBuilder.Awkward();
             await channel.SendAsync(content).ConfigureAwait(false);
         }
         catch (Exception notifyEx)
         {
             _logger.LogWarning(notifyEx, "Failed to notify playback error for {Title}", track.Title);
         }
+    }
+
+    private static bool IsMediaPrepFailure(Exception ex)
+    {
+        for (var cur = ex; cur is not null; cur = cur.InnerException)
+        {
+            var msg = cur.Message ?? string.Empty;
+            if (msg.Contains("CDN upload failed", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("yt-dlp", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("download returned no file", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("HTTP Error 403", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("HTTP Error 404", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("requires .ogg/.opus", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("Playable CDN", StringComparison.OrdinalIgnoreCase)
+                || cur is AudioTooLargeException)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool IsStnInfrastructureFailure(Exception ex)

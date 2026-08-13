@@ -20,8 +20,8 @@ public sealed partial class MusicPlayer
         }
 
         await ctx.ReplyAsync(PlayerMessageBuilder.Error(
-                "Channel not allowed",
-                "Music enqueue is restricted to configured channels. Ask the clan owner (!musicchannel)."))
+                "Wrong channel for music",
+                "Music commands only work in allowed channels here. Ask the clan owner (!musicchannel)."))
             .ConfigureAwait(false);
         return false;
     }
