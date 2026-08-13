@@ -62,17 +62,8 @@ public sealed class VoiceChannelSink : IPlaybackSink
         var client = _holder.GetClient();
         var total = Stopwatch.StartNew();
 
-        try
-        {
-            var stop = Stopwatch.StartNew();
-            await StopAsync(target, cancellationToken).ConfigureAwait(false);
-            _logger.LogDebug("Voice pre-play stop completed room={Room} elapsedMs={ElapsedMs}", roomName, stop.ElapsedMilliseconds);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Pre-play voice stop failed; continuing");
-        }
-
+        // Prepare media BEFORE tearing down the previous publisher. If yt-dlp/CDN fails,
+        // StopRoom would kick everyone in the voice channel for no reason.
         var process = Stopwatch.StartNew();
         var playable = await _prep.EnsurePreparedAsync(client, track, cancellationToken).ConfigureAwait(false);
         _logger.LogDebug(
@@ -85,6 +76,17 @@ public sealed class VoiceChannelSink : IPlaybackSink
         {
             throw new InvalidOperationException(
                 $"Voice play requires .ogg/.opus URL path, got: {playable.MediaUrl}");
+        }
+
+        try
+        {
+            var stop = Stopwatch.StartNew();
+            await StopAsync(target, cancellationToken).ConfigureAwait(false);
+            _logger.LogDebug("Voice pre-play stop completed room={Room} elapsedMs={ElapsedMs}", roomName, stop.ElapsedMilliseconds);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Pre-play voice stop failed; continuing");
         }
 
         var auth = Stopwatch.StartNew();

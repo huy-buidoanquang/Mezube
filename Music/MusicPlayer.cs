@@ -1528,23 +1528,49 @@ public sealed partial class MusicPlayer
                 }
                 catch (Exception ex)
                 {
-                    state.LastDestroyReason = PlayerDestroyReason.StnFailed;
+                    // Media prep / single-track failures must NOT call StopAsync — that tears down
+                    // the STN publisher WS (channel_closed) and kicks every listener in the room.
+                    // Soft-end the track and continue the queue.
+                    var mediaFailure = IsMediaPrepFailure(ex);
+                    state.LastDestroyReason = mediaFailure
+                        ? PlayerDestroyReason.TrackFailed
+                        : PlayerDestroyReason.StnFailed;
                     _logger.LogError(ex, "Playback failed for {Title} channel={ChannelId}", track.Title, target.ChannelId);
                     await NotifyPlaybackFailureAsync(state, track, ex).ConfigureAwait(false);
-                    try
-                    {
-                        var sink = mode == PlaybackMode.Voice ? (IPlaybackSink)_voiceSink : _streamingSink;
-                        await sink.StopAsync(target, CancellationToken.None).ConfigureAwait(false);
-                    }
-                    catch (Exception stopEx)
-                    {
-                        _logger.LogDebug(stopEx, "Stop after failure ignored channel={ChannelId}", target.ChannelId);
-                    }
 
-                    if (mode == PlaybackMode.Streaming && IsStnInfrastructureFailure(ex))
+                    if (mediaFailure)
                     {
-                        state.Queue.Clear(clearCurrent: true);
-                        break;
+                        try
+                        {
+                            if (mode == PlaybackMode.Streaming)
+                            {
+                                await _streamingSink.EndTrackAsync(target, CancellationToken.None)
+                                    .ConfigureAwait(false);
+                            }
+                            // Voice: never published if prep failed (prep runs before Stop/publish).
+                        }
+                        catch (Exception endEx)
+                        {
+                            _logger.LogDebug(endEx, "Soft end after media failure ignored channel={ChannelId}", target.ChannelId);
+                        }
+                    }
+                    else
+                    {
+                        try
+                        {
+                            var sink = mode == PlaybackMode.Voice ? (IPlaybackSink)_voiceSink : _streamingSink;
+                            await sink.StopAsync(target, CancellationToken.None).ConfigureAwait(false);
+                        }
+                        catch (Exception stopEx)
+                        {
+                            _logger.LogDebug(stopEx, "Stop after failure ignored channel={ChannelId}", target.ChannelId);
+                        }
+
+                        if (mode == PlaybackMode.Streaming && IsStnInfrastructureFailure(ex))
+                        {
+                            state.Queue.Clear(clearCurrent: true);
+                            break;
+                        }
                     }
                 }
                 finally
@@ -1557,6 +1583,7 @@ public sealed partial class MusicPlayer
                         PlayerDestroyReason.Skip => PlayEndReason.Skip,
                         PlayerDestroyReason.UserStop => PlayEndReason.Stop,
                         PlayerDestroyReason.StnFailed => PlayEndReason.Error,
+                        PlayerDestroyReason.TrackFailed => PlayEndReason.Error,
                         _ => PlayEndReason.Completed,
                     };
                     if (historyId is long hid)
@@ -2152,13 +2179,36 @@ public sealed partial class MusicPlayer
             var channel = await state.NotifyClient.GetChannelAsync(channelId).ConfigureAwait(false);
             var content = ex is AudioTooLargeException
                 ? PlayerMessageBuilder.CopyrightBlocked()
-                : PlayerMessageBuilder.FromStnFailure(ex) ?? PlayerMessageBuilder.Awkward();
+                : PlayerMessageBuilder.FromMediaFailure(ex)
+                    ?? PlayerMessageBuilder.FromStnFailure(ex)
+                    ?? PlayerMessageBuilder.Awkward();
             await channel.SendAsync(content).ConfigureAwait(false);
         }
         catch (Exception notifyEx)
         {
             _logger.LogWarning(notifyEx, "Failed to notify playback error for {Title}", track.Title);
         }
+    }
+
+    private static bool IsMediaPrepFailure(Exception ex)
+    {
+        for (var cur = ex; cur is not null; cur = cur.InnerException)
+        {
+            var msg = cur.Message ?? string.Empty;
+            if (msg.Contains("CDN upload failed", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("yt-dlp", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("download returned no file", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("HTTP Error 403", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("HTTP Error 404", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("requires .ogg/.opus", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("Playable CDN", StringComparison.OrdinalIgnoreCase)
+                || cur is AudioTooLargeException)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool IsStnInfrastructureFailure(Exception ex)

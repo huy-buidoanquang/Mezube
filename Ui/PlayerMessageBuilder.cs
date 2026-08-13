@@ -103,6 +103,46 @@ public static class PlayerMessageBuilder
             => haystack.Contains(needle, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>yt-dlp / CDN / local media prep failures (not STN room teardown).</summary>
+    public static MessageContent? FromMediaFailure(Exception ex)
+    {
+        for (var cur = ex; cur is not null; cur = cur.InnerException)
+        {
+            var msg = cur.Message ?? string.Empty;
+            if (Contains(msg, "403") || Contains(msg, "Forbidden"))
+            {
+                return Error(
+                    "Couldn’t fetch that track",
+                    [
+                        new("Track", "Source blocked the download (often temporary)."),
+                        new("Next", "I’ll skip ahead if there’s more in the queue — try another link later."),
+                    ]);
+            }
+
+            if (Contains(msg, "yt-dlp") || Contains(msg, "download returned no file") || Contains(msg, "CDN upload failed"))
+            {
+                return Error(
+                    "Couldn’t prepare that track",
+                    [
+                        new("What happened", "Download or upload failed for this song."),
+                        new("Next", "Skipping it so the room stays open — try another track."),
+                    ]);
+            }
+
+            if (Contains(msg, "requires .ogg") || Contains(msg, ".opus"))
+            {
+                return Error(
+                    "Unsupported audio format",
+                    "That file isn’t playable as Opus — try a different link.");
+            }
+        }
+
+        return null;
+
+        static bool Contains(string haystack, string needle)
+            => haystack.Contains(needle, StringComparison.OrdinalIgnoreCase);
+    }
+
     public static MessageContent NowPlaying(
         TrackInfoEntity track,
         int queueCount,
