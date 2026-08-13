@@ -98,6 +98,34 @@ public sealed partial class MusicPlayer
             return;
         }
 
+        var (dest, error) = await TryResolvePlayDestinationAsync(ctx, hashtagChannelId, cancellationToken)
+            .ConfigureAwait(false);
+        if (error is not null)
+        {
+            await ctx.ReplyAsync(error).ConfigureAwait(false);
+            return;
+        }
+
+        var resolved = dest!.Value;
+        if (resolved.Mode == PlaybackMode.Streaming)
+        {
+            await PlayStreamingAsync(ctx, query, resolved.Target.ChannelId, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await PlayVoiceAsync(ctx, query, resolved.Target.ChannelId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Same destination rules as <see cref="PlayAutoAsync"/>: hashtag → current channel → default stream → voice presence.
+    /// </summary>
+    private async Task<(ResolvedPlayDestination? Dest, Mezon.Net.Client.MessageContent? Error)> TryResolvePlayDestinationAsync(
+        ICommandContext ctx,
+        long? hashtagChannelId,
+        CancellationToken cancellationToken)
+    {
+        var clanId = ctx.Clan?.Id ?? ctx.Channel.ClanId;
+
         if (hashtagChannelId is long id)
         {
             Mezon.Net.Sdk.Entities.Channel channel;
@@ -107,65 +135,94 @@ public sealed partial class MusicPlayer
             }
             catch (Exception)
             {
-                await ctx.ReplyAsync(PlayerMessageBuilder.Awkward()).ConfigureAwait(false);
-                return;
+                return (null, PlayerMessageBuilder.Awkward());
             }
 
             if (channel.Type == (int)ChannelType.Streaming)
             {
-                await PlayStreamingAsync(ctx, query, id, cancellationToken).ConfigureAwait(false);
-                return;
+                return (ToStreaming(clanId, id, channel.Name), null);
             }
 
             if (channel.Type is (int)ChannelType.MezonVoice or (int)ChannelType.GmeetVoice)
             {
-                await PlayVoiceAsync(ctx, query, id, cancellationToken).ConfigureAwait(false);
-                return;
+                return (ToVoice(clanId, id, channel.Name), null);
             }
 
-            await ctx.ReplyAsync(PlayerMessageBuilder.Error(
-                    "Pick a voice or stream channel",
-                    "Mention a #voice or #stream channel hashtag."))
-                .ConfigureAwait(false);
-            return;
+            return (null, PlayerMessageBuilder.Error(
+                "Pick a voice or stream channel",
+                "Mention a #voice or #stream channel hashtag."));
         }
 
-        // No hashtag: if the command was sent in a stream/voice channel, play there.
         if (ctx.Channel.Type == (int)ChannelType.Streaming)
         {
-            await PlayStreamingAsync(ctx, query, ctx.Channel.Id, cancellationToken).ConfigureAwait(false);
-            return;
+            return (ToStreaming(clanId, ctx.Channel.Id, ctx.Channel.Name), null);
         }
 
         if (ctx.Channel.Type is (int)ChannelType.MezonVoice or (int)ChannelType.GmeetVoice)
         {
-            await PlayVoiceAsync(ctx, query, ctx.Channel.Id, cancellationToken).ConfigureAwait(false);
-            return;
+            return (ToVoice(clanId, ctx.Channel.Id, ctx.Channel.Name), null);
         }
 
-        var clanId = ctx.Clan?.Id ?? ctx.Channel.ClanId;
-
-        // Fallback: default_stream_channel_id
         var defaultStreamChannelId = await _binds.TryGetDefaultStreamChannelAsync(clanId, cancellationToken)
             .ConfigureAwait(false);
         if (defaultStreamChannelId is long ds)
         {
-            await PlayStreamingAsync(ctx, query, ds, cancellationToken).ConfigureAwait(false);
-            return;
+            Mezon.Net.Sdk.Entities.Channel channel;
+            try
+            {
+                channel = await ctx.Client.GetChannelAsync(ds, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                return (null, PlayerMessageBuilder.Awkward());
+            }
+
+            if (channel.Type != (int)ChannelType.Streaming)
+            {
+                return (null, PlayerMessageBuilder.Error(
+                    "Not a stream channel",
+                    $"{PlayerMessageBuilder.FormatChannelMention(channel.Name, ds)} isn’t a streaming channel."));
+            }
+
+            return (ToStreaming(clanId, ds, channel.Name), null);
         }
 
-        // Fallback: user's voice presence
         if (_binds.TryGetUserVoiceChannel(clanId, ctx.Author.Id, out var voiceId))
         {
-            await PlayVoiceAsync(ctx, query, voiceId, cancellationToken).ConfigureAwait(false);
-            return;
+            Mezon.Net.Sdk.Entities.Channel channel;
+            try
+            {
+                channel = await ctx.Client.GetChannelAsync(voiceId, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                return (null, PlayerMessageBuilder.Awkward());
+            }
+
+            if (channel.Type is not ((int)ChannelType.MezonVoice or (int)ChannelType.GmeetVoice))
+            {
+                return (null, PlayerMessageBuilder.Error(
+                    "Not a voice channel",
+                    $"{PlayerMessageBuilder.FormatChannelMention(channel.Name, voiceId)} isn’t a voice channel."));
+            }
+
+            return (ToVoice(clanId, voiceId, channel.Name), null);
         }
 
-        await ctx.ReplyAsync(PlayerMessageBuilder.Error(
-                "Where should I play?",
-                "Join a voice channel first, or tag a #voice / #stream channel."))
-            .ConfigureAwait(false);
+        return (null, PlayerMessageBuilder.Error(
+            "Where should I play?",
+            "Join a voice channel first, or tag a #voice / #stream channel."));
+
+        static ResolvedPlayDestination ToStreaming(long clan, long channelId, string? label)
+            => new(new PlaybackTarget(clan, channelId, ChannelLabel: label), PlaybackMode.Streaming);
+
+        static ResolvedPlayDestination ToVoice(long clan, long channelId, string? label)
+            => new(
+                new PlaybackTarget(clan, channelId, RoomName: channelId.ToString(), ChannelLabel: label),
+                PlaybackMode.Voice);
     }
+
+    private readonly record struct ResolvedPlayDestination(PlaybackTarget Target, PlaybackMode Mode);
 
     public async Task PlayStreamingAsync(
         ICommandContext ctx,

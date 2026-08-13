@@ -466,16 +466,17 @@ public sealed partial class MusicPlayer
                         return;
                     }
 
-                    if (ctx.Args.Count < 2)
+                    var hashtagChannelId = ChannelTargetParser.TryGetHashtagChannelId(ctx);
+                    var name = ChannelTargetParser.BuildQuery(ctx.Args.Skip(1));
+                    if (string.IsNullOrWhiteSpace(name))
                     {
                         await ctx.ReplyAsync(PlayerMessageBuilder.Error(
                                 "Missing name",
-                                $"Try {_options.CommandPrefix}playlist play <name>"))
+                                $"Try {_options.CommandPrefix}playlist play [#channel] <name>"))
                             .ConfigureAwait(false);
                         return;
                     }
 
-                    var name = string.Join(' ', ctx.Args.Skip(1)).Trim();
                     var pl = await _playlists.TryGetByNameAsync(clanId, name, cancellationToken).ConfigureAwait(false);
                     if (pl is null)
                     {
@@ -499,7 +500,27 @@ public sealed partial class MusicPlayer
                         return;
                     }
 
+                    var (dest, destError) = await TryResolvePlayDestinationAsync(ctx, hashtagChannelId, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (destError is not null)
+                    {
+                        await ctx.ReplyAsync(destError).ConfigureAwait(false);
+                        return;
+                    }
+
+                    var resolved = dest!.Value;
+                    var target = resolved.Target;
+                    var mode = resolved.Mode;
+                    var modeKey = mode == PlaybackMode.Voice ? "voice" : "streaming";
+
                     var state = GetState(clanId);
+                    if (state.IsPlaying && state.Mode != mode)
+                    {
+                        await ctx.ReplyAsync(PlayerMessageBuilder.ModeConflict(wantVoice: mode == PlaybackMode.Voice))
+                            .ConfigureAwait(false);
+                        return;
+                    }
+
                     var used = state.Queue.TotalCount;
                     var slots = Math.Max(0, _options.MaxQueuePerClan - used);
                     if (slots == 0)
@@ -509,23 +530,18 @@ public sealed partial class MusicPlayer
                     }
 
                     var take = items.Take(slots).ToList();
-                    // Require a voice/stream target via presence or default — enqueue as voice using presence.
-                    if (!_binds.TryGetUserVoiceChannel(clanId, ctx.Author.Id, out var voiceId))
+                    var startingFresh = !state.IsPlaying;
+                    if (startingFresh && !await TryAcquirePlaySlotAsync().ConfigureAwait(false))
                     {
-                        await ctx.ReplyAsync(PlayerMessageBuilder.Error(
-                                "Join a voice channel first",
-                                "Hop into voice (or use !play for a single track), then try again."))
-                            .ConfigureAwait(false);
+                        await ctx.ReplyAsync(PlayerMessageBuilder.PlaybackSlotsFull()).ConfigureAwait(false);
                         return;
                     }
 
-                    var channel = await ctx.Client.GetChannelAsync(voiceId, cancellationToken).ConfigureAwait(false);
-                    var target = new Playback.PlaybackTarget(
-                        clanId,
-                        voiceId,
-                        RoomName: voiceId.ToString(),
-                        ChannelLabel: channel.Name);
+                    var interruptDefault = state.IsPlaying
+                        && mode == PlaybackMode.Streaming
+                        && state.Queue.CurrentItem?.IsFromDefault == true;
 
+                    var added = 0;
                     foreach (var item in take)
                     {
                         if (item.Track is null)
@@ -535,41 +551,77 @@ public sealed partial class MusicPlayer
 
                         var info = item.Track.ToTrackInfo(ctx.Author.Username)
                             .WithRequester(ctx.Author.Id, ctx.Author.Username);
+                        if (IsTooLarge(info) || info.IsTooLarge)
+                        {
+                            continue;
+                        }
+
                         var play = new QueuedPlay(info, target);
-                        state.Queue.Enqueue(play);
-                        await PersistEnqueueAsync(clanId, play, "voice").ConfigureAwait(false);
+                        if (interruptDefault && added == 0)
+                        {
+                            state.Queue.EnqueueFront(play);
+                        }
+                        else
+                        {
+                            state.Queue.Enqueue(play);
+                        }
+
+                        await PersistEnqueueAsync(clanId, play, modeKey).ConfigureAwait(false);
                         StartBackgroundPrep(ctx.Client, state, play);
+                        added++;
+                    }
+
+                    if (added == 0)
+                    {
+                        if (startingFresh)
+                        {
+                            ReleasePlaySlot(state);
+                        }
+
+                        await ctx.ReplyAsync(PlayerMessageBuilder.TrackNotFound(
+                                "Every track in that playlist was too large or blocked."))
+                            .ConfigureAwait(false);
+                        return;
                     }
 
                     state.PlayingDefaultPlaylist = false;
+                    state.Mode = mode;
+                    state.Target = target;
+                    state.NotifyClient = ctx.Client;
+                    state.NotifyChannelId = ctx.Channel.Id;
+                    state.ClanId = clanId;
+                    state.ControlUserId = ctx.Author.Id;
 
-                    if (!state.IsPlaying && state.Queue.Count > 0)
+                    if (interruptDefault)
                     {
-                        if (await TryAcquirePlaySlotAsync().ConfigureAwait(false))
-                        {
-                            state.CancelIdleDestroy();
-                            state.PlayingDefaultPlaylist = false;
-                            state.Mode = PlaybackMode.Voice;
-                            state.Target = target;
-                            state.NotifyClient = ctx.Client;
-                            state.NotifyChannelId = ctx.Channel.Id;
-                            state.ClanId = clanId;
-                            state.HoldsPlaySlot = true;
-                            ResetPrepToken(state);
-                            StartPump(state, clanId);
-                        }
+                        state.LastDestroyReason = PlayerDestroyReason.Skip;
+                        state.CancelTrack();
+                    }
+                    else if (startingFresh)
+                    {
+                        state.CancelIdleDestroy();
+                        state.HoldsPlaySlot = true;
+                        ResetPrepToken(state);
+                        StartPump(state, clanId);
                     }
 
                     await ctx.ReplyAsync(PlayerMessageBuilder.Ok(
-                            "Playlist queued",
+                            interruptDefault ? "Playing next" : "Playlist queued",
                             [
                                 new("Playlist", pl.Name),
-                                new("Added", $"{take.Count} track(s)"),
+                                new("Added", $"{added} track(s)"),
+                                new(
+                                    "Destination",
+                                    PlayerMessageBuilder.FormatDestination(
+                                        mode == PlaybackMode.Voice ? "voice" : "streaming",
+                                        target.ChannelLabel)),
                                 new(
                                     "Note",
-                                    take.Count < items.Count
-                                        ? $"Queue hit the {_options.MaxQueuePerClan}-track cap — the rest weren’t added."
-                                        : "You’re all set."),
+                                    interruptDefault
+                                        ? "Cut in ahead of the default playlist."
+                                        : take.Count < items.Count || added < take.Count
+                                            ? $"Queue hit the {_options.MaxQueuePerClan}-track cap — the rest weren’t added."
+                                            : "You’re all set."),
                             ]))
                         .ConfigureAwait(false);
                     return;

@@ -590,11 +590,13 @@ public static class PlayerMessageBuilder
                 isDjOrOwner
                     ? $"""
                       · {p}playlist create | add | play | list | delete
+                      · {p}playlist play [#channel] <name>
                       · {p}playlist list <name>
                       · {p}playlist default <name|none>
                       """
                     : $"""
                       · {p}playlist create | add | play | list | delete
+                      · {p}playlist play [#channel] <name>
                       · {p}playlist list <name>
                       """),
             (
