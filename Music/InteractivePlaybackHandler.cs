@@ -149,95 +149,19 @@ public sealed partial class MusicPlayer
             return;
         }
 
-        var clanId = target.ClanId;
-        var state = GetState(clanId);
-        if (state.Queue.TotalCount >= _options.MaxQueuePerClan)
-        {
-            await UpdateOrReplyAsync(
-                    ctx,
-                    preparingMessageId,
-                    PlayerMessageBuilder.QueueFull(),
-                    preparingCreateTime)
-                .ConfigureAwait(false);
-            return;
-        }
-
         var play = new QueuedPlay(track, target, preparingMessageId, preparingCreateTime);
-        var modeKey = mode == PlaybackMode.Voice ? "voice" : "streaming";
-
-        if (state.IsPlaying)
-        {
-            if (state.Mode != mode)
-            {
-                await UpdateOrReplyAsync(
-                        ctx,
-                        preparingMessageId,
-                        PlayerMessageBuilder.ModeConflict(wantVoice: mode == PlaybackMode.Voice),
-                        preparingCreateTime)
-                    .ConfigureAwait(false);
-                return;
-            }
-
-            var interruptDefault = mode == PlaybackMode.Streaming && state.Queue.CurrentItem?.IsFromDefault == true;
-            state.PlayingDefaultPlaylist = false;
-            if (interruptDefault)
-            {
-                state.Queue.EnqueueFront(play);
-                await PersistEnqueueAsync(clanId, play, modeKey).ConfigureAwait(false);
-                StartBackgroundPrep(ctx.Client, state, play);
-                state.LastDestroyReason = PlayerDestroyReason.Skip;
-                state.CancelTrack();
-                await UpdateOrReplyAsync(
-                        ctx,
-                        preparingMessageId,
-                        PlayerMessageBuilder.PlayingNext(
-                            track.Title,
-                            "Cut in ahead of the default playlist."),
-                        preparingCreateTime)
-                    .ConfigureAwait(false);
-                return;
-            }
-
-            state.Queue.Enqueue(play);
-            await PersistEnqueueAsync(clanId, play, modeKey).ConfigureAwait(false);
-            StartBackgroundPrep(ctx.Client, state, play);
-            await UpdateOrReplyAsync(
-                    ctx,
-                    preparingMessageId,
-                    PlayerMessageBuilder.Queued(track, state.Queue.Count, target.ChannelLabel),
-                    preparingCreateTime)
-                .ConfigureAwait(false);
-            return;
-        }
-
-        if (!await TryAcquirePlaySlotAsync().ConfigureAwait(false))
-        {
-            await UpdateOrReplyAsync(
-                    ctx,
-                    preparingMessageId,
-                    PlayerMessageBuilder.PlaybackSlotsFull(),
-                    preparingCreateTime)
-                .ConfigureAwait(false);
-            return;
-        }
-
-        state.CancelIdleDestroy();
-        state.PlayingDefaultPlaylist = false;
-        state.Queue.Enqueue(play);
-        await PersistEnqueueAsync(clanId, play, modeKey).ConfigureAwait(false);
-        state.Mode = mode;
-        state.Target = target;
-        state.NotifyClient = ctx.Client;
-        state.NotifyChannelId = ctx.Channel.Id;
-        state.ControlMessageId = preparingMessageId;
-        state.ControlMessageCreateTimeSeconds = preparingCreateTime;
-        state.ControlMessageHasButtons = false;
-        state.ControlUserId = ctx.Author.Id;
-        state.ClanId = clanId;
-        state.HoldsPlaySlot = true;
-        ResetPrepToken(state);
-        StartBackgroundPrep(ctx.Client, state, play);
-        StartPump(state, clanId);
+        var kind = await EnqueueOrStartAsync(
+                GetState(target.ClanId),
+                play,
+                mode,
+                ctx.Client,
+                ctx.Channel.Id,
+                ctx.Author.Id,
+                attachPreparingAsControl: true,
+                cancellationToken)
+            .ConfigureAwait(false);
+        await ReplyEnqueueAsync(ctx, kind, play, target.ChannelLabel, preparingMessageId, preparingCreateTime)
+            .ConfigureAwait(false);
     }
 
     public async Task HandleSearchPickButtonAsync(IInteractionContext ctx, MezubeButtonId.Parsed parts)
@@ -347,77 +271,35 @@ public sealed partial class MusicPlayer
             return;
         }
 
-        var clanId = target.ClanId;
-        var state = GetState(clanId);
-        if (state.Queue.TotalCount >= _options.MaxQueuePerClan)
-        {
-            await ctx.UpdateMessageAsync(PlayerMessageBuilder.QueueFull()).ConfigureAwait(false);
-            return;
-        }
-
         var play = new QueuedPlay(track, target, messageId, null);
-        var modeKey = mode == PlaybackMode.Voice ? "voice" : "streaming";
+        var kind = await EnqueueOrStartAsync(
+                GetState(target.ClanId),
+                play,
+                mode,
+                ctx.Client,
+                ctx.Channel.Id,
+                ctx.User.Id,
+                attachPreparingAsControl: true,
+                ctx.CancellationToken)
+            .ConfigureAwait(false);
 
-        if (state.IsPlaying)
+        var content = kind switch
         {
-            if (state.Mode != mode)
-            {
-                await ctx.UpdateMessageAsync(PlayerMessageBuilder.Error(
-                        "Mode changed",
-                        "Playback switched while you were picking. Run !play again."))
-                    .ConfigureAwait(false);
-                return;
-            }
-
-            var interruptDefault = mode == PlaybackMode.Streaming && state.Queue.CurrentItem?.IsFromDefault == true;
-            state.PlayingDefaultPlaylist = false;
-            if (interruptDefault)
-            {
-                // UI already flipped to Preparing — confirm outcome before Redis/CDN.
-                await ctx.UpdateMessageAsync(PlayerMessageBuilder.PlayingNext(
-                        track.Title,
-                        "Cut in ahead of the default playlist."))
-                    .ConfigureAwait(false);
-                state.Queue.EnqueueFront(play);
-                await PersistEnqueueAsync(clanId, play, modeKey).ConfigureAwait(false);
-                StartBackgroundPrep(ctx.Client, state, play);
-                state.LastDestroyReason = PlayerDestroyReason.Skip;
-                state.CancelTrack();
-                return;
-            }
-
-            await ctx.UpdateMessageAsync(PlayerMessageBuilder.Queued(track, state.Queue.Count + 1, target.ChannelLabel))
-                .ConfigureAwait(false);
-            state.Queue.Enqueue(play);
-            await PersistEnqueueAsync(clanId, play, modeKey).ConfigureAwait(false);
-            StartBackgroundPrep(ctx.Client, state, play);
-            return;
-        }
-
-        if (!await TryAcquirePlaySlotAsync().ConfigureAwait(false))
+            PlayEnqueueKind.QueueFull => PlayerMessageBuilder.QueueFull(),
+            PlayEnqueueKind.SlotsFull => PlayerMessageBuilder.PlaybackSlotsFull(),
+            PlayEnqueueKind.ModeConflict => PlayerMessageBuilder.Error(
+                "Mode changed",
+                "Playback switched while you were picking. Run !play again."),
+            PlayEnqueueKind.CutIn => PlayerMessageBuilder.PlayingNext(
+                track.Title,
+                "Cut in ahead of the default playlist."),
+            PlayEnqueueKind.Queued => PlayerMessageBuilder.Queued(track, 1, target.ChannelLabel),
+            _ => null,
+        };
+        if (content is not null)
         {
-            await ctx.UpdateMessageAsync(PlayerMessageBuilder.PlaybackSlotsFull()).ConfigureAwait(false);
-            return;
+            await ctx.UpdateMessageAsync(content).ConfigureAwait(false);
         }
-
-        // Preparing already shown by the button handler; keep it until Now Playing.
-        state.CancelIdleDestroy();
-        state.PlayingDefaultPlaylist = false;
-        state.Queue.Enqueue(play);
-        await PersistEnqueueAsync(clanId, play, modeKey).ConfigureAwait(false);
-        state.Mode = mode;
-        state.Target = target;
-        state.NotifyClient = ctx.Client;
-        state.NotifyChannelId = ctx.Channel.Id;
-        state.ControlMessageId = messageId;
-        state.ControlMessageCreateTimeSeconds = null;
-        state.ControlMessageHasButtons = false;
-        state.ControlUserId = ctx.User.Id;
-        state.ClanId = clanId;
-        state.HoldsPlaySlot = true;
-        ResetPrepToken(state);
-        StartBackgroundPrep(ctx.Client, state, play);
-        StartPump(state, clanId);
     }
 
     public async Task HandlePlaylistImportButtonAsync(IInteractionContext ctx, MezubeButtonId.Parsed parts)

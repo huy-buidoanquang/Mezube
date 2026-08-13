@@ -8,6 +8,11 @@ public interface IClanPlayerStore
 
     Task EnqueueAsync(long clanId, QueuedTrackPayload item, CancellationToken cancellationToken = default);
 
+    Task EnqueueFrontAsync(long clanId, QueuedTrackPayload item, CancellationToken cancellationToken = default);
+
+    /// <summary>LPOP pending into current_json when current is empty (pending-only queue).</summary>
+    Task<QueuedTrackPayload?> EnsureCurrentAsync(long clanId, CancellationToken cancellationToken = default);
+
     Task<long> QueueLengthAsync(long clanId, CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<QueuedTrackPayload>> SnapshotQueueAsync(long clanId, CancellationToken cancellationToken = default);

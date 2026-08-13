@@ -188,22 +188,41 @@ public sealed class PostgresPlaylistRepository : IPlaylistRepository
         CancellationToken cancellationToken = default)
     {
         await using var connection = await _db.DataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText =
-            """
-            INSERT INTO playlist_items (playlist_id, position, track_id, added_by)
-            VALUES (
-                @playlist_id,
-                COALESCE((SELECT MAX(position) + 1 FROM playlist_items WHERE playlist_id = @playlist_id), 0),
-                @track_id,
-                @added_by
-            );
-            UPDATE playlists SET updated_at = now() WHERE id = @playlist_id;
-            """;
-        cmd.Parameters.AddWithValue("playlist_id", playlistId);
-        cmd.Parameters.AddWithValue("track_id", trackId);
-        cmd.Parameters.AddWithValue("added_by", (object?)addedBy ?? DBNull.Value);
-        await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await using var tx = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using (var lockCmd = connection.CreateCommand())
+            {
+                lockCmd.Transaction = tx;
+                lockCmd.CommandText = "SELECT pg_advisory_xact_lock(@playlist_id);";
+                lockCmd.Parameters.AddWithValue("playlist_id", playlistId);
+                await lockCmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using var cmd = connection.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText =
+                """
+                INSERT INTO playlist_items (playlist_id, position, track_id, added_by)
+                VALUES (
+                    @playlist_id,
+                    COALESCE((SELECT MAX(position) + 1 FROM playlist_items WHERE playlist_id = @playlist_id), 0),
+                    @track_id,
+                    @added_by
+                );
+                UPDATE playlists SET updated_at = now() WHERE id = @playlist_id;
+                """;
+            cmd.Parameters.AddWithValue("playlist_id", playlistId);
+            cmd.Parameters.AddWithValue("track_id", trackId);
+            cmd.Parameters.AddWithValue("added_by", (object?)addedBy ?? DBNull.Value);
+            await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            await tx.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            await tx.RollbackAsync(cancellationToken).ConfigureAwait(false);
+            throw;
+        }
     }
 
     public async Task<IReadOnlyList<PlaylistItemEntity>> ListItemsAsync(

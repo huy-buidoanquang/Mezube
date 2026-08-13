@@ -15,7 +15,7 @@ public sealed class TrackPrepService
 {
     private readonly PlayableMediaProcessor _processor;
     private readonly ILogger<TrackPrepService> _logger;
-    private readonly SemaphoreSlim _gate;
+    private readonly MediaConcurrencyGate _gate;
     /// <summary>
     /// Lazy wraps the prep Task so ConcurrentDictionary.GetOrAdd cannot start ProcessTrackAsync
     /// twice under race (valueFactory may run more than once; Lazy.Value runs once).
@@ -25,12 +25,12 @@ public sealed class TrackPrepService
 
     public TrackPrepService(
         PlayableMediaProcessor processor,
-        BotOptions options,
+        MediaConcurrencyGate gate,
         ILogger<TrackPrepService> logger)
     {
         _processor = processor;
         _logger = logger;
-        _gate = new SemaphoreSlim(Math.Max(1, options.MaxPrepConcurrency));
+        _gate = gate;
     }
 
     public Task<TrackInfoEntity> EnsurePreparedAsync(

@@ -170,6 +170,51 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
         await TouchTtlAsync(clanId, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task EnqueueFrontAsync(long clanId, QueuedTrackPayload item, CancellationToken cancellationToken = default)
+    {
+        var db = _redis.Db;
+        await db.ListLeftPushAsync(RedisKeyNames.Queue(clanId), RedisJson.Serialize(item)).ConfigureAwait(false);
+        await TouchTtlAsync(clanId, cancellationToken).ConfigureAwait(false);
+    }
+
+    private const string EnsureCurrentLua =
+        """
+        local player = KEYS[1]
+        local queue = KEYS[2]
+        local ttl = tonumber(ARGV[1])
+        local cur = redis.call('HGET', player, 'current_json')
+        if cur and cur ~= '' then
+          redis.call('EXPIRE', player, ttl)
+          redis.call('EXPIRE', queue, ttl)
+          return cur
+        end
+        local nxt = redis.call('LPOP', queue)
+        if nxt then
+          redis.call('HSET', player,
+            'current_json', nxt,
+            'is_playing', '1',
+            'paused', '0',
+            'position_ms', '0',
+            'position_epoch_ms', tostring(redis.call('TIME')[1] * 1000),
+            'updated_at', tostring(redis.call('TIME')[1] * 1000))
+          redis.call('EXPIRE', player, ttl)
+          redis.call('EXPIRE', queue, ttl)
+          return nxt
+        end
+        return ''
+        """;
+
+    public async Task<QueuedTrackPayload?> EnsureCurrentAsync(
+        long clanId,
+        CancellationToken cancellationToken = default)
+    {
+        var raw = (string?)await _redis.Db.ScriptEvaluateAsync(
+            EnsureCurrentLua,
+            [RedisKeyNames.Player(clanId), RedisKeyNames.Queue(clanId)],
+            [((int)RedisKeyNames.PlayerTtl.TotalSeconds).ToString()]).ConfigureAwait(false);
+        return string.IsNullOrWhiteSpace(raw) ? null : RedisJson.Deserialize<QueuedTrackPayload>(raw);
+    }
+
     public async Task<long> QueueLengthAsync(long clanId, CancellationToken cancellationToken = default)
         => await _redis.Db.ListLengthAsync(RedisKeyNames.Queue(clanId)).ConfigureAwait(false);
 
@@ -442,34 +487,58 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
         await db.SetRemoveAsync(RedisKeyNames.ActiveClans, clanId).ConfigureAwait(false);
     }
 
+    private const string RemovePendingLua =
+        """
+        local queue = KEYS[1]
+        local source = ARGV[1]
+        local ext = ARGV[2]
+        local ttl = tonumber(ARGV[3])
+        local list = redis.call('LRANGE', queue, 0, -1)
+        redis.call('DEL', queue)
+        local removed = 0
+        for i = 1, #list do
+          local ok, obj = pcall(cjson.decode, list[i])
+          if removed == 0 and ok and obj['source'] == source and obj['externalId'] == ext then
+            removed = 1
+          else
+            redis.call('RPUSH', queue, list[i])
+          end
+        end
+        if ttl then
+          redis.call('EXPIRE', queue, ttl)
+        end
+        return removed
+        """;
+
     public async Task RemovePendingMatchingAsync(
         long clanId,
         Func<QueuedTrackPayload, bool> predicate,
         CancellationToken cancellationToken = default)
     {
         var items = await SnapshotQueueAsync(clanId, cancellationToken).ConfigureAwait(false);
-        var kept = new List<RedisValue>();
-        var removed = false;
+        QueuedTrackPayload? match = null;
         foreach (var item in items)
         {
-            if (!removed && predicate(item))
+            if (predicate(item))
             {
-                removed = true;
-                continue;
+                match = item;
+                break;
             }
-
-            kept.Add(RedisJson.Serialize(item));
         }
 
-        var key = RedisKeyNames.Queue(clanId);
-        var db = _redis.Db;
-        await db.KeyDeleteAsync(key).ConfigureAwait(false);
-        if (kept.Count > 0)
+        if (match is null)
         {
-            await db.ListRightPushAsync(key, kept.ToArray()).ConfigureAwait(false);
+            return;
         }
 
-        await TouchTtlAsync(clanId, cancellationToken).ConfigureAwait(false);
+        await _redis.Db.ScriptEvaluateAsync(
+            RemovePendingLua,
+            [RedisKeyNames.Queue(clanId)],
+            [
+                match.Source,
+                match.ExternalId,
+                ((int)RedisKeyNames.PlayerTtl.TotalSeconds).ToString(),
+            ]).ConfigureAwait(false);
     }
 
     private static bool TryParseClanId(string? key, string entity, out long clanId)

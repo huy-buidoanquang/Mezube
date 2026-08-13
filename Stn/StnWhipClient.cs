@@ -46,7 +46,7 @@ public sealed class StnWhipClient
         if (!response.IsSuccessStatusCode)
         {
             var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            throw new StnVoiceException("whip start", response.StatusCode, body);
+            throw StnFailure.From("whip start", response.StatusCode, body);
         }
 
         var started = await ReadStartAsync(response.Content, cancellationToken).ConfigureAwait(false);
@@ -85,7 +85,7 @@ public sealed class StnWhipClient
         if (!response.IsSuccessStatusCode)
         {
             var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            throw new StnVoiceException("whip stop", response.StatusCode, body);
+            throw StnFailure.From("whip stop", response.StatusCode, body);
         }
     }
 

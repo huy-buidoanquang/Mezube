@@ -54,7 +54,7 @@ public sealed class PipelineProcessor
                 .ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(downloaded) || !File.Exists(downloaded))
             {
-                throw new InvalidOperationException("yt-dlp download returned no file.");
+                throw new MediaPrepException("yt-dlp download returned no file.");
             }
 
             var fileLength = new FileInfo(downloaded).Length;
@@ -113,17 +113,17 @@ public sealed class PipelineProcessor
         }
         finally
         {
-            TryDelete(rawPath);
-            TryDelete(Path.ChangeExtension(rawPath, ".opus"));
-            TryDelete(Path.ChangeExtension(rawPath, ".ogg"));
-            TryDelete(Path.ChangeExtension(rawPath, ".m4a"));
-            TryDelete(Path.ChangeExtension(rawPath, ".webm"));
+            DownloadedMediaFiles.DeletePrefixed(_options.TempDir, $"mezube_{workId}");
+            if (!string.IsNullOrWhiteSpace(rawPath))
+            {
+                DownloadedMediaFiles.TryDelete(rawPath);
+            }
         }
     }
 
     private async Task<string> EnsureOggAsync(string inputPath, CancellationToken cancellationToken)
     {
-        var ext = Path.GetExtension(inputPath).ToLowerInvariant();
+            var ext = Path.GetExtension(inputPath).ToLowerInvariant();
         if (ext is ".ogg" or ".opus")
         {
             return inputPath;
@@ -131,31 +131,26 @@ public sealed class PipelineProcessor
 
         if (!_ffmpeg.IsAvailable)
         {
-            throw new InvalidOperationException(
+            throw new MediaPrepException(
                 "ffmpeg chưa có trên PATH — STN voice cần file .ogg. " +
                 "Cài ffmpeg rồi restart bot, hoặc set MEZUBE_FFMPEG_PATH.");
+        }
+
+        if (ext is ".webm")
+        {
+            var copied = await _ffmpeg.RemuxOpusToOggAsync(inputPath, cancellationToken).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(copied) && File.Exists(copied))
+            {
+                return copied;
+            }
         }
 
         var oggPath = await _ffmpeg.TranscodeToOggAsync(inputPath, cancellationToken).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(oggPath) || !File.Exists(oggPath))
         {
-            throw new InvalidOperationException("ffmpeg convert → ogg thất bại; không upload m4a/webm cho STN.");
+            throw new MediaPrepException("ffmpeg convert → ogg thất bại; không upload m4a/webm cho STN.");
         }
 
         return oggPath;
-    }
-
-    private static void TryDelete(string path)
-    {
-        try
-        {
-            if (File.Exists(path))
-            {
-                File.Delete(path);
-            }
-        }
-        catch
-        {
-        }
     }
 }

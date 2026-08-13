@@ -62,7 +62,7 @@ public sealed class StnRestClientV2
         if (!response.IsSuccessStatusCode)
         {
             var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            throw new StnVoiceException("voiceV2 play", response.StatusCode, body);
+            throw StnFailure.From("voiceV2 play", response.StatusCode, body);
         }
 
         var accepted = await ReadAcceptedAsync(response.Content, cancellationToken).ConfigureAwait(false);
@@ -112,7 +112,7 @@ public sealed class StnRestClientV2
             if (!response.IsSuccessStatusCode)
             {
                 var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-                throw new StnVoiceException("voiceV2 status", response.StatusCode, body);
+                throw StnFailure.From("voiceV2 status", response.StatusCode, body);
             }
 
             var snapshot = await ReadStatusAsync(response.Content, cancellationToken).ConfigureAwait(false);
@@ -147,7 +147,7 @@ public sealed class StnRestClientV2
         if (!response.IsSuccessStatusCode)
         {
             var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            throw new StnVoiceException("voiceV2 stop", response.StatusCode, body);
+            throw StnFailure.From("voiceV2 stop", response.StatusCode, body);
         }
     }
 
@@ -166,7 +166,7 @@ public sealed class StnRestClientV2
             if (!response.IsSuccessStatusCode)
             {
                 var body = await response.Content.ReadAsStringAsync(timeoutCts.Token).ConfigureAwait(false);
-                throw new StnVoiceException("voiceV2 status", response.StatusCode, body);
+                throw StnFailure.From("voiceV2 status", response.StatusCode, body);
             }
 
             var snapshot = await ReadStatusAsync(response.Content, timeoutCts.Token).ConfigureAwait(false);

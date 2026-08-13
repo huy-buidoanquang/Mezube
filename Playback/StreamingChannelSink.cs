@@ -260,7 +260,9 @@ public sealed class StreamingChannelSink : IPlaybackSink
     {
         if (!_sessions.TryGet(streamChannelId, out var stn) || stn is null)
         {
-            return Task.Delay(Timeout.Infinite, cancellationToken);
+            return Task.FromCanceled(cancellationToken.CanBeCanceled
+                ? cancellationToken
+                : new CancellationToken(canceled: true));
         }
 
         return stn.WaitUntilTrackEndedAsync(cancellationToken);

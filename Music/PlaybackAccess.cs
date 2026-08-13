@@ -198,6 +198,7 @@ public sealed class PlaybackAccess
         long clanId,
         long playHistoryId,
         long userId,
+        long? playbackChannelId = null,
         CancellationToken cancellationToken = default)
     {
         var settings = await _settings.TryGetAsync(clanId, cancellationToken).ConfigureAwait(false);
@@ -208,7 +209,8 @@ public sealed class PlaybackAccess
 
         var (votes, _) = await _votes.AddVoteAsync(clanId, playHistoryId, userId, cancellationToken)
             .ConfigureAwait(false);
-        var liveCount = await _binds.CountVoiceUsersAsync(clanId, cancellationToken).ConfigureAwait(false);
+        var liveCount = await _binds.CountVoiceUsersAsync(clanId, playbackChannelId, cancellationToken)
+            .ConfigureAwait(false);
         if (liveCount < 1)
         {
             liveCount = 1;

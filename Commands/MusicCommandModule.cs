@@ -1,8 +1,9 @@
 using Mezon.Net.Sdk.Commands;
+using Mezube.Helpers;
 using Mezube.Music;
 using Mezube.Ui;
 
-namespace Mezube.Helpers;
+namespace Mezube.Commands;
 
 public sealed class MusicCommandModule
 {

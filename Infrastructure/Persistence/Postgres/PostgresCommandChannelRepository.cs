@@ -1,18 +1,32 @@
+using Microsoft.Extensions.Caching.Memory;
+
 namespace Mezube.Infrastructure.Persistence.Postgres;
 
 public sealed class PostgresCommandChannelRepository : ICommandChannelRepository
 {
+    private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(5);
     private readonly PostgresDbConnectionFactory _db;
     private readonly IClanSettingsRepository _settings;
+    private readonly IMemoryCache _cache;
 
-    public PostgresCommandChannelRepository(PostgresDbConnectionFactory db, IClanSettingsRepository settings)
+    public PostgresCommandChannelRepository(
+        PostgresDbConnectionFactory db,
+        IClanSettingsRepository settings,
+        IMemoryCache cache)
     {
         _db = db;
         _settings = settings;
+        _cache = cache;
     }
 
     public async Task<IReadOnlyList<long>> ListAsync(long clanId, CancellationToken cancellationToken = default)
     {
+        var key = ListKey(clanId);
+        if (_cache.TryGetValue(key, out IReadOnlyList<long>? cached) && cached is not null)
+        {
+            return cached;
+        }
+
         await using var connection = await _db.DataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var cmd = connection.CreateCommand();
         cmd.CommandText =
@@ -30,31 +44,36 @@ public sealed class PostgresCommandChannelRepository : ICommandChannelRepository
             list.Add(reader.GetInt64(0));
         }
 
+        _cache.Set(key, (IReadOnlyList<long>)list, CacheTtl);
         return list;
     }
 
     public async Task<bool> IsAllowedAsync(long clanId, long channelId, CancellationToken cancellationToken = default)
     {
-        await using var connection = await _db.DataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var count = connection.CreateCommand();
-        count.CommandText = "SELECT COUNT(*)::int FROM clan_command_channels WHERE clan_id = @clan_id;";
-        count.Parameters.AddWithValue("clan_id", clanId);
-        var total = Convert.ToInt32(await count.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false));
-        if (total == 0)
+        var key = AllowKey(clanId, channelId);
+        if (_cache.TryGetValue(key, out bool cached))
         {
-            return true;
+            return cached;
         }
 
-        await using var check = connection.CreateCommand();
-        check.CommandText =
+        await using var connection = await _db.DataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var count = connection.CreateCommand();
+        count.CommandText =
             """
-            SELECT 1 FROM clan_command_channels
-            WHERE clan_id = @clan_id AND channel_id = @channel_id
-            LIMIT 1;
+            SELECT (
+                NOT EXISTS (SELECT 1 FROM clan_command_channels WHERE clan_id = @clan_id)
+                OR EXISTS (
+                    SELECT 1 FROM clan_command_channels
+                    WHERE clan_id = @clan_id AND channel_id = @channel_id
+                )
+            );
             """;
-        check.Parameters.AddWithValue("clan_id", clanId);
-        check.Parameters.AddWithValue("channel_id", channelId);
-        return await check.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is not null;
+        count.Parameters.AddWithValue("clan_id", clanId);
+        count.Parameters.AddWithValue("channel_id", channelId);
+        var allowedRaw = await count.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        var allowed = allowedRaw is true || Convert.ToBoolean(allowedRaw);
+        _cache.Set(key, allowed, CacheTtl);
+        return allowed;
     }
 
     public async Task AddAsync(long clanId, long channelId, long? addedBy, CancellationToken cancellationToken = default)
@@ -72,6 +91,7 @@ public sealed class PostgresCommandChannelRepository : ICommandChannelRepository
         cmd.Parameters.AddWithValue("channel_id", channelId);
         cmd.Parameters.AddWithValue("added_by", (object?)addedBy ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        BumpEpoch(clanId);
     }
 
     public async Task RemoveAsync(long clanId, long channelId, CancellationToken cancellationToken = default)
@@ -86,6 +106,7 @@ public sealed class PostgresCommandChannelRepository : ICommandChannelRepository
         cmd.Parameters.AddWithValue("clan_id", clanId);
         cmd.Parameters.AddWithValue("channel_id", channelId);
         await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        BumpEpoch(clanId);
     }
 
     public async Task ClearAsync(long clanId, CancellationToken cancellationToken = default)
@@ -95,5 +116,18 @@ public sealed class PostgresCommandChannelRepository : ICommandChannelRepository
         cmd.CommandText = "DELETE FROM clan_command_channels WHERE clan_id = @clan_id;";
         cmd.Parameters.AddWithValue("clan_id", clanId);
         await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        BumpEpoch(clanId);
     }
+
+    private string AllowKey(long clanId, long channelId) => $"cmd-allow:{clanId}:{channelId}:{ReadEpoch(clanId)}";
+
+    private string ListKey(long clanId) => $"cmd-list:{clanId}:{ReadEpoch(clanId)}";
+
+    private long ReadEpoch(long clanId)
+        => _cache.TryGetValue(EpochKey(clanId), out long epoch) ? epoch : 0;
+
+    private void BumpEpoch(long clanId)
+        => _cache.Set(EpochKey(clanId), ReadEpoch(clanId) + 1);
+
+    private static string EpochKey(long clanId) => $"cmd-ch-epoch:{clanId}";
 }

@@ -12,7 +12,8 @@ public sealed class BindStore
 {
     private readonly IVoiceBindStore _voice;
     private readonly IClanSettingsRepository _settings;
-    private readonly ConcurrentDictionary<(long ClanId, long UserId), long> _voiceByClanUser = new();
+    private readonly ConcurrentDictionary<(long ClanId, long UserId), (long ChannelId, long Ticks)> _voiceByClanUser = new();
+    private static readonly TimeSpan VoiceL1Ttl = TimeSpan.FromHours(24);
     private readonly ConcurrentDictionary<long, long> _defaultStreamByClan = new();
 
     public BindStore(BotOptions options, IVoiceBindStore voice, IClanSettingsRepository settings)
@@ -61,7 +62,7 @@ public sealed class BindStore
 
     public void SetUserVoiceChannel(long clanId, long userId, long voiceChannelId)
     {
-        _voiceByClanUser[(clanId, userId)] = voiceChannelId;
+        _voiceByClanUser[(clanId, userId)] = (voiceChannelId, DateTime.UtcNow.Ticks);
         _ = _voice.SetUserVoiceChannelAsync(clanId, userId, voiceChannelId);
     }
 
@@ -72,25 +73,61 @@ public sealed class BindStore
     }
 
     public bool TryGetUserVoiceChannel(long clanId, long userId, out long voiceChannelId)
-        => _voiceByClanUser.TryGetValue((clanId, userId), out voiceChannelId);
+    {
+        voiceChannelId = 0;
+        if (!_voiceByClanUser.TryGetValue((clanId, userId), out var entry))
+        {
+            return false;
+        }
+
+        if (DateTime.UtcNow.Ticks - entry.Ticks > VoiceL1Ttl.Ticks)
+        {
+            _voiceByClanUser.TryRemove((clanId, userId), out _);
+            return false;
+        }
+
+        voiceChannelId = entry.ChannelId;
+        return true;
+    }
 
     public async Task HydrateVoiceFromRedisAsync(CancellationToken cancellationToken = default)
     {
         var snapshot = await _voice.SnapshotAllAsync(cancellationToken).ConfigureAwait(false);
         foreach (var (clanId, userId, channelId) in snapshot)
         {
-            _voiceByClanUser[(clanId, userId)] = channelId;
+            _voiceByClanUser[(clanId, userId)] = (channelId, DateTime.UtcNow.Ticks);
         }
     }
 
     public Task<long> CountVoiceUsersAsync(long clanId, CancellationToken cancellationToken = default)
+        => CountVoiceUsersAsync(clanId, playbackChannelId: null, cancellationToken);
+
+    public Task<long> CountVoiceUsersAsync(
+        long clanId,
+        long? playbackChannelId,
+        CancellationToken cancellationToken = default)
     {
-        var local = _voiceByClanUser.Keys.Count(k => k.ClanId == clanId);
+        PruneExpiredVoice();
+        var local = _voiceByClanUser.Count(k =>
+            k.Key.ClanId == clanId
+            && (playbackChannelId is null || k.Value.ChannelId == playbackChannelId.Value));
         if (local > 0)
         {
             return Task.FromResult((long)local);
         }
 
         return _voice.CountAsync(clanId, cancellationToken);
+    }
+
+    private void PruneExpiredVoice()
+    {
+        var cutoff = DateTime.UtcNow.Ticks - VoiceL1Ttl.Ticks;
+        foreach (var (key, value) in _voiceByClanUser)
+        {
+            if (value.Ticks < cutoff)
+            {
+                _voiceByClanUser.TryRemove(key, out _);
+            }
+        }
     }
 }

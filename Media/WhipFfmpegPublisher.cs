@@ -63,7 +63,7 @@ public sealed class WhipFfmpegPublisher
         {
             FileName = _options.FfmpegPath,
             RedirectStandardError = true,
-            RedirectStandardOutput = true,
+            RedirectStandardOutput = false,
             UseShellExecute = false,
             CreateNoWindow = true,
         };
@@ -391,10 +391,15 @@ public sealed class WhipFfmpegPublisher
                 return false;
             }
 
-            var stdout = process.StandardOutput.ReadToEnd();
-            var stderr = process.StandardError.ReadToEnd();
-            process.WaitForExit(5000);
-            var text = stdout + stderr;
+            var stdoutTask = process.StandardOutput.ReadToEndAsync();
+            var stderrTask = process.StandardError.ReadToEndAsync();
+            if (!process.WaitForExit(5000))
+            {
+                ChildProcessRunner.TryKill(process);
+                return false;
+            }
+
+            var text = stdoutTask.GetAwaiter().GetResult() + stderrTask.GetAwaiter().GetResult();
             var ok = text.Contains("whip", StringComparison.OrdinalIgnoreCase);
             if (!ok)
             {

@@ -72,12 +72,12 @@ WORKDIR /app
 # Runtime .so for the external codecs linked into the static ffmpeg binary.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        python3 python3-pip ca-certificates curl unzip \
+        python3 python3-pip ca-certificates curl unzip tini \
         libssl3t64 libnuma1 \
         libopus0 libmp3lame0 libvorbis0a libvorbisenc2 \
         libx264-164 libx265-199 libvpx9 libaom3 libdav1d7 \
         libsvtav1enc1d1 \
-    && pip3 install --break-system-packages --no-cache-dir yt-dlp \
+    && pip3 install --break-system-packages --no-cache-dir yt-dlp==2025.10.14 \
     && curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
     && rm -rf /var/lib/apt/lists/*
 
@@ -99,4 +99,4 @@ RUN mkdir -p /app/temp \
     && /usr/local/bin/deno --version
 
 VOLUME ["/app/temp"]
-ENTRYPOINT ["dotnet", "Mezube.dll"]
+ENTRYPOINT ["tini", "--", "dotnet", "Mezube.dll"]
