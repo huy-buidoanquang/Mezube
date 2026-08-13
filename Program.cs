@@ -1,4 +1,5 @@
-﻿using Mezube.Application;
+﻿using Mezon.Net.Sdk.Caching.Redis;
+using Mezube.Application;
 using Mezube.Bot;
 using Mezube.Infrastructure.Caching;
 using Mezube.Infrastructure.Persistence;
@@ -9,7 +10,6 @@ using Mezube.Music;
 using Mezube.Playback;
 using Mezube.Stn;
 using Mezube.Ui;
-using Mezon.Net.Sdk.Caching.Redis;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;

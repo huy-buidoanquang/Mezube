@@ -510,8 +510,16 @@ public sealed class YtDlpProcessor
         var js = ResolveJsRuntimeSpec();
         if (!string.IsNullOrWhiteSpace(js))
         {
-            args.Add("--js-runtimes");
-            args.Add(js);
+            if (SupportsJsRuntimesOption())
+            {
+                args.Add("--js-runtimes");
+                args.Add(js);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "yt-dlp does not support --js-runtimes (need >= 2025.11.12); YouTube n-sig may fail until upgraded.");
+            }
         }
 
         var cookies = _options.YtDlpCookiesPath?.Trim();
@@ -540,6 +548,59 @@ public sealed class YtDlpProcessor
 
     private string? _jsRuntimeSpec;
     private bool _jsRuntimeProbed;
+    private bool? _jsRuntimesSupported;
+
+    private bool SupportsJsRuntimesOption()
+    {
+        if (_jsRuntimesSupported is bool cached)
+        {
+            return cached;
+        }
+
+        foreach (var (fileName, prefixArgs) in BuildLaunchAttempts())
+        {
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = fileName,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                foreach (var prefix in prefixArgs)
+                {
+                    psi.ArgumentList.Add(prefix);
+                }
+
+                psi.ArgumentList.Add("--help");
+                var result = ChildProcessRunner.RunAsync(
+                        psi,
+                        ChildProcessRunner.DefaultProbeTimeout,
+                        CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult();
+                var help = result.Stdout + result.Stderr;
+                if (help.Contains("--js-runtimes", StringComparison.Ordinal))
+                {
+                    _jsRuntimesSupported = true;
+                    return true;
+                }
+
+                if (result.ExitCode == 0)
+                {
+                    _jsRuntimesSupported = false;
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "yt-dlp --help probe failed via {File}", fileName);
+            }
+        }
+
+        _jsRuntimesSupported = false;
+        return false;
+    }
 
     private string? ResolveJsRuntimeSpec()
     {

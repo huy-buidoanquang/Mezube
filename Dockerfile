@@ -77,7 +77,7 @@ RUN apt-get update \
         libopus0 libmp3lame0 libvorbis0a libvorbisenc2 \
         libx264-164 libx265-199 libvpx9 libaom3 libdav1d7 \
         libsvtav1enc1d1 \
-    && pip3 install --break-system-packages --no-cache-dir yt-dlp==2025.10.14 \
+    && pip3 install --break-system-packages --no-cache-dir yt-dlp==2025.11.12 \
     && curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
     && rm -rf /var/lib/apt/lists/*
 
@@ -96,7 +96,8 @@ ENV DOTNET_ENVIRONMENT=prod \
 RUN mkdir -p /app/temp \
     && /usr/local/bin/ffmpeg -hide_banner -version \
     && /usr/local/bin/ffmpeg -hide_banner -muxers 2>/dev/null | grep -E '^\s*E\s+whip\b' \
-    && /usr/local/bin/deno --version
+    && /usr/local/bin/deno --version \
+    && yt-dlp --help 2>&1 | grep -q -- '--js-runtimes'
 
 VOLUME ["/app/temp"]
 ENTRYPOINT ["tini", "--", "dotnet", "Mezube.dll"]
