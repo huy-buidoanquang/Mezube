@@ -31,15 +31,9 @@ public sealed class BotOptions
     public long DefaultStreamChannelId { get; set; }
     /// <summary>
     /// STN origin only (no path), e.g. <c>https://stn.mezon.ai</c> or <c>http://localhost:8081</c>.
-    /// Voice REST uses <c>/api/v2/voice/*</c>; streaming WS uses <c>ws(s)://…/ws</c>.
+    /// Streaming WS uses <c>ws(s)://…/ws</c>.
     /// </summary>
     public string StnBaseUrl { get; set; } = string.Empty;
-    /// <summary>
-    /// When true, voice uses STN WHIP (ffmpeg Opus push to LiveKit) instead of v2 CDN pull-publish.
-    /// Requires ffmpeg with <c>whip</c> muxer. Falls back to v2 if muxer is missing.
-    /// Default false (set in appsettings).
-    /// </summary>
-    public bool StnWhipEnabled { get; set; }
     /// <summary>
     /// Optional STN streaming <c>publisher_password</c>. Sent in WS <c>Value.Password</c>.
     /// Leave empty when STN does not require a publisher password.
@@ -74,16 +68,9 @@ public sealed class BotOptions
     public int PreparedAudioBitrateKbps { get; set; } = DefaultAudioBitrateKbps;
     public int PreparedAudioChannels { get; set; } = DefaultAudioChannels;
     public int PreparedAudioSampleRate { get; set; } = DefaultAudioSampleRate;
-    public int WhipAudioBitrateKbps { get; set; } = DefaultAudioBitrateKbps;
-    public int WhipAudioChannels { get; set; } = DefaultAudioChannels;
-    public int WhipAudioSampleRate { get; set; } = DefaultAudioSampleRate;
-    public bool WhipEncoderDisabled { get; set; }
-    public string WhipOpusApplication { get; set; } = "audio";
-    public string WhipOpusVbr { get; set; } = "on";
-    public int WhipOpusComplexity { get; set; } = 10;
-    public int WhipPacketLossPercent { get; set; } = 3;
-    public bool WhipEnableInbandFec { get; set; } = true;
-    public int WhipHandshakeTimeoutMs { get; set; } = 10000;
+    public int PreparedVideoBitrateKbps { get; set; } = 1000;
+    public int PreparedVideoHeight { get; set; } = 720;
+    public int PreparedVideoFps { get; set; } = 30;
     public string BotDisplayName { get; set; } = "Mezube";
     /// <summary>Bot avatar used for embed author icon and as thumbnail fallback.</summary>
     public string BotAvatarUrl { get; set; } = string.Empty;
@@ -100,6 +87,7 @@ public sealed class BotOptions
     public int MaxConcurrentPlayback { get; set; } = MezubeConstants.MaxConcurrentPlayback;
     public int MaxQueuePerClan { get; set; } = MezubeConstants.MaxQueuePerClan;
     public long MaxAudioBytes { get; set; } = MezubeConstants.MaxAudioBytes;
+    public long MaxVideoBytes { get; set; } = MezubeConstants.MaxVideoBytes;
     public int InterTrackDelayMs { get; set; } = MezubeConstants.InterTrackDelayMs;
 
     public static BotOptions FromConfiguration(IConfiguration configuration)
@@ -149,17 +137,9 @@ public sealed class BotOptions
         Media.PreparedAudioBitrateKbps = PreparedAudioBitrateKbps;
         Media.PreparedAudioChannels = PreparedAudioChannels;
         Media.PreparedAudioSampleRate = PreparedAudioSampleRate;
-        Media.WhipAudioBitrateKbps = WhipAudioBitrateKbps;
-        Media.WhipAudioChannels = WhipAudioChannels;
-        Media.WhipAudioSampleRate = WhipAudioSampleRate;
-        Media.WhipEncoderDisabled = WhipEncoderDisabled;
-        Media.WhipOpusApplication = WhipOpusApplication;
-        Media.WhipOpusVbr = WhipOpusVbr;
-        Media.WhipOpusComplexity = WhipOpusComplexity;
-        Media.WhipPacketLossPercent = WhipPacketLossPercent;
-        Media.WhipEnableInbandFec = WhipEnableInbandFec;
-        Media.WhipHandshakeTimeoutMs = WhipHandshakeTimeoutMs;
-        Media.StnWhipEnabled = StnWhipEnabled;
+        Media.PreparedVideoBitrateKbps = PreparedVideoBitrateKbps;
+        Media.PreparedVideoHeight = PreparedVideoHeight;
+        Media.PreparedVideoFps = PreparedVideoFps;
         Media.StnBaseUrl = StnBaseUrl;
         Media.StnPublisherPassword = StnPublisherPassword;
 
@@ -221,36 +201,22 @@ public sealed class BotOptions
     private void ValidateAudioSettings()
     {
         ValidateBitrate(nameof(PreparedAudioBitrateKbps), PreparedAudioBitrateKbps);
-        ValidateBitrate(nameof(WhipAudioBitrateKbps), WhipAudioBitrateKbps);
+        if (PreparedVideoBitrateKbps is < 200 or > 4000)
+        {
+            throw new InvalidOperationException("Mezube:PreparedVideoBitrateKbps must be between 200 and 4000 kb/s.");
+        }
+
+        if (PreparedVideoHeight is < 360 or > 1080)
+        {
+            throw new InvalidOperationException("Mezube:PreparedVideoHeight must be between 360 and 1080.");
+        }
+
+        if (PreparedVideoFps is < 15 or > 30)
+        {
+            throw new InvalidOperationException("Mezube:PreparedVideoFps must be between 15 and 30.");
+        }
         ValidateChannels(nameof(PreparedAudioChannels), PreparedAudioChannels);
-        ValidateChannels(nameof(WhipAudioChannels), WhipAudioChannels);
         ValidateSampleRate(nameof(PreparedAudioSampleRate), PreparedAudioSampleRate);
-        ValidateSampleRate(nameof(WhipAudioSampleRate), WhipAudioSampleRate);
-
-        if (WhipOpusComplexity is < 0 or > 10)
-        {
-            throw new InvalidOperationException("Mezube:WhipOpusComplexity must be between 0 and 10.");
-        }
-
-        if (WhipPacketLossPercent is < 0 or > 100)
-        {
-            throw new InvalidOperationException("Mezube:WhipPacketLossPercent must be between 0 and 100.");
-        }
-
-        if (WhipHandshakeTimeoutMs < 1000)
-        {
-            throw new InvalidOperationException("Mezube:WhipHandshakeTimeoutMs must be >= 1000.");
-        }
-
-        if (!IsAllowed(WhipOpusApplication, "audio", "voip", "lowdelay"))
-        {
-            throw new InvalidOperationException("Mezube:WhipOpusApplication must be audio, voip, or lowdelay.");
-        }
-
-        if (!IsAllowed(WhipOpusVbr, "on", "off", "constrained"))
-        {
-            throw new InvalidOperationException("Mezube:WhipOpusVbr must be on, off, or constrained.");
-        }
 
         if (MaxPrepConcurrency < 1)
         {
@@ -270,6 +236,11 @@ public sealed class BotOptions
         if (MaxAudioBytes < 1)
         {
             throw new InvalidOperationException("Mezube:MaxAudioBytes must be >= 1.");
+        }
+
+        if (MaxVideoBytes < 1)
+        {
+            throw new InvalidOperationException("Mezube:MaxVideoBytes must be >= 1.");
         }
 
         if (MultipartUploadPartBytes < 5 * 1024 * 1024)
@@ -320,10 +291,5 @@ public sealed class BotOptions
         {
             throw new InvalidOperationException($"Mezube:{name} must be between 8000 and 48000.");
         }
-    }
-
-    private static bool IsAllowed(string value, params string[] allowed)
-    {
-        return allowed.Any(x => string.Equals(x, value, StringComparison.OrdinalIgnoreCase));
     }
 }

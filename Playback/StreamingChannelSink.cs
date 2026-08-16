@@ -1,5 +1,6 @@
 using Mezube.Bot;
 using Mezube.Domain.Entities;
+using Mezube.Media;
 using Mezube.Music;
 using Mezube.Stn;
 using Microsoft.Extensions.Logging;
@@ -35,11 +36,18 @@ public sealed class StreamingChannelSink : IPlaybackSink
     public string Name => "streaming";
 
     public async Task PlayAsync(PlaybackTarget target, TrackInfoEntity track, CancellationToken cancellationToken = default)
+        => await PlayAsync(target, track, PreparedAssetKind.Audio, cancellationToken).ConfigureAwait(false);
+
+    public async Task PlayAsync(
+        PlaybackTarget target,
+        TrackInfoEntity track,
+        PreparedAssetKind kind,
+        CancellationToken cancellationToken = default)
     {
         var client = _holder.GetClient();
         var total = Stopwatch.StartNew();
         var process = Stopwatch.StartNew();
-        var playable = await _prep.EnsurePreparedAsync(client, track, cancellationToken).ConfigureAwait(false);
+        var playable = await _prep.EnsurePreparedAsync(client, track, kind, cancellationToken).ConfigureAwait(false);
         _logger.LogDebug(
             "Streaming media processed title={Title} clan={ClanId} channel={ChannelId} elapsedMs={ElapsedMs} url={Url}",
             track.Title,
@@ -48,10 +56,10 @@ public sealed class StreamingChannelSink : IPlaybackSink
             process.ElapsedMilliseconds,
             playable.MediaUrl);
 
-        if (!StnMediaUrl.IsSupportedOpusSourceUrl(playable.MediaUrl))
+        if (!StnMediaUrl.IsSupportedStreamingSourceUrl(playable.MediaUrl))
         {
             throw new InvalidOperationException(
-                $"Streaming play requires .ogg/.opus URL path, got: {playable.MediaUrl}");
+                $"Streaming play requires .ogg/.opus/.webm URL path, got: {playable.MediaUrl}");
         }
 
         // App-owned RT join (not event-path): stream channels are not covered by JoinClanChat alone.

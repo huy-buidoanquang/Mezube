@@ -1,6 +1,6 @@
 namespace Mezube.Bot;
 
-/// <summary>yt-dlp, ffmpeg, WHIP, CDN, and prepared-audio knobs.</summary>
+/// <summary>yt-dlp, ffmpeg, CDN, and prepared-media knobs.</summary>
 public sealed class MediaOptions
 {
     public string YtDlpPath { get; set; } = "yt-dlp";
@@ -17,17 +17,9 @@ public sealed class MediaOptions
     public int PreparedAudioBitrateKbps { get; set; } = 128;
     public int PreparedAudioChannels { get; set; } = 2;
     public int PreparedAudioSampleRate { get; set; } = 48000;
-    public int WhipAudioBitrateKbps { get; set; } = 128;
-    public int WhipAudioChannels { get; set; } = 2;
-    public int WhipAudioSampleRate { get; set; } = 48000;
-    public bool WhipEncoderDisabled { get; set; }
-    public string WhipOpusApplication { get; set; } = "audio";
-    public string WhipOpusVbr { get; set; } = "on";
-    public int WhipOpusComplexity { get; set; } = 10;
-    public int WhipPacketLossPercent { get; set; } = 3;
-    public bool WhipEnableInbandFec { get; set; } = true;
-    public int WhipHandshakeTimeoutMs { get; set; } = 10000;
-    public bool StnWhipEnabled { get; set; }
+    public int PreparedVideoBitrateKbps { get; set; } = 1000;
+    public int PreparedVideoHeight { get; set; } = 720;
+    public int PreparedVideoFps { get; set; } = 30;
     public string StnBaseUrl { get; set; } = string.Empty;
     public string StnPublisherPassword { get; set; } = string.Empty;
 }

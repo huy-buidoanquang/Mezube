@@ -186,7 +186,15 @@ public sealed partial class MusicPlayer
                     }
 
                     var name = ctx.Args[1];
-                    var query = string.Join(' ', ctx.Args.Skip(2));
+                    var query = ChannelTargetParser.BuildQuery(ctx.Args.Skip(2));
+                    if (string.IsNullOrWhiteSpace(query))
+                    {
+                        await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                                "Need playlist + track",
+                                $"Try {_options.CommandPrefix}playlist add <name> <url or search>"))
+                            .ConfigureAwait(false);
+                        return;
+                    }
                     var pl = await _playlists.TryGetByNameAsync(clanId, name, cancellationToken).ConfigureAwait(false);
                     if (pl is null)
                     {
@@ -288,7 +296,7 @@ public sealed partial class MusicPlayer
 
                         var info = item.Track.ToTrackInfo(ctx.Author.Username)
                             .WithRequester(ctx.Author.Id, ctx.Author.Username);
-                        if (IsTooLarge(info))
+                        if (IsTooLarge(info, wantVideo: false))
                         {
                             continue;
                         }
@@ -329,7 +337,7 @@ public sealed partial class MusicPlayer
 
                     if (kind is PlayEnqueueKind.ModeConflict)
                     {
-                        await ctx.ReplyAsync(PlayerMessageBuilder.ModeConflict(wantVoice: mode == PlaybackMode.Voice))
+                        await ctx.ReplyAsync(PlayerMessageBuilder.ModeConflict())
                             .ConfigureAwait(false);
                         return;
                     }

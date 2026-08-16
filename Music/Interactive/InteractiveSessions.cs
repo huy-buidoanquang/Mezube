@@ -7,7 +7,8 @@ public sealed class SearchPickSession
     public long ClanId { get; set; }
     public long ChannelId { get; set; }
     public long UserId { get; set; }
-    public string Mode { get; set; } = "streaming"; // streaming | voice
+    public string Mode { get; set; } = "streaming";
+    public bool WantVideo { get; set; }
     public long TargetChannelId { get; set; }
     public string? TargetChannelLabel { get; set; }
     public string? TargetRoomName { get; set; }

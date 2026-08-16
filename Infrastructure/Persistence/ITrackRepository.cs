@@ -18,6 +18,12 @@ public interface ITrackRepository
         string playableUrl,
         CancellationToken cancellationToken = default);
 
+    Task SetPlayableVideoUrlAsync(
+        string source,
+        string externalId,
+        string playableVideoUrl,
+        CancellationToken cancellationToken = default);
+
     Task SetAliasAsync(
         string aliasKey,
         string source,

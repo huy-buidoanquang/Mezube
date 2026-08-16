@@ -40,23 +40,31 @@ public sealed class PlayableMediaProcessor
         _logger = logger;
     }
 
+    public Task<TrackInfoEntity> ProcessTrackAsync(
+        MezonClient client,
+        TrackInfoEntity track,
+        CancellationToken cancellationToken = default)
+        => ProcessTrackAsync(client, track, PreparedAssetKind.Audio, cancellationToken);
+
     public async Task<TrackInfoEntity> ProcessTrackAsync(
         MezonClient client,
         TrackInfoEntity track,
+        PreparedAssetKind kind,
         CancellationToken cancellationToken = default)
     {
         var stopwatch = Stopwatch.StartNew();
         var identity = ResolveIdentity(track);
+        var maxBytes = kind == PreparedAssetKind.Video ? _options.MaxVideoBytes : _options.MaxAudioBytes;
 
         if (track.IsTooLarge
-            || (track.SourceBytes is long reported && reported > _options.MaxAudioBytes))
+            || (track.SourceBytes is long reported && reported > maxBytes))
         {
             await MarkTooLargeIfPossibleAsync(identity, track, track.SourceBytes, cancellationToken)
                 .ConfigureAwait(false);
             throw new AudioTooLargeException(
                 track.Title,
                 track.SourceBytes ?? 0,
-                _options.MaxAudioBytes);
+                maxBytes);
         }
 
         if (identity is { } id)
@@ -68,45 +76,51 @@ public sealed class PlayableMediaProcessor
                 throw new AudioTooLargeException(
                     track.Title,
                     stored.SourceBytes ?? track.SourceBytes ?? 0,
-                    _options.MaxAudioBytes);
+                    maxBytes);
             }
 
-            if (stored is not null && PlayableUrlHelper.IsPreparedPlayableUrl(stored.PlayableUrl))
+            var cachedUrl = SelectStoredUrl(stored, kind);
+            if (stored is not null && IsReadyUrl(cachedUrl, kind))
             {
-                var cacheKey = PlayableCacheKey(id.Source, id.ExternalId);
+                var cacheKey = PlayableCacheKey(kind, id.Source, id.ExternalId);
                 if (_cache.TryGetValue(cacheKey, out string? fresh) && !string.IsNullOrWhiteSpace(fresh))
                 {
                     await _store.TouchPlayedAsync(id.Source, id.ExternalId, cancellationToken)
                         .ConfigureAwait(false);
-                    var cachedHit = stored.ToTrackInfo(track.RequestedBy);
+                    var cachedHit = WithMediaUrl(stored.ToTrackInfo(track.RequestedBy), fresh);
                     return track.RequestedByUserId is long uid
                         ? cachedHit.WithRequester(uid, track.RequestedBy)
                         : cachedHit;
                 }
 
-                if (await _uploader.IsReachableAsync(stored.PlayableUrl!, cancellationToken).ConfigureAwait(false))
+                if (await _uploader.IsReachableAsync(cachedUrl!, cancellationToken).ConfigureAwait(false))
                 {
-                    _cache.Set(cacheKey, stored.PlayableUrl!, PlayableCacheTtl);
+                    _cache.Set(cacheKey, cachedUrl!, PlayableCacheTtl);
                     _logger.LogDebug(
-                        "Using cached CDN media for {Source}/{Id}: {Url} elapsedMs={ElapsedMs}",
+                        "Using cached CDN media for {Source}/{Id} kind={Kind}: {Url} elapsedMs={ElapsedMs}",
                         id.Source,
                         id.ExternalId,
-                        stored.PlayableUrl,
+                        kind,
+                        cachedUrl,
                         stopwatch.ElapsedMilliseconds);
                     await _store.TouchPlayedAsync(id.Source, id.ExternalId, cancellationToken)
                         .ConfigureAwait(false);
-                    var cached = stored.ToTrackInfo(track.RequestedBy);
+                    var cached = WithMediaUrl(stored.ToTrackInfo(track.RequestedBy), cachedUrl!);
                     return track.RequestedByUserId is long uid
                         ? cached.WithRequester(uid, track.RequestedBy)
                         : cached;
                 }
 
                 _logger.LogWarning(
-                    "Cached CDN media unreachable (will re-upload) {Source}/{Id}",
+                    "Cached CDN media unreachable (will re-upload) {Source}/{Id} kind={Kind}",
                     id.Source,
-                    id.ExternalId);
+                    id.ExternalId,
+                    kind);
             }
-            else if (stored is not null && !string.IsNullOrWhiteSpace(stored.PlayableUrl))
+            else if (kind == PreparedAssetKind.Audio
+                     && stored is not null
+                     && !string.IsNullOrWhiteSpace(stored.PlayableUrl)
+                     && !PlayableUrlHelper.IsPreparedAudioUrl(stored.PlayableUrl))
             {
                 _logger.LogWarning(
                     "Ignoring invalid playable_url cache (not prepared CDN ogg/opus) {Source}/{Id}: {Url}",
@@ -125,26 +139,23 @@ public sealed class PlayableMediaProcessor
             }
         }
 
-        if (!NeedsRepackage(track.MediaUrl))
+        if (!NeedsRepackage(track.MediaUrl, kind))
         {
-            if (!PlayableUrlHelper.IsPreparedPlayableUrl(track.MediaUrl))
+            if (!IsReadyUrl(track.MediaUrl, kind))
             {
                 // Fall through to full prep — never persist a non-CDN URL as playable.
             }
             else if (identity is { } readyId)
             {
-                await _store.SetPlayableUrlAsync(
-                        readyId.Source,
-                        readyId.ExternalId,
-                        track.MediaUrl,
-                        cancellationToken)
+                await PersistPreparedUrlAsync(readyId.Source, readyId.ExternalId, track.MediaUrl, kind, cancellationToken)
                     .ConfigureAwait(false);
                 await _store.TouchPlayedAsync(readyId.Source, readyId.ExternalId, cancellationToken)
                     .ConfigureAwait(false);
 
                 _logger.LogDebug(
-                    "Playable media already direct for {Title} elapsedMs={ElapsedMs} url={Url}",
+                    "Playable media already direct for {Title} kind={Kind} elapsedMs={ElapsedMs} url={Url}",
                     track.Title,
+                    kind,
                     stopwatch.ElapsedMilliseconds,
                     track.MediaUrl);
                 return track;
@@ -152,19 +163,21 @@ public sealed class PlayableMediaProcessor
             else
             {
                 _logger.LogDebug(
-                    "Playable media already direct for {Title} elapsedMs={ElapsedMs} url={Url}",
+                    "Playable media already direct for {Title} kind={Kind} elapsedMs={ElapsedMs} url={Url}",
                     track.Title,
+                    kind,
                     stopwatch.ElapsedMilliseconds,
                     track.MediaUrl);
                 return track;
             }
         }
 
-        _logger.LogDebug("Preparing CDN media for {Title}", track.Title);
+        _logger.LogDebug("Preparing CDN media for {Title} kind={Kind}", track.Title, kind);
         PipelineResult prepared;
         try
         {
-            prepared = await RunPipelineAsync(client, track, cancellationToken).ConfigureAwait(false);
+            prepared = await _pipeline.RunPipelineAsync(client, track, kind, cancellationToken)
+                .ConfigureAwait(false);
         }
         catch (AudioTooLargeException ex)
         {
@@ -174,14 +187,16 @@ public sealed class PlayableMediaProcessor
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            var hint = kind == PreparedAssetKind.Video ? "public .webm URL" : "public .ogg URL";
             throw new MediaPrepException(
-                $"CDN upload failed for '{track.Title}'; cannot play without a public .ogg URL.",
+                $"CDN upload failed for '{track.Title}'; cannot play without a {hint}.",
                 ex);
         }
 
         _logger.LogInformation(
-            "Playable CDN media ready for {Title} elapsedMs={ElapsedMs}",
+            "Playable CDN media ready for {Title} kind={Kind} elapsedMs={ElapsedMs}",
             track.Title,
+            prepared.Kind,
             stopwatch.ElapsedMilliseconds);
 
         if (identity is { } saveId)
@@ -195,17 +210,26 @@ public sealed class PlayableMediaProcessor
                         WebpageUrl = track.WebpageUrl,
                         ThumbnailUrl = track.ThumbnailUrl,
                         Duration = track.Duration,
-                        PlayableUrl = prepared.CdnUrl,
+                        PlayableUrl = prepared.Kind == PreparedAssetKind.Audio ? prepared.CdnUrl : null,
+                        PlayableVideoUrl = prepared.Kind == PreparedAssetKind.Video ? prepared.CdnUrl : null,
                         SourceBytes = prepared.SourceBytes ?? track.SourceBytes,
                         IsTooLarge = track.IsTooLarge,
                     },
                     cancellationToken)
                 .ConfigureAwait(false);
-            await _store.SetPlayableUrlAsync(saveId.Source, saveId.ExternalId, prepared.CdnUrl, cancellationToken)
+            await PersistPreparedUrlAsync(
+                    saveId.Source,
+                    saveId.ExternalId,
+                    prepared.CdnUrl,
+                    prepared.Kind,
+                    cancellationToken)
                 .ConfigureAwait(false);
             await _store.TouchPlayedAsync(saveId.Source, saveId.ExternalId, cancellationToken)
                 .ConfigureAwait(false);
-            _cache.Set(PlayableCacheKey(saveId.Source, saveId.ExternalId), prepared.CdnUrl, PlayableCacheTtl);
+            _cache.Set(
+                PlayableCacheKey(prepared.Kind, saveId.Source, saveId.ExternalId),
+                prepared.CdnUrl,
+                PlayableCacheTtl);
         }
 
         return new TrackInfoEntity
@@ -224,11 +248,64 @@ public sealed class PlayableMediaProcessor
         };
     }
 
-    private Task<PipelineResult> RunPipelineAsync(
-        MezonClient client,
-        TrackInfoEntity track,
+    private Task PersistPreparedUrlAsync(
+        string source,
+        string externalId,
+        string url,
+        PreparedAssetKind kind,
         CancellationToken cancellationToken)
-        => _pipeline.RunPipelineAsync(client, track, cancellationToken);
+        => kind == PreparedAssetKind.Video
+            ? _store.SetPlayableVideoUrlAsync(source, externalId, url, cancellationToken)
+            : _store.SetPlayableUrlAsync(source, externalId, url, cancellationToken);
+
+    private static string? SelectStoredUrl(TrackEntity? stored, PreparedAssetKind kind)
+    {
+        if (stored is null)
+        {
+            return null;
+        }
+
+        if (kind == PreparedAssetKind.Video)
+        {
+            if (PlayableUrlHelper.IsPreparedVideoUrl(stored.PlayableVideoUrl))
+            {
+                return stored.PlayableVideoUrl;
+            }
+
+            // SoundCloud (and other audio-only) streaming publishes Ogg; don't re-prep every play.
+            if (string.Equals(stored.Source, TrackIdentityHelper.SourceSoundcloud, StringComparison.Ordinal)
+                && PlayableUrlHelper.IsPreparedAudioUrl(stored.PlayableUrl))
+            {
+                return stored.PlayableUrl;
+            }
+
+            return null;
+        }
+
+        return stored.PlayableUrl;
+    }
+
+    private static bool IsReadyUrl(string? url, PreparedAssetKind kind)
+        => kind == PreparedAssetKind.Video
+            ? PlayableUrlHelper.IsPreparedStreamingUrl(url)
+            : PlayableUrlHelper.IsPreparedAudioUrl(url);
+
+    private static TrackInfoEntity WithMediaUrl(TrackInfoEntity track, string mediaUrl)
+        => new()
+        {
+            TrackId = track.TrackId,
+            Title = track.Title,
+            MediaUrl = mediaUrl,
+            WebpageUrl = track.WebpageUrl,
+            ThumbnailUrl = track.ThumbnailUrl,
+            RequestedBy = track.RequestedBy,
+            RequestedByUserId = track.RequestedByUserId,
+            Duration = track.Duration,
+            Source = track.Source,
+            ExternalId = track.ExternalId,
+            SourceBytes = track.SourceBytes,
+            IsTooLarge = track.IsTooLarge,
+        };
 
     private (string Source, string ExternalId)? ResolveIdentity(TrackInfoEntity track)
     {
@@ -278,7 +355,7 @@ public sealed class PlayableMediaProcessor
         }
     }
 
-    private static bool NeedsRepackage(string mediaUrl)
+    private static bool NeedsRepackage(string mediaUrl, PreparedAssetKind kind)
     {
         if (!Uri.TryCreate(mediaUrl, UriKind.Absolute, out var uri))
         {
@@ -299,14 +376,16 @@ public sealed class PlayableMediaProcessor
                          || host.Contains("cdn.komu", StringComparison.Ordinal)
                          || host.Contains("cdn.nccsoft", StringComparison.Ordinal)
                          || host.Contains("r2.dev", StringComparison.Ordinal);
-        if (onMezonCdn && (path.EndsWith(".ogg") || path.EndsWith(".opus")))
+        if (!onMezonCdn)
         {
-            return false;
+            return true;
         }
 
-        return !(path.EndsWith(".ogg") || path.EndsWith(".opus"));
+        return kind == PreparedAssetKind.Video
+            ? !path.EndsWith(".webm")
+            : !(path.EndsWith(".ogg") || path.EndsWith(".opus"));
     }
 
-    private static string PlayableCacheKey(string source, string externalId)
-        => $"playable:{source}:{externalId}";
+    private static string PlayableCacheKey(PreparedAssetKind kind, string source, string externalId)
+        => $"playable:{kind}:{source}:{externalId}";
 }

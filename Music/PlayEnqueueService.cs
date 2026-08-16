@@ -210,7 +210,8 @@ public sealed class PlayEnqueueService
                 play.Target,
                 play.ReplyMessageId,
                 play.ReplyCreateTimeSeconds,
-                play.IsFromDefault);
+                play.IsFromDefault,
+                play.WantVideo);
             if (front)
             {
                 await _playerStore.EnqueueFrontAsync(clanId, payload, cancellationToken).ConfigureAwait(false);
@@ -233,7 +234,8 @@ public sealed class PlayEnqueueService
         Action<Exception>? onError = null)
     {
         var ct = state.PrepCts?.Token ?? CancellationToken.None;
-        _prep.StartBackgroundPrep(client, play.Track, ct, onError);
+        var kind = play.WantVideo ? PreparedAssetKind.Video : PreparedAssetKind.Audio;
+        _prep.StartBackgroundPrep(client, play.Track, kind, ct, onError);
     }
 
     private static Action<Exception>? OnPrepError(

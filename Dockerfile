@@ -7,9 +7,9 @@
 #
 # FFmpeg 8.0.1 from Assets/ffmpeg/ffmpeg_8.0.1.orig.tar.xz
 #
-# Audio + common video codecs for STN (H.264 / H.265 / VP8 / VP9 / AV1) + WHIP.
-# OpenSSL (not gnutls) is required for WHIP DTLS. Native demux/decode stay on
-# via default configure; external libs below cover encode + fast AV1 decode.
+# Audio + common video codecs for STN passthrough prep (H.264 / H.265 / VP8 / VP9 / AV1).
+# OpenSSL for HTTPS. Native demux/decode stay on via default configure;
+# external libs below cover encode + fast AV1 decode.
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS ffmpeg-build
 WORKDIR /src/ffmpeg
@@ -46,15 +46,13 @@ RUN tar -xJf /tmp/ffmpeg_8.0.1.orig.tar.xz -C /tmp \
         --enable-libaom \
         --enable-libdav1d \
         --enable-libsvtav1 \
-        --enable-muxer=whip \
         --extra-libs="-lpthread -lm" \
     && make -j"$(nproc)" \
     && make install \
     && strip /usr/local/bin/ffmpeg \
-    && /usr/local/bin/ffmpeg -hide_banner -muxers 2>/dev/null | grep -E '^\s*E\s+whip\b' \
     && /usr/local/bin/ffmpeg -hide_banner -encoders 2>/dev/null | grep -E 'libopus|libx264|libx265|libvpx|libaom|libsvtav1' \
     && /usr/local/bin/ffmpeg -hide_banner -decoders 2>/dev/null | grep -E 'h264|hevc|vp8|vp9|av1|libdav1d' \
-    && /usr/local/bin/ffmpeg -hide_banner -protocols 2>/dev/null | grep -E 'https|dtls|tls' \
+    && /usr/local/bin/ffmpeg -hide_banner -protocols 2>/dev/null | grep -E 'https|tls' \
     && rm -rf /tmp/ffmpeg-8.0.1 /tmp/ffmpeg_8.0.1.orig.tar.xz
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
@@ -95,7 +93,6 @@ ENV DOTNET_ENVIRONMENT=prod \
 
 RUN mkdir -p /app/temp \
     && /usr/local/bin/ffmpeg -hide_banner -version \
-    && /usr/local/bin/ffmpeg -hide_banner -muxers 2>/dev/null | grep -E '^\s*E\s+whip\b' \
     && /usr/local/bin/deno --version \
     && yt-dlp --help 2>&1 | grep -q -- '--js-runtimes'
 

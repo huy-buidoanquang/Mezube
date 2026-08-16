@@ -13,10 +13,15 @@ public sealed class PlayerMessageBuilderHelpTests
         Assert.Equal(["Play", "Controls", "Playlist", "Info"], names);
         Assert.DoesNotContain(fields, f => f.Name == "Admin");
 
+        var play = fields.Single(f => f.Name == "Play").Value;
+        Assert.Contains("play <query>", play);
+        Assert.Contains("-v", play);
+
         var controls = fields.Single(f => f.Name == "Controls").Value;
         Assert.Contains("voteskip", controls);
         Assert.Contains("your track only", controls);
         Assert.DoesNotContain("stop", controls);
+        Assert.DoesNotContain("seek", controls);
 
         var playlist = fields.Single(f => f.Name == "Playlist").Value;
         Assert.DoesNotContain("default", playlist);
@@ -32,6 +37,7 @@ public sealed class PlayerMessageBuilderHelpTests
         var controls = fields.Single(f => f.Name == "Controls").Value;
         Assert.Contains("stop", controls);
         Assert.DoesNotContain("your track only", controls);
+        Assert.DoesNotContain("seek", controls);
 
         var playlist = fields.Single(f => f.Name == "Playlist").Value;
         Assert.Contains("default", playlist);
@@ -56,6 +62,9 @@ public sealed class PlayerMessageBuilderHelpTests
         Assert.Contains("never gonna give you up", body);
         Assert.Contains("soundcloud.com", body);
         Assert.Contains("· !play", body);
+        Assert.Contains("#stream", body);
+        Assert.Contains("-v", body);
+        Assert.DoesNotContain("#voice", body);
         Assert.DoesNotContain('`', body);
         Assert.DoesNotContain("spotify", body, StringComparison.OrdinalIgnoreCase);
     }

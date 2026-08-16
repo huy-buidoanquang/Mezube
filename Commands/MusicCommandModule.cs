@@ -29,7 +29,6 @@ public sealed class MusicCommandModule
         commands.AddCommand("queue", ctx => _player.ShowQueueAsync(ctx)).WithAlias("q");
         commands.AddCommand("nowplay", ctx => _player.ShowNowPlayingAsync(ctx)).WithAlias("np");
         commands.AddCommand("loop", ctx => _player.SetLoopAsync(ctx, ctx.CancellationToken));
-        commands.AddCommand("seek", ctx => _player.SeekAsync(ctx, ctx.CancellationToken));
         commands.AddCommand("playlist", ctx => _player.PlaylistAsync(ctx, ctx.CancellationToken)).WithAlias("pl");
         commands.AddCommand("musicchannel", ctx => _player.MusicChannelAsync(ctx, ctx.CancellationToken))
             .WithAlias("mchannel");
@@ -41,13 +40,13 @@ public sealed class MusicCommandModule
     private Task HandlePlayAsync(ICommandContext ctx)
     {
         var channelId = ChannelTargetParser.TryGetHashtagChannelId(ctx);
-        var query = ChannelTargetParser.BuildQuery(ctx.Args);
+        var (query, wantVideo) = ChannelTargetParser.ParsePlayArgs(ctx.Args);
         if (string.IsNullOrWhiteSpace(query))
         {
             return ctx.ReplyAsync(PlayerMessageBuilder.PlayUsage(_prefix));
         }
 
-        return _player.PlayAutoAsync(ctx, query, channelId, ctx.CancellationToken);
+        return _player.PlayAutoAsync(ctx, query, channelId, wantVideo, ctx.CancellationToken);
     }
 
     private async Task HandleHelpAsync(ICommandContext ctx)

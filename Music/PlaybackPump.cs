@@ -138,11 +138,9 @@ public sealed partial class MusicPlayer
             while (!cancellationToken.IsCancellationRequested)
             {
                 QueuedPlay? item;
-                var seekMs = 0L;
                 if (state.ReplayCurrent && state.Queue.CurrentItem is { } current)
                 {
                     item = current;
-                    seekMs = state.PendingSeekMs;
                     state.ReplayCurrent = false;
                     state.PendingSeekMs = 0;
                 }
@@ -198,22 +196,18 @@ public sealed partial class MusicPlayer
 
                 try
                 {
-                    var sink = mode == PlaybackMode.Voice ? (IPlaybackSink)_voiceSink : _streamingSink;
                     _logger.LogDebug(
                         "Playback pipeline start mode={Mode} title={Title} channel={ChannelId} queuedNext={QueuedNext}",
                         mode,
                         track.Title,
                         target.ChannelId,
                         state.Queue.Count);
-                    if (mode == PlaybackMode.Voice && seekMs > 0)
-                    {
-                        await _voiceSink.PlayAsync(target, track, trackCts.Token, startOffsetMs: seekMs)
-                            .ConfigureAwait(false);
-                    }
-                    else
-                    {
-                        await sink.PlayAsync(target, track, trackCts.Token).ConfigureAwait(false);
-                    }
+                    await _streamingSink.PlayAsync(
+                            target,
+                            track,
+                            item.WantVideo ? PreparedAssetKind.Video : PreparedAssetKind.Audio,
+                            trackCts.Token)
+                        .ConfigureAwait(false);
                     _logger.LogDebug(
                         "Playback sink ready mode={Mode} title={Title} channel={ChannelId} elapsedMs={ElapsedMs}",
                         mode,
@@ -235,7 +229,7 @@ public sealed partial class MusicPlayer
 
                     try
                     {
-                        await WaitForTrackEndAsync(state, track, mode, target, trackCts.Token).ConfigureAwait(false);
+                        await WaitForTrackEndAsync(state, track, target, trackCts.Token).ConfigureAwait(false);
                     }
                     catch (OperationCanceledException) when (trackCts.IsCancellationRequested)
                     {
@@ -243,21 +237,14 @@ public sealed partial class MusicPlayer
 
                     try
                     {
-                        if (mode == PlaybackMode.Streaming)
+                        // Keep the WS + listeners across tracks; only !stop tears the session down.
+                        if (state.LastDestroyReason == PlayerDestroyReason.UserStop)
                         {
-                            // Keep the WS + listeners across tracks; only !stop tears the session down.
-                            if (state.LastDestroyReason == PlayerDestroyReason.UserStop)
-                            {
-                                await _streamingSink.StopAsync(target, CancellationToken.None).ConfigureAwait(false);
-                            }
-                            else
-                            {
-                                await _streamingSink.EndTrackAsync(target, CancellationToken.None).ConfigureAwait(false);
-                            }
+                            await _streamingSink.StopAsync(target, CancellationToken.None).ConfigureAwait(false);
                         }
                         else
                         {
-                            await sink.StopAsync(target, CancellationToken.None).ConfigureAwait(false);
+                            await _streamingSink.EndTrackAsync(target, CancellationToken.None).ConfigureAwait(false);
                         }
                     }
                     catch (Exception ex)
@@ -271,20 +258,13 @@ public sealed partial class MusicPlayer
                     // do NOT treat this as playback failure (that was sending a second bot message).
                     try
                     {
-                        if (mode == PlaybackMode.Streaming)
+                        if (state.LastDestroyReason == PlayerDestroyReason.UserStop)
                         {
-                            if (state.LastDestroyReason == PlayerDestroyReason.UserStop)
-                            {
-                                await _streamingSink.StopAsync(target, CancellationToken.None).ConfigureAwait(false);
-                            }
-                            else
-                            {
-                                await _streamingSink.EndTrackAsync(target, CancellationToken.None).ConfigureAwait(false);
-                            }
+                            await _streamingSink.StopAsync(target, CancellationToken.None).ConfigureAwait(false);
                         }
                         else
                         {
-                            await _voiceSink.StopAsync(target, CancellationToken.None).ConfigureAwait(false);
+                            await _streamingSink.EndTrackAsync(target, CancellationToken.None).ConfigureAwait(false);
                         }
                     }
                     catch (Exception ex)
@@ -312,12 +292,8 @@ public sealed partial class MusicPlayer
                     {
                         try
                         {
-                            if (mode == PlaybackMode.Streaming)
-                            {
-                                await _streamingSink.EndTrackAsync(target, CancellationToken.None)
-                                    .ConfigureAwait(false);
-                            }
-                            // Voice: never published if prep failed (prep runs before Stop/publish).
+                            await _streamingSink.EndTrackAsync(target, CancellationToken.None)
+                                .ConfigureAwait(false);
                         }
                         catch (Exception endEx)
                         {
@@ -328,15 +304,14 @@ public sealed partial class MusicPlayer
                     {
                         try
                         {
-                            var sink = mode == PlaybackMode.Voice ? (IPlaybackSink)_voiceSink : _streamingSink;
-                            await sink.StopAsync(target, CancellationToken.None).ConfigureAwait(false);
+                            await _streamingSink.StopAsync(target, CancellationToken.None).ConfigureAwait(false);
                         }
                         catch (Exception stopEx)
                         {
                             _logger.LogDebug(stopEx, "Stop after failure ignored channel={ChannelId}", target.ChannelId);
                         }
 
-                        if (mode == PlaybackMode.Streaming && IsStnInfrastructureFailure(ex))
+                        if (IsStnInfrastructureFailure(ex))
                         {
                             state.Queue.Clear(clearCurrent: true);
                             break;
@@ -762,6 +737,16 @@ public sealed partial class MusicPlayer
                 state.Target = pending[0].ToTarget(clanId);
             }
 
+            if (state.Mode == PlaybackMode.Voice)
+            {
+                _logger.LogInformation(
+                    "Dropping restored voice session clan={ClanId}; STN voice/WHIP is gone",
+                    clanId);
+                state.Queue.Clear();
+                await _playerStore.ClearSessionAsync(clanId, cancellationToken).ConfigureAwait(false);
+                return false;
+            }
+
             await _history.CloseOpenForClanAsync(clanId, PlayEndReason.Restart, cancellationToken).ConfigureAwait(false);
             await _playerStore.SetPlayHistoryIdAsync(clanId, null, cancellationToken).ConfigureAwait(false);
             await _playerStore.SetPositionAsync(clanId, 0, 0, paused: false, cancellationToken).ConfigureAwait(false);
@@ -838,7 +823,8 @@ public sealed partial class MusicPlayer
             payload.ToTarget(clanId),
             payload.ReplyMessageId,
             payload.ReplyCreateTimeSecs,
-            payload.IsFromDefault);
+            payload.IsFromDefault,
+            payload.WantVideo);
 
     private static PlaybackMode ParsePlaybackMode(string? mode)
         => string.Equals(mode, "voice", StringComparison.OrdinalIgnoreCase)
@@ -902,70 +888,34 @@ public sealed partial class MusicPlayer
     }
 
     private static readonly TimeSpan UpNextLead = TimeSpan.FromSeconds(10);
-    private static readonly TimeSpan TrackEndBuffer = TimeSpan.FromSeconds(2);
 
     private async Task WaitForTrackEndAsync(
         ClanPlaybackSession state,
         TrackInfoEntity track,
-        PlaybackMode mode,
         PlaybackTarget target,
         CancellationToken cancellationToken)
     {
-        if (mode != PlaybackMode.Voice)
+        // STN stream_track_ended is authoritative; duration is only used for up-next UX.
+        using var endedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var endedWait = _streamingSink.WaitUntilTrackEndedAsync(target.ChannelId, endedCts.Token);
+        var upNextTask = track.Duration is { } d && d > UpNextLead
+            ? NotifyStreamingUpNextAsync(state, d, endedCts.Token)
+            : Task.CompletedTask;
+
+        await endedWait.ConfigureAwait(false);
+        endedCts.Cancel();
+        try
         {
-            // STN stream_track_ended is authoritative; duration is only used for up-next UX.
-            using var endedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            var endedWait = _streamingSink.WaitUntilTrackEndedAsync(target.ChannelId, endedCts.Token);
-            var upNextTask = track.Duration is { } d && d > UpNextLead
-                ? NotifyStreamingUpNextAsync(state, d, endedCts.Token)
-                : Task.CompletedTask;
-
-            await endedWait.ConfigureAwait(false);
-            endedCts.Cancel();
-            try
-            {
-                await upNextTask.ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-            }
-
-            _logger.LogDebug(
-                "Streaming track ended by STN signal title={Title} channel={ChannelId}",
-                track.Title,
-                target.ChannelId);
-            return;
+            await upNextTask.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
         }
 
-        using var durationCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var durationWait = track.Duration is { } voiceDuration && voiceDuration > TimeSpan.Zero
-            ? WaitByDurationAsync(state, track, voiceDuration, durationCts.Token)
-            : Task.Delay(TimeSpan.FromMinutes(10), durationCts.Token);
-
-        var roomName = string.IsNullOrWhiteSpace(target.RoomName)
-            ? target.ChannelId.ToString()
-            : target.RoomName!;
-        using var statusCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var statusWait = _voiceSink.WaitUntilTerminalAsync(roomName, statusCts.Token);
-        var winner = await Task.WhenAny(durationWait, statusWait).ConfigureAwait(false);
-
-        // !skip / !stop: surface cancel so the pump teardown path runs consistently.
-        cancellationToken.ThrowIfCancellationRequested();
-
-        if (winner == statusWait)
-        {
-            durationCts.Cancel();
-            var terminal = await statusWait.ConfigureAwait(false);
-            if (terminal is "failed")
-            {
-                state.LastDestroyReason = PlayerDestroyReason.StnFailed;
-            }
-
-            return;
-        }
-
-        statusCts.Cancel();
-        await durationWait.ConfigureAwait(false);
+        _logger.LogDebug(
+            "Streaming track ended by STN signal title={Title} channel={ChannelId}",
+            track.Title,
+            target.ChannelId);
     }
 
     private async Task NotifyStreamingUpNextAsync(
@@ -986,34 +936,6 @@ public sealed partial class MusicPlayer
         }
 
         await NotifyUpNextAsync(state, next, (int)Math.Ceiling(UpNextLead.TotalSeconds)).ConfigureAwait(false);
-    }
-
-    private async Task WaitByDurationAsync(
-        ClanPlaybackSession state,
-        TrackInfoEntity track,
-        TimeSpan duration,
-        CancellationToken cancellationToken)
-    {
-        var untilNotify = duration > UpNextLead ? duration - UpNextLead : TimeSpan.Zero;
-        var afterNotify = (duration > UpNextLead ? UpNextLead : duration) + TrackEndBuffer;
-
-        if (untilNotify > TimeSpan.Zero)
-        {
-            await Task.Delay(untilNotify, cancellationToken).ConfigureAwait(false);
-        }
-
-        var next = state.Queue.PeekNext();
-        if (next is not null)
-        {
-            var secondsRemaining = (int)Math.Ceiling(
-                Math.Max(1, (duration > UpNextLead ? UpNextLead : duration).TotalSeconds));
-            await NotifyUpNextAsync(state, next, secondsRemaining).ConfigureAwait(false);
-        }
-
-        if (afterNotify > TimeSpan.Zero)
-        {
-            await Task.Delay(afterNotify, cancellationToken).ConfigureAwait(false);
-        }
     }
 
     private async Task NotifyUpNextAsync(ClanPlaybackSession state, QueuedPlay next, int secondsRemaining)
@@ -1098,7 +1020,7 @@ public sealed partial class MusicPlayer
 
     private static bool IsStnInfrastructureFailure(Exception ex)
     {
-        if (ex is Stn.StnVoiceException or Stn.StnCapacityException)
+        if (ex is Stn.StnCapacityException)
         {
             return true;
         }

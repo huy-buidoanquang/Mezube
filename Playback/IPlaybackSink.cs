@@ -10,8 +10,8 @@ public interface IPlaybackSink
 }
 
 /// <param name="ClanId">Clan owning the playback target.</param>
-/// <param name="ChannelId">Stream or voice channel id.</param>
-/// <param name="RoomName">LiveKit room for voice (voice channel id string).</param>
+/// <param name="ChannelId">Stream channel id.</param>
+/// <param name="RoomName">Publisher room key (channel id string). Kept for Redis payload compat.</param>
 /// <param name="ChannelLabel">Human channel label for Destination UI.</param>
 public sealed record PlaybackTarget(
     long ClanId,

@@ -85,13 +85,15 @@ public sealed class MezonCdnUploader
         Stream content,
         string filename,
         string contentType,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        long? maxBytes = null)
     {
         ArgumentNullException.ThrowIfNull(content);
         filename = SanitizeFilename(filename);
+        var sizeCap = maxBytes is > 0 ? maxBytes.Value : _options.MaxAudioBytes;
         var partSize = Math.Max(_options.MultipartUploadPartBytes, 5 * 1024 * 1024);
         var maxParts = (int)Math.Clamp(
-            (_options.MaxAudioBytes + partSize - 1) / partSize + 1,
+            (sizeCap + partSize - 1) / partSize + 1,
             1,
             10_000);
 
@@ -99,7 +101,7 @@ public sealed class MezonCdnUploader
                 new UploadAttachmentParams(
                     filename: filename,
                     filetype: contentType,
-                    size: (int)Math.Min(_options.MaxAudioBytes, int.MaxValue),
+                    size: (int)Math.Min(sizeCap, int.MaxValue),
                     partCount: maxParts),
                 new RequestOptions { SocketSendTimeout = 120_000 })
             .ConfigureAwait(false);
@@ -136,10 +138,10 @@ public sealed class MezonCdnUploader
                     $"Multipart upload exceeded reserved part count ({urls.Count}).");
             }
 
-            if (totalBytes + filled > _options.MaxAudioBytes)
+            if (totalBytes + filled > sizeCap)
             {
                 throw new InvalidOperationException(
-                    $"Prepared audio exceeds MaxAudioBytes ({_options.MaxAudioBytes}).");
+                    $"Prepared media exceeds max bytes ({sizeCap}).");
             }
 
             var payload = new byte[filled];

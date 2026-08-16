@@ -1,6 +1,5 @@
 using Mezube.Media;
 using Mezube.Music;
-using Mezube.Playback;
 using Mezube.Stn;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -33,26 +32,6 @@ public sealed class MediaCleanupHostedService : IHostedService
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Cancel playback sessions during shutdown ignored");
-        }
-
-        try
-        {
-            _logger.LogDebug("Stopping all voice rooms during host shutdown");
-            await _services.GetRequiredService<VoiceChannelSink>().StopAllAsync().ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to stop voice rooms during shutdown");
-        }
-
-        try
-        {
-            _logger.LogDebug("Stopping all active WHIP publishers during host shutdown");
-            await _services.GetRequiredService<WhipFfmpegPublisher>().StopAllAsync().ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to stop all WHIP publishers during shutdown");
         }
 
         try
