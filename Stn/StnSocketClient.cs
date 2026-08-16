@@ -12,6 +12,10 @@ namespace Mezube.Stn;
 public sealed class StnSocketClient : IAsyncDisposable
 {
     private static readonly TimeSpan CommandAckTimeout = TimeSpan.FromSeconds(20);
+    /// <summary>
+    /// STN fetches the whole FileUrl and validates WebM GOP before <c>connect_publisher</c> ack.
+    /// </summary>
+    private static readonly TimeSpan PublisherAckTimeout = TimeSpan.FromMinutes(3);
 
     private readonly BotOptions _options;
     private readonly ILogger<StnSocketClient> _logger;
@@ -90,7 +94,7 @@ public sealed class StnSocketClient : IAsyncDisposable
             throw new InvalidOperationException(
                 "Không kết nối được STN streaming WebSocket (cùng môi trường với Mezon host).\n" +
                 DescribeFailure(_wsBase, ex) +
-                "\nDev bot → cần stn.nccsoft.vn. Không dùng stn.mezon.ai với JWT nccsoft.",
+                "\nDev STN Rust listen :8081 (vd. http://172.16.100.158:8081). Không dùng stn.mezon.ai với JWT nccsoft.",
                 ex);
         }
     }
@@ -119,7 +123,8 @@ public sealed class StnSocketClient : IAsyncDisposable
                 clanId,
                 streamChannelId,
                 fileUrl,
-                cancellationToken)
+                cancellationToken,
+                ackTimeout: PublisherAckTimeout)
             .ConfigureAwait(false);
     }
 
@@ -295,6 +300,11 @@ public sealed class StnSocketClient : IAsyncDisposable
             return $"- {baseUrl}: 502 Bad Gateway (service STN down / nginx không proxy được backend).";
         }
 
+        if (msg.Contains("'404'", StringComparison.Ordinal))
+        {
+            return $"- {baseUrl}: 404 — sai host/port hoặc không có route /ws. STN Rust mặc định TCP 8081 (không phải :80).";
+        }
+
         if (msg.Contains("'200'", StringComparison.Ordinal))
         {
             return $"- {baseUrl}: HTTP 200 thay vì 101 — endpoint /ws hiện không accept WebSocket upgrade.";
@@ -325,7 +335,8 @@ public sealed class StnSocketClient : IAsyncDisposable
         long streamChannelId,
         string fileUrl,
         CancellationToken cancellationToken,
-        bool? pauseValue = null)
+        bool? pauseValue = null,
+        TimeSpan? ackTimeout = null)
     {
         var waiter = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
         if (!_ackWaiters.TryAdd(ackKey, waiter))
@@ -338,7 +349,7 @@ public sealed class StnSocketClient : IAsyncDisposable
             await SendKeyAsync(key, clanId, streamChannelId, fileUrl, pauseValue, cancellationToken)
                 .ConfigureAwait(false);
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeoutCts.CancelAfter(CommandAckTimeout);
+            timeoutCts.CancelAfter(ackTimeout ?? CommandAckTimeout);
             var error = await waiter.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
             if (!string.IsNullOrWhiteSpace(error))
             {
@@ -378,6 +389,8 @@ public sealed class StnSocketClient : IAsyncDisposable
                 writer.WriteString("ClanId"u8, clanId.ToString());
                 writer.WriteString("ChannelId"u8, streamChannelId.ToString());
                 writer.WriteString("UserId"u8, _botUserId.ToString());
+                writer.WriteString("ClientId"u8, $"{_botUserId}-mezube");
+                writer.WriteBoolean("IsPublisher"u8, true);
                 writer.WriteString("Key"u8, key);
                 writer.WritePropertyName("Value"u8);
                 if (pauseValue is { } paused)

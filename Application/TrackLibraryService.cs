@@ -19,6 +19,12 @@ public interface ITrackLibraryService
         string playableUrl,
         CancellationToken cancellationToken = default);
 
+    Task SetPlayableVideoUrlAsync(
+        string source,
+        string externalId,
+        string playableVideoUrl,
+        CancellationToken cancellationToken = default);
+
     Task SetAliasAsync(
         string aliasKey,
         string source,
@@ -64,6 +70,13 @@ public sealed class TrackLibraryService : ITrackLibraryService
         string playableUrl,
         CancellationToken cancellationToken = default)
         => _tracks.SetPlayableUrlAsync(source, externalId, playableUrl, cancellationToken);
+
+    public Task SetPlayableVideoUrlAsync(
+        string source,
+        string externalId,
+        string playableVideoUrl,
+        CancellationToken cancellationToken = default)
+        => _tracks.SetPlayableVideoUrlAsync(source, externalId, playableVideoUrl, cancellationToken);
 
     public Task SetAliasAsync(
         string aliasKey,

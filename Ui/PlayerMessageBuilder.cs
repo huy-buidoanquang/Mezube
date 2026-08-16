@@ -7,7 +7,6 @@ using Mezube.Music.Interactive;
 using Mezube.Playback;
 using Mezube.Stn;
 using System.Buffers;
-using System.Net;
 using System.Text.Json;
 
 namespace Mezube.Ui;
@@ -28,60 +27,15 @@ public static class PlayerMessageBuilder
     public static void Configure(BotOptions options)
         => _options = options ?? throw new ArgumentNullException(nameof(options));
 
-    /// <summary>Map STN HTTP conflict/capacity (and known bodies) to a clear user-facing embed.</summary>
+    /// <summary>Map STN failures to a clear user-facing embed.</summary>
     public static MessageContent? FromStnFailure(Exception ex)
     {
-        if (ex is StnVoiceException stn)
-        {
-            var body = stn.Body;
-            if (stn.IsUnavailable || StnServerLoad.MentionsCapacity(body))
-            {
-                return Error(
-                    "Voice servers busy",
-                    "We’re out of free voice slots for a moment. Try again shortly.");
-            }
-
-            if (stn.IsCapacityExceeded)
-            {
-                return Error(
-                    "Voice servers full",
-                    "No free voice rooms right now. Give it a moment and try again.");
-            }
-
-            if (stn.IsConflict || stn.StatusCode == HttpStatusCode.Conflict)
-            {
-                if (Contains(body, "whip room already active")
-                    || Contains(body, "whip voice publisher active")
-                    || Contains(body, "voice v2 publisher active")
-                    || Contains(body, "voice v2 room already active"))
-                {
-                    return Error(
-                        "Room already in use",
-                        "Something else is already streaming in that voice channel. Use !stop, then try again.");
-                }
-
-                return Error(
-                    "Room already in use",
-                    "Another stream already owns that voice channel. Stop it first, then try again.");
-            }
-
-            if (Contains(body, "download") || Contains(body, "publisher failed") || Contains(body, "failed"))
-            {
-                return Error(
-                    "Couldn’t start playback",
-                    "I couldn’t fetch or stream that track. Try another link, or try again shortly.");
-            }
-
-            return null;
-        }
-
-        // Streaming WS failures and WaitForPublishingAsync surface plain InvalidOperationException.
         var message = ex.Message ?? string.Empty;
         if (Contains(message, "503") || StnServerLoad.MentionsCapacity(message))
         {
             return Error(
-                "Voice servers busy",
-                "We’re out of free voice slots for a moment. Try again shortly.");
+                "STN busy",
+                "Streaming is out of free slots for a moment. Try again shortly.");
         }
 
         if (Contains(message, "download_failed") || Contains(message, "404"))
@@ -543,12 +497,10 @@ public static class PlayerMessageBuilder
                 new("Next", "I’m preparing audio in the background — you’ll get a quiet ping when it’s ready."),
             ]);
 
-    public static MessageContent ModeConflict(bool wantVoice)
+    public static MessageContent ModeConflict()
         => Error(
-            "Already playing in another mode",
-            wantVoice
-                ? "This clan is on a stream right now. Use !play #voice … or !stop before switching."
-                : "This clan is in a voice channel right now. Use !play #stream … or !stop before switching.");
+            "Already playing",
+            "This clan already has a stream going. Use !stop before starting somewhere else.");
 
     public static MessageContent PlaylistPrepDone(string playlistName, int ready, int total, int failed)
     {
@@ -613,6 +565,7 @@ public static class PlayerMessageBuilder
                 $"""
                 · {p}play <query>
                 · {p}play #channel <query>
+                · {p}play -v <query>
                 Alias: {p}p — free-text search may show a picker (up to 5 results)
                 """),
             (
@@ -620,10 +573,10 @@ public static class PlayerMessageBuilder
                 isDjOrOwner
                     ? $"""
                       · {p}skip · {p}pause · {p}resume · {p}stop
-                      · {p}voteskip · {p}queue · {p}np · {p}loop · {p}seek
+                      · {p}voteskip · {p}queue · {p}np · {p}loop
                       """
                     : $"""
-                      · {p}voteskip · {p}queue · {p}np · {p}loop · {p}seek
+                      · {p}voteskip · {p}queue · {p}np · {p}loop
                       · {p}skip · {p}pause · {p}resume — your track only
                       """),
             (
@@ -697,7 +650,7 @@ public static class PlayerMessageBuilder
                 """),
             (
                 "Channel",
-                $"· {p}play #voice-or-stream <query>"),
+                $"· {p}play #stream <query>\n· {p}play -v <query>"),
         ];
     }
 

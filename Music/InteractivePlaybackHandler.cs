@@ -24,6 +24,7 @@ public sealed partial class MusicPlayer
         PlaybackMode mode,
         long preparingMessageId,
         uint? preparingCreateTime,
+        bool wantVideo,
         CancellationToken cancellationToken)
     {
         IReadOnlyList<TrackInfoEntity> hits;
@@ -64,6 +65,7 @@ public sealed partial class MusicPlayer
                     mode,
                     preparingMessageId,
                     preparingCreateTime,
+                    wantVideo,
                     cancellationToken)
                 .ConfigureAwait(false);
             return;
@@ -95,6 +97,7 @@ public sealed partial class MusicPlayer
                     mode,
                     preparingMessageId,
                     preparingCreateTime,
+                    wantVideo,
                     cancellationToken)
                 .ConfigureAwait(false);
             return;
@@ -112,6 +115,7 @@ public sealed partial class MusicPlayer
             Query = query,
             Candidates = candidates,
             CreatedAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            WantVideo = wantVideo,
         };
 
         try
@@ -136,9 +140,10 @@ public sealed partial class MusicPlayer
         PlaybackMode mode,
         long preparingMessageId,
         uint? preparingCreateTime,
+        bool wantVideo,
         CancellationToken cancellationToken)
     {
-        if (IsTooLarge(track) || track.IsTooLarge)
+        if (IsTooLarge(track, wantVideo) || track.IsTooLarge)
         {
             await UpdateOrReplyAsync(
                     ctx,
@@ -149,7 +154,7 @@ public sealed partial class MusicPlayer
             return;
         }
 
-        var play = new QueuedPlay(track, target, preparingMessageId, preparingCreateTime);
+        var play = new QueuedPlay(track, target, preparingMessageId, preparingCreateTime, WantVideo: wantVideo);
         var kind = await EnqueueOrStartAsync(
                 GetState(target.ClanId),
                 play,
@@ -228,6 +233,14 @@ public sealed partial class MusicPlayer
             }
 
             var mode = session.Mode == "voice" ? PlaybackMode.Voice : PlaybackMode.Streaming;
+            if (mode == PlaybackMode.Voice)
+            {
+                await ctx.RespondAsync(PlayerMessageBuilder.Error(
+                        "Streaming only",
+                        "STN no longer publishes into voice channels. Run !play with a #stream channel."))
+                    .ConfigureAwait(false);
+                return;
+            }
             var target = new PlaybackTarget(
                 session.ClanId,
                 session.TargetChannelId,
@@ -242,7 +255,7 @@ public sealed partial class MusicPlayer
                         target.ChannelLabel)))
                 .ConfigureAwait(false);
 
-            await EnqueueFromInteractionAsync(ctx, track, target, mode, messageId).ConfigureAwait(false);
+            await EnqueueFromInteractionAsync(ctx, track, target, mode, messageId, session.WantVideo).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -263,15 +276,16 @@ public sealed partial class MusicPlayer
         TrackInfoEntity track,
         PlaybackTarget target,
         PlaybackMode mode,
-        long messageId)
+        long messageId,
+        bool wantVideo)
     {
-        if (IsTooLarge(track) || track.IsTooLarge)
+        if (IsTooLarge(track, wantVideo) || track.IsTooLarge)
         {
             await ctx.UpdateMessageAsync(PlayerMessageBuilder.CopyrightBlocked()).ConfigureAwait(false);
             return;
         }
 
-        var play = new QueuedPlay(track, target, messageId, null);
+        var play = new QueuedPlay(track, target, messageId, null, WantVideo: wantVideo);
         var kind = await EnqueueOrStartAsync(
                 GetState(target.ClanId),
                 play,

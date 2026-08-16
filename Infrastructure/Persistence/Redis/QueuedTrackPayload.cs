@@ -23,7 +23,7 @@ public sealed class QueuedTrackPayload
     public string? ThumbnailUrl { get; set; }
     public double? DurationSeconds { get; set; }
     public string? PlayableUrl { get; set; }
-    public string Mode { get; set; } = "voice";
+    public string Mode { get; set; } = "streaming";
     public long ChannelId { get; set; }
     public string? ChannelLabel { get; set; }
     public string? RoomName { get; set; }
@@ -32,6 +32,7 @@ public sealed class QueuedTrackPayload
     public long? ReplyMessageId { get; set; }
     public uint? ReplyCreateTimeSecs { get; set; }
     public bool IsFromDefault { get; set; }
+    public bool WantVideo { get; set; }
 
     public static QueuedTrackPayload From(
         TrackInfoEntity track,
@@ -39,7 +40,8 @@ public sealed class QueuedTrackPayload
         PlaybackTarget target,
         long? replyMessageId,
         uint? replyCreateTimeSeconds,
-        bool isFromDefault = false)
+        bool isFromDefault = false,
+        bool wantVideo = false)
         => new()
         {
             TrackId = track.TrackId,
@@ -49,7 +51,9 @@ public sealed class QueuedTrackPayload
             WebpageUrl = track.WebpageUrl,
             ThumbnailUrl = track.ThumbnailUrl,
             DurationSeconds = track.Duration?.TotalSeconds,
-            PlayableUrl = PlayableUrlHelper.NullIfNotPrepared(track.MediaUrl),
+            PlayableUrl = wantVideo
+                ? PlayableUrlHelper.NullIfNotPrepared(track.MediaUrl)
+                : PlayableUrlHelper.NullIfNotAudio(track.MediaUrl),
             Mode = mode,
             ChannelId = target.ChannelId,
             ChannelLabel = target.ChannelLabel,
@@ -59,6 +63,7 @@ public sealed class QueuedTrackPayload
             ReplyMessageId = replyMessageId,
             ReplyCreateTimeSecs = replyCreateTimeSeconds,
             IsFromDefault = isFromDefault,
+            WantVideo = wantVideo,
         };
 
     public TrackInfoEntity ToTrackInfo()
@@ -66,9 +71,7 @@ public sealed class QueuedTrackPayload
         {
             TrackId = TrackId,
             Title = Title,
-            MediaUrl = PlayableUrlHelper.IsPreparedPlayableUrl(PlayableUrl)
-                ? PlayableUrl!
-                : !string.IsNullOrWhiteSpace(WebpageUrl) ? WebpageUrl! : ExternalId,
+            MediaUrl = RestoreMediaUrl(),
             WebpageUrl = WebpageUrl,
             ThumbnailUrl = ThumbnailUrl,
             RequestedBy = RequestedByName,
@@ -78,6 +81,21 @@ public sealed class QueuedTrackPayload
             ExternalId = ExternalId,
             IsTooLarge = false,
         };
+
+    private string RestoreMediaUrl()
+    {
+        if (WantVideo && PlayableUrlHelper.IsPreparedPlayableUrl(PlayableUrl))
+        {
+            return PlayableUrl!;
+        }
+
+        if (!WantVideo && PlayableUrlHelper.IsPreparedAudioUrl(PlayableUrl))
+        {
+            return PlayableUrl!;
+        }
+
+        return !string.IsNullOrWhiteSpace(WebpageUrl) ? WebpageUrl! : ExternalId;
+    }
 
     public PlaybackTarget ToTarget(long clanId)
         => new(clanId, ChannelId, RoomName, ChannelLabel);

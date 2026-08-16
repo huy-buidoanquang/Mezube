@@ -26,7 +26,6 @@ public sealed class MezubeBot : BackgroundService
     private readonly MusicPlayer _player;
     private readonly BindStore _binds;
     private readonly StreamingChannelSinkHolder _streamingHolder;
-    private readonly VoiceChannelSinkHolder _voiceHolder;
     private readonly MusicVizAssets _viz;
     private readonly IClanSettingsService _clanSettings;
     private readonly MezonEntityCacheBridge _entityCache;
@@ -46,7 +45,6 @@ public sealed class MezubeBot : BackgroundService
         MusicPlayer player,
         BindStore binds,
         StreamingChannelSinkHolder streamingHolder,
-        VoiceChannelSinkHolder voiceHolder,
         MusicVizAssets viz,
         IClanSettingsService clanSettings,
         MezonEntityCacheBridge entityCache,
@@ -61,7 +59,6 @@ public sealed class MezubeBot : BackgroundService
         _player = player;
         _binds = binds;
         _streamingHolder = streamingHolder;
-        _voiceHolder = voiceHolder;
         _viz = viz;
         _clanSettings = clanSettings;
         _entityCache = entityCache;
@@ -92,7 +89,6 @@ public sealed class MezubeBot : BackgroundService
         await using var client = new MezonClient(clientOptions);
         _client = client;
         _streamingHolder.SetClient(client);
-        _voiceHolder.SetClient(client);
         WireClientLog(client);
         await _entityCache.AttachAsync(client, stoppingToken).ConfigureAwait(false);
 
@@ -779,13 +775,6 @@ public sealed class MezubeBot : BackgroundService
 
 /// <summary>Holds MezonClient for sinks registered before login.</summary>
 public sealed class StreamingChannelSinkHolder
-{
-    private MezonClient? _client;
-    public void SetClient(MezonClient client) => _client = client;
-    public MezonClient GetClient() => _client ?? throw new InvalidOperationException("Client not ready.");
-}
-
-public sealed class VoiceChannelSinkHolder
 {
     private MezonClient? _client;
     public void SetClient(MezonClient client) => _client = client;

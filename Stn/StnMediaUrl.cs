@@ -1,24 +1,13 @@
 namespace Mezube.Stn;
 
 /// <summary>
-/// Matches STN <c>IsSupportedOpusSourceURL</c>: absolute URL whose path ends with .ogg or .opus.
+/// STN CDN ingest: <c>.ogg</c>/<c>.opus</c> (Opus audio) and <c>.webm</c> (Opus+VP8/VP9).
 /// </summary>
 public static class StnMediaUrl
 {
     public static bool IsSupportedOpusSourceUrl(string? rawUrl)
-    {
-        if (string.IsNullOrWhiteSpace(rawUrl))
-        {
-            return false;
-        }
+        => Helpers.PlayableUrlHelper.IsPreparedAudioUrl(rawUrl);
 
-        if (!Uri.TryCreate(rawUrl, UriKind.Absolute, out var uri))
-        {
-            return false;
-        }
-
-        var path = uri.AbsolutePath;
-        return path.EndsWith(".ogg", StringComparison.OrdinalIgnoreCase)
-               || path.EndsWith(".opus", StringComparison.OrdinalIgnoreCase);
-    }
+    public static bool IsSupportedStreamingSourceUrl(string? rawUrl)
+        => Helpers.PlayableUrlHelper.IsPreparedStreamingUrl(rawUrl);
 }

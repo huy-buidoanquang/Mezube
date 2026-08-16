@@ -329,7 +329,44 @@ public sealed class YtDlpProcessor
         return false;
     }
 
-    public async Task<string?> DownloadTrackAudioAsync(string source, string outputPathWithoutExt, CancellationToken cancellationToken = default)
+    public Task<string?> DownloadTrackAudioAsync(
+        string source,
+        string outputPathWithoutExt,
+        CancellationToken cancellationToken = default)
+        => DownloadAsync(
+            source,
+            outputPathWithoutExt,
+            "bestaudio[acodec=opus]/bestaudio/best",
+            _options.MaxAudioBytes,
+            mergeOutputFormat: null,
+            cancellationToken);
+
+    public Task<string?> DownloadTrackVideoAsync(
+        string source,
+        string outputPathWithoutExt,
+        CancellationToken cancellationToken = default)
+    {
+        var height = Math.Clamp(_options.PreparedVideoHeight, 360, 1080);
+        var format =
+            $"bestvideo[height<={height}][vcodec!=none]+bestaudio[acodec!=none]/"
+            + $"bestvideo[height<={height}]+bestaudio/"
+            + $"best[height<={height}]/best";
+        return DownloadAsync(
+            source,
+            outputPathWithoutExt,
+            format,
+            _options.MaxVideoBytes,
+            mergeOutputFormat: "mkv",
+            cancellationToken);
+    }
+
+    private async Task<string?> DownloadAsync(
+        string source,
+        string outputPathWithoutExt,
+        string format,
+        long maxBytes,
+        string? mergeOutputFormat,
+        CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(outputPathWithoutExt) ?? _options.TempDir);
         var template = outputPathWithoutExt + ".%(ext)s";
@@ -366,13 +403,19 @@ public sealed class YtDlpProcessor
                 "--socket-timeout",
                 "20",
                 "--max-filesize",
-                _options.MaxAudioBytes.ToString(),
+                maxBytes.ToString(),
                 "-f",
-                "bestaudio[acodec=opus]/bestaudio/best",
+                format,
                 "-o",
                 template,
-                source,
             };
+            if (!string.IsNullOrWhiteSpace(mergeOutputFormat))
+            {
+                downloadArgs.Add("--merge-output-format");
+                downloadArgs.Add(mergeOutputFormat);
+            }
+
+            downloadArgs.Add(source);
             if (!string.IsNullOrWhiteSpace(_options.FfmpegPath))
             {
                 downloadArgs.Insert(0, _options.FfmpegPath);

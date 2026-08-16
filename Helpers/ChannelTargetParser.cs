@@ -33,13 +33,42 @@ public static class ChannelTargetParser
     /// Builds the music query from args, dropping tokens that look like channel hashtags.
     /// </summary>
     public static string BuildQuery(IEnumerable<string> args)
+        => ParsePlayArgs(args).Query;
+
+    /// <summary>
+    /// Same as <see cref="BuildQuery"/> plus opt-in video via <c>-v</c> / <c>--video</c>.
+    /// </summary>
+    public static (string Query, bool WantVideo) ParsePlayArgs(IEnumerable<string> args)
     {
-        var parts = args
-            .Where(a => !string.IsNullOrWhiteSpace(a))
-            .Where(a => !LooksLikeHashtagToken(a))
-            .ToList();
-        return string.Join(' ', parts).Trim();
+        var wantVideo = false;
+        var parts = new List<string>();
+        foreach (var raw in args)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                continue;
+            }
+
+            if (LooksLikeHashtagToken(raw))
+            {
+                continue;
+            }
+
+            if (IsVideoFlag(raw))
+            {
+                wantVideo = true;
+                continue;
+            }
+
+            parts.Add(raw);
+        }
+
+        return (string.Join(' ', parts).Trim(), wantVideo);
     }
+
+    private static bool IsVideoFlag(string token)
+        => token.Equals("-v", StringComparison.OrdinalIgnoreCase)
+           || token.Equals("--video", StringComparison.OrdinalIgnoreCase);
 
     private static bool LooksLikeHashtagToken(string token)
     {

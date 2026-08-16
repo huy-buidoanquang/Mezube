@@ -44,15 +44,11 @@ internal static class Program
         PlayerMessageBuilder.Configure(options);
         ConfigureLogging(builder.Logging, builder.Configuration, options);
 
-        builder.Services.AddHttpClient<StnRestClientV2>();
-        builder.Services.AddHttpClient<StnWhipClient>();
         builder.Services.AddHttpClient(nameof(MezonCdnUploader));
         builder.Services.AddSingleton<StnStreamingSessionManager>();
         builder.Services.AddSingleton<StreamingChannelSinkHolder>();
-        builder.Services.AddSingleton<VoiceChannelSinkHolder>();
         builder.Services.AddSingleton<YtDlpProcessor>();
         builder.Services.AddSingleton<FfmpegProcessor>();
-        builder.Services.AddSingleton<WhipFfmpegPublisher>();
         builder.Services.AddSingleton<MezonCdnUploader>();
         builder.Services.AddSingleton<PipelineProcessor>();
         builder.Services.AddSingleton<MusicVizAssets>();
@@ -120,7 +116,6 @@ internal static class Program
         builder.Services.AddSingleton<PlayEnqueueService>();
         builder.Services.AddSingleton<BindStore>();
         builder.Services.AddSingleton<StreamingChannelSink>();
-        builder.Services.AddSingleton<VoiceChannelSink>();
         builder.Services.AddSingleton<PlaybackAccess>();
         builder.Services.AddSingleton<MusicPlayer>();
         builder.Services.AddHostedService<PersistenceInitializer>();

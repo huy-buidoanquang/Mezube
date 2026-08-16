@@ -1,78 +1,41 @@
 namespace Mezube.Stn;
 
-/// <summary>Derives REST/WS endpoints from a single STN origin.</summary>
+/// <summary>Derives the streaming WebSocket endpoint from a single STN origin.</summary>
 public static class StnUrl
 {
+    private static readonly string[] KnownSuffixes =
+    [
+        "/ws",
+        "/api/playmedia",
+        "/api/stopmedia",
+        "/api/v2/voice/play",
+        "/api/v2/voice/stop",
+        "/api/v2/voice/status",
+        "/api/v2/voice/whip/start",
+        "/api/v2/voice/whip/stop",
+        "/api/v2/voice/whip/status",
+        "/api/voice/play",
+        "/api/voice/stop",
+        "/api/voice/status",
+        "/api/voice/metrics",
+        "/api/whip/start",
+        "/api/whip/stop",
+        "/api/whip/status",
+    ];
+
     public static string NormalizeBase(string url)
     {
         var baseUrl = url.Trim().TrimEnd('/');
-        // Allow pasting full paths; strip known suffixes.
-        if (baseUrl.EndsWith("/ws", StringComparison.OrdinalIgnoreCase))
+        foreach (var suffix in KnownSuffixes)
         {
-            baseUrl = baseUrl[..^3].TrimEnd('/');
-        }
-
-        const string play = "/api/playmedia";
-        const string stop = "/api/stopmedia";
-        const string playV2 = "/api/v2/voice/play";
-        const string stopV2 = "/api/v2/voice/stop";
-        const string statusV2 = "/api/v2/voice/status";
-        const string whipStart = "/api/v2/voice/whip/start";
-        const string whipStop = "/api/v2/voice/whip/stop";
-        const string whipStatus = "/api/v2/voice/whip/status";
-        if (baseUrl.EndsWith(play, StringComparison.OrdinalIgnoreCase))
-        {
-            baseUrl = baseUrl[..^play.Length].TrimEnd('/');
-        }
-        else if (baseUrl.EndsWith(stop, StringComparison.OrdinalIgnoreCase))
-        {
-            baseUrl = baseUrl[..^stop.Length].TrimEnd('/');
-        }
-        else if (baseUrl.EndsWith(playV2, StringComparison.OrdinalIgnoreCase))
-        {
-            baseUrl = baseUrl[..^playV2.Length].TrimEnd('/');
-        }
-        else if (baseUrl.EndsWith(stopV2, StringComparison.OrdinalIgnoreCase))
-        {
-            baseUrl = baseUrl[..^stopV2.Length].TrimEnd('/');
-        }
-        else if (baseUrl.EndsWith(statusV2, StringComparison.OrdinalIgnoreCase))
-        {
-            baseUrl = baseUrl[..^statusV2.Length].TrimEnd('/');
-        }
-        else if (baseUrl.EndsWith(whipStart, StringComparison.OrdinalIgnoreCase))
-        {
-            baseUrl = baseUrl[..^whipStart.Length].TrimEnd('/');
-        }
-        else if (baseUrl.EndsWith(whipStop, StringComparison.OrdinalIgnoreCase))
-        {
-            baseUrl = baseUrl[..^whipStop.Length].TrimEnd('/');
-        }
-        else if (baseUrl.EndsWith(whipStatus, StringComparison.OrdinalIgnoreCase))
-        {
-            baseUrl = baseUrl[..^whipStatus.Length].TrimEnd('/');
+            if (baseUrl.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            {
+                return baseUrl[..^suffix.Length].TrimEnd('/');
+            }
         }
 
         return baseUrl;
     }
-
-    public static Uri VoiceV2PlayUri(string baseUrl)
-        => new(NormalizeBase(baseUrl) + "/api/v2/voice/play", UriKind.Absolute);
-
-    public static Uri VoiceV2StopUri(string baseUrl)
-        => new(NormalizeBase(baseUrl) + "/api/v2/voice/stop", UriKind.Absolute);
-
-    public static Uri VoiceV2StatusUri(string baseUrl)
-        => new(NormalizeBase(baseUrl) + "/api/v2/voice/status", UriKind.Absolute);
-
-    public static Uri VoiceWhipStartUri(string baseUrl)
-        => new(NormalizeBase(baseUrl) + "/api/v2/voice/whip/start", UriKind.Absolute);
-
-    public static Uri VoiceWhipStopUri(string baseUrl)
-        => new(NormalizeBase(baseUrl) + "/api/v2/voice/whip/stop", UriKind.Absolute);
-
-    public static Uri VoiceWhipStatusUri(string baseUrl)
-        => new(NormalizeBase(baseUrl) + "/api/v2/voice/whip/status", UriKind.Absolute);
 
     public static string WebSocketBase(string baseUrl)
     {

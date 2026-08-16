@@ -36,7 +36,8 @@ public sealed partial class MusicPlayer
                 play.Target,
                 play.ReplyMessageId,
                 play.ReplyCreateTimeSeconds,
-                play.IsFromDefault);
+                play.IsFromDefault,
+                play.WantVideo);
             await _playerStore.EnqueueAsync(clanId, payload).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -68,7 +69,7 @@ public sealed partial class MusicPlayer
                     ThumbnailUrl = track.ThumbnailUrl,
                     Duration = track.Duration,
                     // Never promote MediaUrl (often youtube/soundcloud webpage) to playable_url.
-                    PlayableUrl = PlayableUrlHelper.NullIfNotPrepared(track.MediaUrl),
+                    PlayableUrl = PlayableUrlHelper.NullIfNotAudio(track.MediaUrl),
                     SourceBytes = track.SourceBytes,
                     IsTooLarge = track.IsTooLarge,
                 },
@@ -124,7 +125,8 @@ public sealed partial class MusicPlayer
                         play.Target,
                         play.ReplyMessageId,
                         play.ReplyCreateTimeSeconds,
-                        play.IsFromDefault),
+                        play.IsFromDefault,
+                        play.WantVideo),
                     cancellationToken)
                 .ConfigureAwait(false);
             return historyId;

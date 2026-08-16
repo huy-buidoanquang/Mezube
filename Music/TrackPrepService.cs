@@ -37,19 +37,26 @@ public sealed class TrackPrepService
         MezonClient client,
         TrackInfoEntity track,
         CancellationToken cancellationToken = default)
+        => EnsurePreparedAsync(client, track, PreparedAssetKind.Audio, cancellationToken);
+
+    public Task<TrackInfoEntity> EnsurePreparedAsync(
+        MezonClient client,
+        TrackInfoEntity track,
+        PreparedAssetKind kind,
+        CancellationToken cancellationToken = default)
     {
-        var key = BuildKey(track);
+        var key = BuildKey(kind, track);
         if (key is null)
         {
-            return RunGatedUngatedKeyAsync(client, track, cancellationToken);
+            return RunGatedUngatedKeyAsync(client, track, kind, cancellationToken);
         }
 
         var lazy = _inflight.GetOrAdd(
             key,
             static (k, state) => new Lazy<Task<TrackInfoEntity>>(
-                () => state.self.RunGatedAsync(state.client, state.track, k),
+                () => state.self.RunGatedAsync(state.client, state.track, state.kind, k),
                 LazyThreadSafetyMode.ExecutionAndPublication),
-            (self: this, client, track));
+            (self: this, client, track, kind));
 
         return AwaitSharedAsync(lazy.Value, cancellationToken);
     }
@@ -59,19 +66,27 @@ public sealed class TrackPrepService
         TrackInfoEntity track,
         CancellationToken cancellationToken,
         Action<Exception>? onError = null)
+        => StartBackgroundPrep(client, track, PreparedAssetKind.Audio, cancellationToken, onError);
+
+    public void StartBackgroundPrep(
+        MezonClient client,
+        TrackInfoEntity track,
+        PreparedAssetKind kind,
+        CancellationToken cancellationToken,
+        Action<Exception>? onError = null)
     {
         _ = Task.Run(async () =>
         {
             try
             {
-                await EnsurePreparedAsync(client, track, cancellationToken).ConfigureAwait(false);
+                await EnsurePreparedAsync(client, track, kind, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Background prep failed for {Title}", track.Title);
+                _logger.LogWarning(ex, "Background prep failed for {Title} kind={Kind}", track.Title, kind);
                 onError?.Invoke(ex);
             }
         }, CancellationToken.None);
@@ -80,6 +95,7 @@ public sealed class TrackPrepService
     private async Task<TrackInfoEntity> RunGatedAsync(
         MezonClient client,
         TrackInfoEntity track,
+        PreparedAssetKind kind,
         string key)
     {
         // Shared work must not use a per-caller CT: CancelTrack / PrepCts cancel would abort
@@ -87,7 +103,7 @@ public sealed class TrackPrepService
         await _gate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
-            return await _processor.ProcessTrackAsync(client, track, CancellationToken.None)
+            return await _processor.ProcessTrackAsync(client, track, kind, CancellationToken.None)
                 .ConfigureAwait(false);
         }
         finally
@@ -100,12 +116,13 @@ public sealed class TrackPrepService
     private async Task<TrackInfoEntity> RunGatedUngatedKeyAsync(
         MezonClient client,
         TrackInfoEntity track,
+        PreparedAssetKind kind,
         CancellationToken cancellationToken)
     {
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            return await _processor.ProcessTrackAsync(client, track, cancellationToken)
+            return await _processor.ProcessTrackAsync(client, track, kind, cancellationToken)
                 .ConfigureAwait(false);
         }
         finally
@@ -132,6 +149,12 @@ public sealed class TrackPrepService
         }
 
         return await task.ConfigureAwait(false);
+    }
+
+    private static string? BuildKey(PreparedAssetKind kind, TrackInfoEntity track)
+    {
+        var id = BuildKey(track);
+        return id is null ? null : $"{kind}:{id}";
     }
 
     private static string? BuildKey(TrackInfoEntity track)

@@ -11,14 +11,17 @@ public sealed class TrackEntity
     public string? WebpageUrl { get; init; }
     public string? ThumbnailUrl { get; init; }
     public TimeSpan? Duration { get; init; }
-    /// <summary>Mezon CDN .ogg/.opus after prep — never a YouTube/SoundCloud webpage URL.</summary>
+    /// <summary>Mezon CDN .ogg/.opus after audio prep — never a YouTube/SoundCloud webpage URL.</summary>
     public string? PlayableUrl { get; init; }
+    /// <summary>Mezon CDN .webm (Opus+VP8) after streaming video prep.</summary>
+    public string? PlayableVideoUrl { get; init; }
     /// <summary>Persisted probe/download size when known.</summary>
     public long? SourceBytes { get; init; }
     /// <summary>True when this track exceeded the max audio size and must not be queued/played.</summary>
     public bool IsTooLarge { get; init; }
 
-    public bool HasPlayableUrl => PlayableUrlHelper.IsPreparedPlayableUrl(PlayableUrl);
+    public bool HasPlayableUrl => PlayableUrlHelper.IsPreparedAudioUrl(PlayableUrl);
+    public bool HasPlayableVideoUrl => PlayableUrlHelper.IsPreparedVideoUrl(PlayableVideoUrl);
 
     public TrackInfoEntity ToTrackInfo(string? requestedBy)
     {

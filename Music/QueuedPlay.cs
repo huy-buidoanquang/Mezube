@@ -5,7 +5,7 @@ namespace Mezube.Music;
 
 /// <summary>
 /// One queued play request. Target is fixed at enqueue time so a later item
-/// can play in another voice/stream channel of the same clan after the current track ends
+/// can play in another stream channel of the same clan after the current track ends
 /// (still sequential — never concurrent rooms for one clan).
 /// </summary>
 public sealed record QueuedPlay(
@@ -13,4 +13,5 @@ public sealed record QueuedPlay(
     PlaybackTarget Target,
     long? ReplyMessageId = null,
     uint? ReplyCreateTimeSeconds = null,
-    bool IsFromDefault = false);
+    bool IsFromDefault = false,
+    bool WantVideo = false);

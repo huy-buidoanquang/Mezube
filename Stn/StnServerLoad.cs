@@ -1,8 +1,8 @@
 namespace Mezube.Stn;
 
 /// <summary>
-/// STN admission control rejects work instead of exhausting memory: the WS door and the voice
-/// APIs answer with these strings (constant/constant.go ERR_MAX_*, ERR_MEMORY_PRESSURE).
+/// STN admission control rejects work instead of exhausting memory: the WS door
+/// answers with these strings (constant/constant.go ERR_MAX_*, ERR_MEMORY_PRESSURE).
 /// </summary>
 public static class StnServerLoad
 {
