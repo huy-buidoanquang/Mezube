@@ -18,17 +18,20 @@ public sealed class StreamingChannelSink : IPlaybackSink
 
     private readonly StnStreamingSessionManager _sessions;
     private readonly StreamingChannelSinkHolder _holder;
+    private readonly StnCredentialProvider _credentials;
     private readonly TrackPrepService _prep;
     private readonly ILogger<StreamingChannelSink> _logger;
 
     public StreamingChannelSink(
         StnStreamingSessionManager sessions,
         StreamingChannelSinkHolder holder,
+        StnCredentialProvider credentials,
         TrackPrepService prep,
         ILogger<StreamingChannelSink> logger)
     {
         _sessions = sessions;
         _holder = holder;
+        _credentials = credentials;
         _prep = prep;
         _logger = logger;
     }
@@ -83,32 +86,13 @@ public sealed class StreamingChannelSink : IPlaybackSink
                 target.ChannelId);
         }
 
-        var auth = Stopwatch.StartNew();
-        var authToken = await client.GetAuthTokenAsync().ConfigureAwait(false);
-        _logger.LogDebug(
-            "Streaming auth token ready clan={ClanId} channel={ChannelId} elapsedMs={ElapsedMs}",
-            target.ClanId,
-            target.ChannelId,
-            auth.ElapsedMilliseconds);
-
         var stn = _sessions.GetOrCreate(target.ChannelId);
-        var connect = Stopwatch.StartNew();
-        var freshWs = await stn.EnsureConnectedAsync(authToken, client.BotId, client.Username, cancellationToken)
-            .ConfigureAwait(false);
-        _logger.LogDebug(
-            "Streaming STN websocket ready clan={ClanId} channel={ChannelId} elapsedMs={ElapsedMs} freshWs={FreshWs}",
-            target.ClanId,
-            target.ChannelId,
-            connect.ElapsedMilliseconds,
-            freshWs);
-
         var play = Stopwatch.StartNew();
-        await PublishAndConfirmPresenceAsync(
+        await ConnectAndPublishWithRetryAsync(
                 client,
                 stn,
                 target,
                 playable.MediaUrl,
-                retryIfNoJoined: freshWs,
                 cancellationToken)
             .ConfigureAwait(false);
         _logger.LogDebug(
@@ -120,13 +104,104 @@ public sealed class StreamingChannelSink : IPlaybackSink
             total.ElapsedMilliseconds);
     }
 
+    private async Task ConnectAndPublishWithRetryAsync(
+        Mezon.Net.Sdk.MezonClient client,
+        StnSocketClient stn,
+        PlaybackTarget target,
+        string mediaUrl,
+        CancellationToken cancellationToken)
+    {
+        const int maximumAttempts = 2;
+        for (var attempt = 1; attempt <= maximumAttempts; attempt++)
+        {
+            try
+            {
+                bool freshWs;
+                var connect = Stopwatch.StartNew();
+                if (stn.IsConnected)
+                {
+                    freshWs = false;
+                }
+                else
+                {
+                    var credential = await _credentials.GetPrimaryAsync().ConfigureAwait(false);
+                    try
+                    {
+                        freshWs = await stn.EnsureConnectedAsync(
+                                credential.Value,
+                                client.BotId,
+                                client.Username,
+                                cancellationToken,
+                                credential.Kind,
+                                attempt,
+                                target.ChannelId)
+                            .ConfigureAwait(false);
+                    }
+                    catch (StnConnectionException ex)
+                        when (credential.Kind == StnCredentialKind.SessionId && ex.AllowsJwtFallback)
+                    {
+                        _logger.LogWarning(
+                            "STN SID handshake rejected; retrying with refreshed JWT channel={ChannelId} statusCode={StatusCode}",
+                            target.ChannelId,
+                            ex.StatusCode);
+                        var jwt = await _credentials.GetJwtAsync().ConfigureAwait(false);
+                        freshWs = await stn.EnsureConnectedAsync(
+                                jwt.Value,
+                                client.BotId,
+                                client.Username,
+                                cancellationToken,
+                                jwt.Kind,
+                                attempt,
+                                target.ChannelId)
+                            .ConfigureAwait(false);
+                    }
+                }
+
+                _logger.LogDebug(
+                    "Streaming STN websocket ready clan={ClanId} channel={ChannelId} elapsedMs={ElapsedMs} freshWs={FreshWs} attempt={Attempt}",
+                    target.ClanId,
+                    target.ChannelId,
+                    connect.ElapsedMilliseconds,
+                    freshWs,
+                    attempt);
+                await PublishAndConfirmPresenceAsync(
+                        client,
+                        stn,
+                        target,
+                        mediaUrl,
+                        retryIfNoJoined: freshWs,
+                        cancellationToken,
+                        attempt)
+                    .ConfigureAwait(false);
+                return;
+            }
+            catch (Exception ex) when (attempt < maximumAttempts && IsRetryableBeforePublishAck(ex))
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Transient STN failure before publish ack; replacing session and retrying channel={ChannelId} attempt={Attempt}",
+                    target.ChannelId,
+                    attempt);
+                await stn.InvalidateAndDisconnectAsync("Transient failure before connect_publisher acknowledgement")
+                    .ConfigureAwait(false);
+                await Task.Delay(TimeSpan.FromMilliseconds(500 + Random.Shared.Next(0, 251)), cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+    }
+
+    private static bool IsRetryableBeforePublishAck(Exception exception)
+        => exception is StnConnectionException { Retryable: true }
+           || exception is StnPublisherException { Retryable: true, Phase: not "streaming" };
+
     private async Task PublishAndConfirmPresenceAsync(
         Mezon.Net.Sdk.MezonClient client,
         StnSocketClient stn,
         PlaybackTarget target,
         string mediaUrl,
         bool retryIfNoJoined,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int attempt)
     {
         var joined = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         Func<Task> onJoined = () =>
@@ -138,7 +213,7 @@ public sealed class StreamingChannelSink : IPlaybackSink
         client.StreamingJoined += onJoined;
         try
         {
-            await stn.PlayAsync(target.ClanId, target.ChannelId, mediaUrl, cancellationToken)
+            await stn.PlayAsync(target.ClanId, target.ChannelId, mediaUrl, cancellationToken, attempt)
                 .ConfigureAwait(false);
 
             if (!retryIfNoJoined)
@@ -166,7 +241,7 @@ public sealed class StreamingChannelSink : IPlaybackSink
 
             // Reset waiter for the retry attempt.
             joined = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            await stn.PlayAsync(target.ClanId, target.ChannelId, mediaUrl, cancellationToken)
+            await stn.PlayAsync(target.ClanId, target.ChannelId, mediaUrl, cancellationToken, attempt)
                 .ConfigureAwait(false);
 
             using var retryWaitCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -222,10 +297,6 @@ public sealed class StreamingChannelSink : IPlaybackSink
             throw new InvalidOperationException("No active streaming session to pause.");
         }
 
-        var client = _holder.GetClient();
-        var authToken = await client.GetAuthTokenAsync().ConfigureAwait(false);
-        await stn.EnsureConnectedAsync(authToken, client.BotId, client.Username, cancellationToken)
-            .ConfigureAwait(false);
         await stn.SetPausedAsync(target.ClanId, target.ChannelId, paused, cancellationToken).ConfigureAwait(false);
     }
 
@@ -242,12 +313,8 @@ public sealed class StreamingChannelSink : IPlaybackSink
             return;
         }
 
-        var client = _holder.GetClient();
         try
         {
-            var authToken = await client.GetAuthTokenAsync().ConfigureAwait(false);
-            await stn.EnsureConnectedAsync(authToken, client.BotId, client.Username, cancellationToken)
-                .ConfigureAwait(false);
             await stn.StopPublisherAsync(target.ClanId, target.ChannelId, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)

@@ -47,6 +47,7 @@ internal static class Program
         builder.Services.AddHttpClient(nameof(MezonCdnUploader));
         builder.Services.AddSingleton<StnStreamingSessionManager>();
         builder.Services.AddSingleton<StreamingChannelSinkHolder>();
+        builder.Services.AddSingleton<StnCredentialProvider>();
         builder.Services.AddSingleton<YtDlpProcessor>();
         builder.Services.AddSingleton<FfmpegProcessor>();
         builder.Services.AddSingleton<MezonCdnUploader>();

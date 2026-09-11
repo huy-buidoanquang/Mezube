@@ -47,6 +47,7 @@ dotnet run --project Mezube.csproj
 | `Mezon:ServerKey` | Gateway Basic-Auth — Dev `defaultkey`, Prod `HTTP3m3zonPr0dkey` |
 | `Mezon:Host` / `Mezon:Port` | Dev `dev-mezon.nccsoft.vn:8088`, Prod `gw.mezon.ai:443` |
 | `Mezube:StnBaseUrl` | STN origin (vd. `https://stn.mezon.ai`) — derive `ws(s)://…/ws` |
+| `Mezube:StnAuthMode` | `Auto` ưu tiên Mezon SID và fallback JWT; dùng `Jwt` để rollback |
 | `Mezube:PreparedAudioBitrateKbps` / `PreparedAudioChannels` / `PreparedAudioSampleRate` | Preset cho file CDN audio (Ogg Opus) |
 | `Mezube:PreparedVideoBitrateKbps` / `PreparedVideoHeight` / `PreparedVideoFps` | Streaming WebM VP8 (GOP = 2×fps, STN `max_keyframe_gap_ms` 2500) |
 | `Mezube:CdnBaseUrl` | Public CDN sau upload |

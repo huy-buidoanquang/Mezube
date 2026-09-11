@@ -39,6 +39,8 @@ public sealed class BotOptions
     /// Leave empty when STN does not require a publisher password.
     /// </summary>
     public string StnPublisherPassword { get; set; } = string.Empty;
+    /// <summary>STN websocket authentication mode. Auto prefers SID and falls back to a refreshed JWT.</summary>
+    public StnAuthMode StnAuthMode { get; set; } = StnAuthMode.Auto;
     public string YtDlpPath { get; set; } = "yt-dlp";
     /// <summary>
     /// YouTube Innertube clients for yt-dlp (<c>--extractor-args youtube:player_client=…</c>).
