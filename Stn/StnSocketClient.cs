@@ -1,35 +1,39 @@
 using System.Buffers;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net;
+using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
-using Microsoft.Extensions.Logging;
 using Mezube.Bot;
+using Microsoft.Extensions.Logging;
 
 namespace Mezube.Stn;
 
 public sealed class StnSocketClient : IAsyncDisposable
 {
     private static readonly TimeSpan CommandAckTimeout = TimeSpan.FromSeconds(20);
-    /// <summary>
-    /// STN fetches the whole FileUrl and validates WebM GOP before <c>connect_publisher</c> ack.
-    /// </summary>
     private static readonly TimeSpan PublisherAckTimeout = TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan CloseTimeout = TimeSpan.FromSeconds(2);
 
     private readonly BotOptions _options;
     private readonly ILogger<StnSocketClient> _logger;
     private readonly string _wsBase;
+    private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private readonly SemaphoreSlim _sendGate = new(1, 1);
     private readonly ArrayBufferWriter<byte> _sendBuffer = new(512);
-    private readonly byte[] _receiveBuffer = new byte[8 * 1024];
-    private readonly ConcurrentDictionary<string, TaskCompletionSource<string?>> _ackWaiters = new();
+    private readonly ConcurrentDictionary<string, TaskCompletionSource<StnPublisherException?>> _ackWaiters = new();
+
     private ClientWebSocket? _socket;
     private CancellationTokenSource? _receiveCts;
     private Task? _receiveTask;
-    private string? _token;
+    private long _generation;
+    private long _connectedAtTimestamp;
     private long _botUserId;
     private long _channelId;
+    private int _state = (int)StnSessionState.Disconnected;
+    private int _disposeState;
     private TaskCompletionSource? _trackEnded;
     private TaskCompletionSource? _publisherEnded;
     private volatile bool _paused;
@@ -41,107 +45,119 @@ public sealed class StnSocketClient : IAsyncDisposable
         _wsBase = StnUrl.WebSocketBase(options.StnBaseUrl);
     }
 
-    public bool IsConnected => _socket?.State == WebSocketState.Open;
+    public StnSessionState State => (StnSessionState)Volatile.Read(ref _state);
+
+    public bool IsConnected
+        => State == StnSessionState.Ready
+           && _socket?.State == WebSocketState.Open
+           && _receiveTask is { IsCompleted: false };
 
     public bool IsPaused => _paused;
 
     /// <returns><see langword="true"/> when a new WebSocket was opened this call.</returns>
     public async Task<bool> EnsureConnectedAsync(
-        string authToken,
+        string credential,
         long botUserId,
         string? username = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        StnCredentialKind credentialKind = StnCredentialKind.Jwt,
+        int attempt = 1,
+        long streamChannelId = 0)
     {
-        _botUserId = botUserId;
-        // Token may refresh between tracks (GetOrRefreshAuthTokenAsync). The STN
-        // socket was already authenticated at upgrade — reconnecting would run
-        // Conn.Close → leavePublisherPresence → RemovePublisher → channel_closed
-        // for every listener. Keep the open socket and only remember the newer token.
-        if (IsConnected)
-        {
-            if (!string.Equals(_token, authToken, StringComparison.Ordinal))
-            {
-                _logger.LogDebug("STN publisher WS kept across auth token refresh");
-                _token = authToken;
-            }
+        ArgumentException.ThrowIfNullOrWhiteSpace(credential);
+        ThrowIfDisposed();
 
-            // Receive loop must outlive per-track CTS (skip cancels trackCts). If it
-            // somehow exited while the socket stayed Open, restart it on this session.
-            EnsureReceiveLoop();
-            return false;
-        }
-
-        _token = authToken;
-
-        var displayName = string.IsNullOrWhiteSpace(username) ? _options.BotDisplayName : username;
-        var uri = BuildWsUri(_wsBase, authToken, displayName);
-        var socket = CreateSocket();
-        _logger.LogDebug("Connecting STN publisher WS {Uri}", RedactToken(uri));
+        await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            await socket.ConnectAsync(uri, cancellationToken).ConfigureAwait(false);
+            ThrowIfDisposed();
+            _botUserId = botUserId;
+            if (streamChannelId != 0)
+            {
+                _channelId = streamChannelId;
+            }
+            if (IsConnected)
+            {
+                return false;
+            }
+
+            await DisconnectTransportCoreAsync(graceful: false).ConfigureAwait(false);
+            SetState(StnSessionState.Connecting);
+
+            var generation = Interlocked.Increment(ref _generation);
+            var displayName = string.IsNullOrWhiteSpace(username) ? _options.BotDisplayName : username;
+            var uri = BuildWsUri(_wsBase, credential, displayName);
+            var socket = CreateSocket();
+            var stopwatch = Stopwatch.StartNew();
+
+            _logger.LogInformation(
+                "STN lifecycle state={State} phase={Phase} channel={ChannelId} sessionGeneration={SessionGeneration} attempt={Attempt} credentialKind={CredentialKind}",
+                StnSessionState.Connecting, "handshake", _channelId, generation, attempt, credentialKind);
+
+            try
+            {
+                await socket.ConnectAsync(uri, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                socket.Dispose();
+                SetState(StnSessionState.Disconnected);
+                var statusCode = GetStatusCode(ex);
+                var retryable = IsRetryableConnectionFailure(ex, statusCode);
+                _logger.LogWarning(
+                    "STN handshake failed channel={ChannelId} sessionGeneration={SessionGeneration} phase={Phase} attempt={Attempt} credentialKind={CredentialKind} failureKind={FailureKind} statusCode={StatusCode} exceptionType={ExceptionType} elapsedMs={ElapsedMs}",
+                    _channelId, generation, "handshake", attempt, credentialKind,
+                    retryable ? "transient" : "permanent", statusCode, ex.GetType().Name,
+                    stopwatch.ElapsedMilliseconds);
+                throw new StnConnectionException(
+                    $"Không kết nối được STN streaming WebSocket. {DescribeFailure(_wsBase, ex, credential)}",
+                    "handshake", retryable, statusCode);
+            }
+
             _socket = socket;
-            // Session-lifetime CTS only — NEVER link to Play's trackCts. Cancelling
-            // ReceiveAsync aborts ClientWebSocket (1006) → STN leavePublisherPresence
-            // (ws_close) → kicks every listener on skip/next.
-            EnsureReceiveLoop();
-            _logger.LogInformation("STN publisher WS connected via {Base}", _wsBase);
+            Volatile.Write(ref _connectedAtTimestamp, Stopwatch.GetTimestamp());
+            _receiveCts = new CancellationTokenSource();
+            _publisherEnded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            SetState(StnSessionState.Ready);
+            _receiveTask = ReceiveLoopAsync(socket, generation, _receiveCts.Token);
+
+            _logger.LogInformation(
+                "STN lifecycle state={State} phase={Phase} channel={ChannelId} sessionGeneration={SessionGeneration} attempt={Attempt} credentialKind={CredentialKind} elapsedMs={ElapsedMs}",
+                StnSessionState.Ready, "handshake", _channelId, generation, attempt, credentialKind,
+                stopwatch.ElapsedMilliseconds);
             return true;
         }
-        catch (Exception ex)
+        finally
         {
-            socket.Dispose();
-            throw new InvalidOperationException(
-                "Không kết nối được STN streaming WebSocket (cùng môi trường với Mezon host).\n" +
-                DescribeFailure(_wsBase, ex) +
-                "\nDev STN Rust listen :8081 (vd. http://172.16.100.158:8081). Không dùng stn.mezon.ai với JWT nccsoft.",
-                ex);
+            _lifecycleGate.Release();
         }
     }
 
-    private void EnsureReceiveLoop()
+    public async Task PlayAsync(
+        long clanId,
+        long streamChannelId,
+        string fileUrl,
+        CancellationToken cancellationToken = default,
+        int attempt = 1)
     {
-        if (_receiveTask is { IsCompleted: false })
-        {
-            return;
-        }
-
-        _receiveCts?.Dispose();
-        _receiveCts = new CancellationTokenSource();
-        _receiveTask = ReceiveLoopAsync(_receiveCts.Token);
-    }
-
-    public async Task PlayAsync(long clanId, long streamChannelId, string fileUrl, CancellationToken cancellationToken = default)
-    {
+        EnsureReady();
         _channelId = streamChannelId;
         _paused = false;
-        // Arm before connect ack so a fast stream_track_ended cannot be missed.
         ResetTrackEnded();
+
+        _logger.LogInformation(
+            "STN publish phase={Phase} channel={ChannelId} sessionGeneration={SessionGeneration} attempt={Attempt}",
+            "connect_publisher", streamChannelId, Volatile.Read(ref _generation), attempt);
+
         await SendKeyAndWaitAsync(
-                "connect_publisher",
-                "connect_publisher",
-                clanId,
-                streamChannelId,
-                fileUrl,
-                cancellationToken,
-                ackTimeout: PublisherAckTimeout)
+                "connect_publisher", "connect_publisher", clanId, streamChannelId, fileUrl,
+                cancellationToken, ackTimeout: PublisherAckTimeout)
             .ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// Abort the current URL early (skip) without tearing down the publisher session.
-    /// STN keeps listeners and emits <c>stream_track_ended</c>.
-    /// </summary>
     public async Task EndTrackAsync(long clanId, long streamChannelId, CancellationToken cancellationToken = default)
     {
-        if (!IsConnected)
-        {
-            CompleteTrackEnded();
-            return;
-        }
-
-        // Already finished (server EOF) — do not send another end that could race Play.
-        if (_trackEnded?.Task.IsCompleted == true)
+        if (!IsConnected || _trackEnded?.Task.IsCompleted == true)
         {
             return;
         }
@@ -149,58 +165,48 @@ public sealed class StnSocketClient : IAsyncDisposable
         try
         {
             await SendKeyAsync(
-                    "stream_track_ended",
-                    clanId,
-                    streamChannelId,
-                    fileUrl: string.Empty,
-                    pauseValue: null,
-                    cancellationToken)
+                    "stream_track_ended", clanId, streamChannelId, string.Empty, null, cancellationToken)
                 .ConfigureAwait(false);
 
-            // Wait briefly for STN to release the publisher claim before the next connect_publisher.
-            var tcs = _trackEnded;
-            if (tcs is not null)
+            var waiter = _trackEnded;
+            if (waiter is null)
             {
-                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                timeoutCts.CancelAfter(TimeSpan.FromSeconds(5));
-                try
-                {
-                    await tcs.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-                {
-                    _logger.LogDebug("STN end-track ack timed out channel={ChannelId}; continuing", streamChannelId);
-                    CompleteTrackEnded();
-                }
+                return;
+            }
+
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(TimeSpan.FromSeconds(5));
+            try
+            {
+                await waiter.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogDebug(
+                    "STN end-track ack timed out channel={ChannelId} sessionGeneration={SessionGeneration}",
+                    streamChannelId, Volatile.Read(ref _generation));
+                CompleteTrackEnded();
             }
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "STN end-track send failed channel={ChannelId}", streamChannelId);
-            CompleteTrackEnded();
+            _logger.LogDebug(
+                ex,
+                "STN end-track failed channel={ChannelId} sessionGeneration={SessionGeneration}",
+                streamChannelId, Volatile.Read(ref _generation));
         }
     }
 
     public async Task SetPausedAsync(long clanId, long streamChannelId, bool paused, CancellationToken cancellationToken = default)
     {
-        if (!IsConnected)
-        {
-            throw new InvalidOperationException("STN WebSocket is not connected.");
-        }
-
+        EnsureReady();
         await SendKeyAndWaitAsync(
-                "stream_track_paused",
-                "stream_track_paused",
-                clanId,
-                streamChannelId,
-                fileUrl: string.Empty,
-                cancellationToken,
-                pauseValue: paused)
+                "stream_track_paused", "stream_track_paused", clanId, streamChannelId, string.Empty,
+                cancellationToken, pauseValue: paused)
             .ConfigureAwait(false);
         _paused = paused;
     }
 
-    /// <summary>Tear down the publisher session and kick listeners (<c>stop_publisher</c>).</summary>
     public async Task StopPublisherAsync(long clanId, long streamChannelId, CancellationToken cancellationToken = default)
     {
         try
@@ -208,12 +214,7 @@ public sealed class StnSocketClient : IAsyncDisposable
             if (IsConnected)
             {
                 await SendKeyAsync(
-                        "stop_publisher",
-                        clanId,
-                        streamChannelId,
-                        fileUrl: string.Empty,
-                        pauseValue: null,
-                        cancellationToken)
+                        "stop_publisher", clanId, streamChannelId, string.Empty, null, cancellationToken)
                     .ConfigureAwait(false);
             }
         }
@@ -228,28 +229,36 @@ public sealed class StnSocketClient : IAsyncDisposable
 
     public Task WaitUntilTrackEndedAsync(CancellationToken cancellationToken = default)
     {
-        var tcs = _trackEnded;
-        if (tcs is null)
+        var waiter = _trackEnded;
+        if (waiter is null)
         {
             return Task.FromCanceled(cancellationToken.CanBeCanceled
                 ? cancellationToken
                 : new CancellationToken(canceled: true));
         }
 
-        return tcs.Task.WaitAsync(cancellationToken);
+        return waiter.Task.WaitAsync(cancellationToken);
     }
 
     public Task WaitUntilPublisherEndedAsync(CancellationToken cancellationToken = default)
     {
-        var tcs = _publisherEnded;
-        if (tcs is null)
+        var waiter = _publisherEnded;
+        if (waiter is null)
         {
             return Task.FromCanceled(cancellationToken.CanBeCanceled
                 ? cancellationToken
                 : new CancellationToken(canceled: true));
         }
 
-        return tcs.Task.WaitAsync(cancellationToken);
+        return waiter.Task.WaitAsync(cancellationToken);
+    }
+
+    public Task InvalidateAndDisconnectAsync(string reason)
+    {
+        InvalidateSession(
+            Volatile.Read(ref _generation),
+            new StnPublisherException(reason, "recovery", retryable: true));
+        return DisconnectAsync();
     }
 
     private void ResetTrackEnded()
@@ -259,15 +268,13 @@ public sealed class StnSocketClient : IAsyncDisposable
         previous?.TrySetCanceled();
     }
 
-    private void CompleteTrackEnded()
-    {
-        _trackEnded?.TrySetResult();
-    }
+    private void CompleteTrackEnded() => _trackEnded?.TrySetResult();
+
+    private void FailTrack(Exception exception) => _trackEnded?.TrySetException(exception);
 
     private void CompletePublisherEnded()
     {
-        _publisherEnded ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        _publisherEnded.TrySetResult();
+        _publisherEnded?.TrySetResult();
         CompleteTrackEnded();
     }
 
@@ -276,56 +283,15 @@ public sealed class StnSocketClient : IAsyncDisposable
         var socket = new ClientWebSocket();
         socket.Options.HttpVersion = HttpVersion.Version11;
         socket.Options.HttpVersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
+        socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(15);
+        socket.Options.KeepAliveTimeout = TimeSpan.FromSeconds(10);
         return socket;
     }
 
-    private static Uri BuildWsUri(string baseUrl, string authToken, string username)
+    private static Uri BuildWsUri(string baseUrl, string credential, string username)
     {
-        var query =
-            $"username={Uri.EscapeDataString(username)}" +
-            $"&token={Uri.EscapeDataString(authToken)}";
+        var query = $"username={Uri.EscapeDataString(username)}&token={Uri.EscapeDataString(credential)}";
         return new Uri($"{baseUrl}?{query}");
-    }
-
-    private static string DescribeFailure(string baseUrl, Exception ex)
-    {
-        var msg = ex.Message;
-        if (msg.Contains("'503'", StringComparison.Ordinal) || StnServerLoad.MentionsCapacity(msg))
-        {
-            return $"- {baseUrl}: 503 — STN đang quá tải (hết slot listener / áp lực bộ nhớ) hoặc đang shutdown. Thử lại sau ít phút.";
-        }
-
-        if (msg.Contains("'502'", StringComparison.Ordinal))
-        {
-            return $"- {baseUrl}: 502 Bad Gateway (service STN down / nginx không proxy được backend).";
-        }
-
-        if (msg.Contains("'404'", StringComparison.Ordinal))
-        {
-            return $"- {baseUrl}: 404 — sai host/port hoặc không có route /ws. STN Rust mặc định TCP 8081 (không phải :80).";
-        }
-
-        if (msg.Contains("'200'", StringComparison.Ordinal))
-        {
-            return $"- {baseUrl}: HTTP 200 thay vì 101 — endpoint /ws hiện không accept WebSocket upgrade.";
-        }
-
-        return $"- {baseUrl}: {msg}";
-    }
-
-    private static string RedactToken(Uri uri)
-    {
-        var text = uri.ToString();
-        var idx = text.IndexOf("token=", StringComparison.OrdinalIgnoreCase);
-        if (idx < 0)
-        {
-            return text;
-        }
-
-        var end = text.IndexOf('&', idx);
-        return end < 0
-            ? text[..(idx + 6)] + "***"
-            : text[..(idx + 6)] + "***" + text[end..];
     }
 
     private async Task SendKeyAndWaitAsync(
@@ -338,7 +304,7 @@ public sealed class StnSocketClient : IAsyncDisposable
         bool? pauseValue = null,
         TimeSpan? ackTimeout = null)
     {
-        var waiter = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var waiter = new TaskCompletionSource<StnPublisherException?>(TaskCreationOptions.RunContinuationsAsynchronously);
         if (!_ackWaiters.TryAdd(ackKey, waiter))
         {
             throw new InvalidOperationException($"STN command already in flight: {ackKey}");
@@ -350,15 +316,16 @@ public sealed class StnSocketClient : IAsyncDisposable
                 .ConfigureAwait(false);
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeoutCts.CancelAfter(ackTimeout ?? CommandAckTimeout);
-            var error = await waiter.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
-            if (!string.IsNullOrWhiteSpace(error))
+            var failure = await waiter.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+            if (failure is not null)
             {
-                throw new InvalidOperationException($"STN {ackKey} failed: {error}");
+                throw failure;
             }
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            throw new TimeoutException($"Timed out waiting for STN {ackKey} ack.");
+            throw new StnPublisherException(
+                $"Timed out waiting for STN {ackKey} ack.", ackKey, "ack_timeout", retryable: true);
         }
         finally
         {
@@ -374,14 +341,20 @@ public sealed class StnSocketClient : IAsyncDisposable
         bool? pauseValue,
         CancellationToken cancellationToken)
     {
-        if (_socket is null || _socket.State != WebSocketState.Open)
-        {
-            throw new InvalidOperationException("STN WebSocket is not connected.");
-        }
+        EnsureReady();
+        var socket = _socket!;
+        var generation = Volatile.Read(ref _generation);
 
         await _sendGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            if (!IsConnected || !ReferenceEquals(socket, _socket) || generation != Volatile.Read(ref _generation))
+            {
+                throw new StnPublisherException(
+                    "STN websocket generation is no longer usable.",
+                    "send", "session_invalidated", retryable: true);
+            }
+
             _sendBuffer.Clear();
             using (var writer = new Utf8JsonWriter(_sendBuffer))
             {
@@ -389,7 +362,7 @@ public sealed class StnSocketClient : IAsyncDisposable
                 writer.WriteString("ClanId"u8, clanId.ToString());
                 writer.WriteString("ChannelId"u8, streamChannelId.ToString());
                 writer.WriteString("UserId"u8, _botUserId.ToString());
-                writer.WriteString("ClientId"u8, $"{_botUserId}-mezube");
+                writer.WriteString("ClientId"u8, $"{_botUserId}-mezube-g{generation}");
                 writer.WriteBoolean("IsPublisher"u8, true);
                 writer.WriteString("Key"u8, key);
                 writer.WritePropertyName("Value"u8);
@@ -412,18 +385,21 @@ public sealed class StnSocketClient : IAsyncDisposable
             }
 
             _logger.LogDebug(
-                "STN send key={Key} channel={ChannelId} via={Base}",
-                key,
-                streamChannelId,
-                _wsBase);
-            // Do not pass caller's CT into SendAsync — cancelling it aborts ClientWebSocket
-            // (same 1006 / ws_close kick as a cancelled ReceiveAsync).
-            await _socket.SendAsync(
+                "STN send phase={Phase} channel={ChannelId} sessionGeneration={SessionGeneration}",
+                key, streamChannelId, generation);
+            await socket.SendAsync(
                     _sendBuffer.WrittenMemory,
                     WebSocketMessageType.Text,
                     endOfMessage: true,
                     CancellationToken.None)
                 .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is WebSocketException or SocketException)
+        {
+            var wrapped = new StnPublisherException(
+                $"STN send failed: {ex.Message}", "send", "transport_error", retryable: true);
+            InvalidateSession(generation, wrapped);
+            throw wrapped;
         }
         finally
         {
@@ -431,19 +407,25 @@ public sealed class StnSocketClient : IAsyncDisposable
         }
     }
 
-    private async Task ReceiveLoopAsync(CancellationToken cancellationToken)
+    private async Task ReceiveLoopAsync(ClientWebSocket socket, long generation, CancellationToken cancellationToken)
     {
+        var receiveBuffer = new byte[8 * 1024];
         try
         {
-            while (!cancellationToken.IsCancellationRequested && _socket is { State: WebSocketState.Open })
+            while (!cancellationToken.IsCancellationRequested && socket.State == WebSocketState.Open)
             {
-                var result = await _socket.ReceiveAsync(_receiveBuffer, cancellationToken).ConfigureAwait(false);
+                var result = await socket.ReceiveAsync(receiveBuffer, cancellationToken).ConfigureAwait(false);
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
-                    _logger.LogWarning("STN WS closed by server: {Status}", result.CloseStatus);
-                    FailPending("STN websocket closed by server");
-                    CompletePublisherEnded();
-                    break;
+                    var failure = new StnPublisherException(
+                        $"STN websocket closed by server ({result.CloseStatus}: {result.CloseStatusDescription}).",
+                        "receive", "server_close", retryable: true);
+                    _logger.LogWarning(
+                        "STN receive ended channel={ChannelId} sessionGeneration={SessionGeneration} phase={Phase} failureKind={FailureKind} closeStatus={CloseStatus} connectedMs={ConnectedMs}",
+                        _channelId, generation, "receive", failure.Code, result.CloseStatus,
+                        GetConnectedMilliseconds());
+                    InvalidateSession(generation, failure);
+                    return;
                 }
 
                 if (result.Count <= 0)
@@ -451,13 +433,11 @@ public sealed class StnSocketClient : IAsyncDisposable
                     continue;
                 }
 
-                var text = Encoding.UTF8.GetString(_receiveBuffer, 0, result.Count);
-                if (_logger.IsEnabled(LogLevel.Debug))
-                {
-                    _logger.LogTrace("STN WS message: {Message}", text);
-                }
-
-                HandleServerMessage(text);
+                var text = Encoding.UTF8.GetString(receiveBuffer, 0, result.Count);
+                _logger.LogTrace(
+                    "STN message channel={ChannelId} sessionGeneration={SessionGeneration} payload={Payload}",
+                    _channelId, generation, text);
+                HandleServerMessage(text, generation);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -465,194 +445,366 @@ public sealed class StnSocketClient : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "STN receive loop ended");
-            FailPending(ex.Message);
-            CompletePublisherEnded();
+            var failure = new StnPublisherException(
+                $"STN receive loop ended: {ex.Message}", "receive", "transport_error", retryable: true);
+            _logger.LogWarning(
+                ex,
+                "STN receive ended channel={ChannelId} sessionGeneration={SessionGeneration} phase={Phase} failureKind={FailureKind}",
+                _channelId, generation, "receive", failure.Code);
+            InvalidateSession(generation, failure);
         }
     }
 
-    private void HandleServerMessage(string text)
+    private void HandleServerMessage(string text, long generation)
     {
+        if (generation != Volatile.Read(ref _generation))
+        {
+            _logger.LogDebug(
+                "Ignoring STN message from stale generation={StaleGeneration} currentGeneration={CurrentGeneration}",
+                generation, Volatile.Read(ref _generation));
+            return;
+        }
+
         try
         {
-            using var doc = JsonDocument.Parse(text);
-            if (!doc.RootElement.TryGetProperty("Key", out var keyElement))
+            using var document = JsonDocument.Parse(text);
+            if (!document.RootElement.TryGetProperty("Key", out var keyElement))
             {
                 return;
             }
 
-            var key = keyElement.GetString();
-            if (string.IsNullOrWhiteSpace(key))
+            switch (keyElement.GetString())
             {
-                return;
-            }
-
-            if (string.Equals(key, "connect_publisher", StringComparison.Ordinal))
-            {
-                CompleteAck("connect_publisher", error: null);
-                return;
-            }
-
-            if (string.Equals(key, "stream_track_ended", StringComparison.Ordinal))
-            {
-                _logger.LogInformation(
-                    "STN stream_track_ended channel={ChannelId}",
-                    _channelId);
-                _paused = false;
-                CompleteTrackEnded();
-                return;
-            }
-
-            if (string.Equals(key, "stream_track_paused", StringComparison.Ordinal))
-            {
-                _paused = ReadPausedValue(doc.RootElement) ?? _paused;
-                CompleteAck("stream_track_paused", error: null);
-                _logger.LogDebug("STN stream_track_paused paused={Paused} channel={ChannelId}", _paused, _channelId);
-                return;
-            }
-
-            if (string.Equals(key, "password_required", StringComparison.Ordinal))
-            {
-                _logger.LogDebug("STN password_required for publisher (using configured StnPublisherPassword)");
-                return;
-            }
-
-            if (string.Equals(key, "error", StringComparison.Ordinal))
-            {
-                var error = ReadJsonValueAsString(doc.RootElement);
-                CompleteAck("connect_publisher", error ?? "unknown STN error");
-                CompleteAck("stream_track_paused", error ?? "unknown STN error");
-                CompleteTrackEnded();
-                return;
-            }
-
-            if (string.Equals(key, "info", StringComparison.Ordinal))
-            {
-                var info = ReadJsonValueAsString(doc.RootElement);
-                if (string.Equals(info, "stream_publisher_ended", StringComparison.Ordinal)
-                    || string.Equals(info, "stream publish failed", StringComparison.Ordinal)
-                    || (info?.Contains("stream publish failed", StringComparison.OrdinalIgnoreCase) ?? false))
+                case "connect_publisher":
+                    CompleteAck("connect_publisher", null);
+                    return;
+                case "stream_track_ended":
+                    _paused = false;
+                    CompleteTrackEnded();
+                    return;
+                case "stream_track_paused":
+                    _paused = ReadPausedValue(document.RootElement) ?? _paused;
+                    CompleteAck("stream_track_paused", null);
+                    return;
+                case "password_required":
+                    return;
+                case "stream_publish_failed":
+                    InvalidateSession(generation, ReadStructuredPublishFailure(document.RootElement));
+                    return;
+                case "error":
                 {
-                    _logger.LogInformation("STN publisher ended info={Info}", info);
-                    CompletePublisherEnded();
+                    var error = ReadJsonValueAsString(document.RootElement) ?? "unknown STN error";
+                    var failure = CreatePublisherException(error, "server");
+                    CompleteAck("connect_publisher", failure);
+                    CompleteAck("stream_track_paused", failure);
+                    InvalidateSession(generation, failure);
+                    return;
+                }
+                case "info":
+                {
+                    var info = ReadJsonValueAsString(document.RootElement);
+                    if (string.Equals(info, "stream_publisher_ended", StringComparison.Ordinal)
+                        || string.Equals(info, "stream publish failed", StringComparison.Ordinal)
+                        || (info?.Contains("stream publish failed", StringComparison.OrdinalIgnoreCase) ?? false))
+                    {
+                        InvalidateSession(
+                            generation,
+                            new StnPublisherException(
+                                $"STN publisher ended: {info}", "streaming", "publisher_ended"));
+                    }
+
+                    return;
                 }
             }
         }
-        catch (Exception ex)
+        catch (JsonException ex)
         {
-            _logger.LogDebug(ex, "Failed to parse STN WS message");
+            _logger.LogDebug(
+                ex,
+                "Failed to parse STN message channel={ChannelId} sessionGeneration={SessionGeneration}",
+                _channelId, generation);
         }
+    }
+
+    private void InvalidateSession(long generation, StnPublisherException failure)
+    {
+        if (generation != Volatile.Read(ref _generation))
+        {
+            return;
+        }
+
+        var previous = (StnSessionState)Interlocked.Exchange(ref _state, (int)StnSessionState.Invalidated);
+        if (previous is StnSessionState.Invalidated or StnSessionState.Disconnected or StnSessionState.Disposing)
+        {
+            return;
+        }
+
+        _paused = false;
+        _logger.LogWarning(
+            "STN lifecycle state={State} previousState={PreviousState} channel={ChannelId} sessionGeneration={SessionGeneration} connectionId={ConnectionId} phase={Phase} failureKind={FailureKind} retryable={Retryable} connectedMs={ConnectedMs}",
+            StnSessionState.Invalidated, previous, _channelId, generation,
+            failure.ConnectionId, failure.Phase, failure.Code, failure.Retryable,
+            GetConnectedMilliseconds());
+        FailPending(failure);
+        FailTrack(failure);
+        _publisherEnded?.TrySetResult();
+    }
+
+    private static StnPublisherException ReadStructuredPublishFailure(JsonElement root)
+    {
+        if (!root.TryGetProperty("Value", out var value) || value.ValueKind != JsonValueKind.Object)
+        {
+            return new StnPublisherException("STN stream publish failed.", "streaming", "publish_failed");
+        }
+
+        var phase = value.TryGetProperty("phase", out var phaseElement)
+            ? phaseElement.GetString() ?? "streaming"
+            : "streaming";
+        var code = value.TryGetProperty("code", out var codeElement)
+            ? codeElement.GetString() ?? "publish_failed"
+            : "publish_failed";
+        var message = value.TryGetProperty("message", out var messageElement)
+            ? messageElement.GetString() ?? "STN stream publish failed."
+            : "STN stream publish failed.";
+        var retryable = value.TryGetProperty("retryable", out var retryableElement)
+                        && retryableElement.ValueKind is JsonValueKind.True or JsonValueKind.False
+                        && retryableElement.GetBoolean();
+        var connectionId = value.TryGetProperty("connection_id", out var connectionIdElement)
+            ? connectionIdElement.GetString()
+            : null;
+        return new StnPublisherException(message, phase, code, retryable, connectionId);
     }
 
     private static bool? ReadPausedValue(JsonElement root)
     {
-        if (!root.TryGetProperty("Value", out var valueElement))
+        if (!root.TryGetProperty("Value", out var value))
         {
             return null;
         }
 
-        if (valueElement.ValueKind == JsonValueKind.True)
+        if (value.ValueKind is JsonValueKind.True or JsonValueKind.False)
         {
-            return true;
+            return value.GetBoolean();
         }
 
-        if (valueElement.ValueKind == JsonValueKind.False)
-        {
-            return false;
-        }
-
-        if (valueElement.ValueKind == JsonValueKind.Object
-            && valueElement.TryGetProperty("paused", out var pausedElement)
-            && (pausedElement.ValueKind is JsonValueKind.True or JsonValueKind.False))
-        {
-            return pausedElement.GetBoolean();
-        }
-
-        return null;
+        return value.ValueKind == JsonValueKind.Object
+               && value.TryGetProperty("paused", out var paused)
+               && paused.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? paused.GetBoolean()
+            : null;
     }
 
     private static string? ReadJsonValueAsString(JsonElement root)
     {
-        if (!root.TryGetProperty("Value", out var valueElement))
+        if (!root.TryGetProperty("Value", out var value))
         {
             return null;
         }
 
-        return valueElement.ValueKind switch
+        return value.ValueKind switch
         {
-            JsonValueKind.String => valueElement.GetString(),
+            JsonValueKind.String => value.GetString(),
             JsonValueKind.Null => null,
-            _ => valueElement.ToString(),
+            _ => value.ToString(),
         };
     }
 
-    private void CompleteAck(string ackKey, string? error)
+    private static StnPublisherException CreatePublisherException(string error, string phase)
+    {
+        var sessionClosed = error.Contains("publisher session closed", StringComparison.OrdinalIgnoreCase);
+        var retryable = sessionClosed
+                        || error.Contains("timeout", StringComparison.OrdinalIgnoreCase)
+                        || error.Contains("temporarily", StringComparison.OrdinalIgnoreCase)
+                        || error.Contains("connection reset", StringComparison.OrdinalIgnoreCase)
+                        || error.Contains("502", StringComparison.Ordinal)
+                        || error.Contains("503", StringComparison.Ordinal)
+                        || error.Contains("504", StringComparison.Ordinal);
+        var code = sessionClosed
+            ? "publisher_session_closed"
+            : retryable ? "transient_publish_error" : "publish_error";
+        return new StnPublisherException($"STN {phase} failed: {error}", phase, code, retryable);
+    }
+
+    private void CompleteAck(string ackKey, StnPublisherException? failure)
     {
         if (_ackWaiters.TryRemove(ackKey, out var waiter))
         {
-            waiter.TrySetResult(error);
+            waiter.TrySetResult(failure);
         }
     }
 
-    private void FailPending(string error)
+    private void FailPending(StnPublisherException failure)
     {
         foreach (var key in _ackWaiters.Keys)
         {
             if (_ackWaiters.TryRemove(key, out var waiter))
             {
-                waiter.TrySetResult(error);
+                waiter.TrySetResult(failure);
             }
         }
     }
 
     public async Task DisconnectAsync()
     {
-        if (_receiveCts is not null)
+        await _lifecycleGate.WaitAsync().ConfigureAwait(false);
+        try
         {
-            await _receiveCts.CancelAsync().ConfigureAwait(false);
-            _receiveCts.Dispose();
-            _receiveCts = null;
+            if (State == StnSessionState.Disconnected && _socket is null)
+            {
+                return;
+            }
+
+            var graceful = State == StnSessionState.Ready;
+            _logger.LogInformation(
+                "STN lifecycle state={State} channel={ChannelId} sessionGeneration={SessionGeneration} phase={Phase} connectedMs={ConnectedMs}",
+                StnSessionState.Disposing, _channelId, Volatile.Read(ref _generation), "disconnect",
+                GetConnectedMilliseconds());
+            SetState(StnSessionState.Disposing);
+            await DisconnectTransportCoreAsync(graceful).ConfigureAwait(false);
+            SetState(StnSessionState.Disconnected);
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    private async Task DisconnectTransportCoreAsync(bool graceful)
+    {
+        var receiveCts = _receiveCts;
+        var receiveTask = _receiveTask;
+        var socket = _socket;
+        _receiveCts = null;
+        _receiveTask = null;
+        _socket = null;
+
+        if (receiveCts is not null)
+        {
+            await receiveCts.CancelAsync().ConfigureAwait(false);
         }
 
-        if (_receiveTask is not null)
+        if (socket is not null)
         {
             try
             {
-                await _receiveTask.ConfigureAwait(false);
-            }
-            catch
-            {
-                // ignored
-            }
-
-            _receiveTask = null;
-        }
-
-        if (_socket is not null)
-        {
-            try
-            {
-                if (_socket.State == WebSocketState.Open)
+                if (graceful && socket.State == WebSocketState.Open)
                 {
-                    await _socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None)
+                    using var closeCts = new CancellationTokenSource(CloseTimeout);
+                    await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", closeCts.Token)
                         .ConfigureAwait(false);
+                }
+                else
+                {
+                    socket.Abort();
                 }
             }
             catch
             {
-                // ignored
+                socket.Abort();
             }
-
-            _socket.Dispose();
-            _socket = null;
         }
 
-        FailPending("STN websocket disconnected");
+        if (receiveTask is not null)
+        {
+            try
+            {
+                await receiveTask.ConfigureAwait(false);
+            }
+            catch
+            {
+                // Receive failures have already invalidated and completed waiters.
+            }
+        }
+
+        receiveCts?.Dispose();
+        socket?.Dispose();
+        Volatile.Write(ref _connectedAtTimestamp, 0);
+        FailPending(new StnPublisherException(
+            "STN websocket disconnected", "disconnect", "session_disconnected", retryable: true));
+    }
+
+    private void EnsureReady()
+    {
+        if (!IsConnected)
+        {
+            throw new StnPublisherException(
+                $"STN websocket is not usable (state={State}).",
+                "control", "session_not_ready", retryable: true);
+        }
+    }
+
+    private void SetState(StnSessionState state) => Volatile.Write(ref _state, (int)state);
+
+    private long GetConnectedMilliseconds()
+    {
+        var started = Volatile.Read(ref _connectedAtTimestamp);
+        return started == 0 ? 0 : (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+    }
+
+    private void ThrowIfDisposed()
+        => ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposeState) != 0, this);
+
+    private static int? GetStatusCode(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is HttpRequestException { StatusCode: { } statusCode })
+            {
+                return (int)statusCode;
+            }
+
+            foreach (var candidate in new[] { 200, 401, 403, 404, 408, 429, 500, 502, 503, 504 })
+            {
+                if (current.Message.Contains($"'{candidate}'", StringComparison.Ordinal)
+                    || current.Message.Contains($" {candidate} ", StringComparison.Ordinal))
+                {
+                    return candidate;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static bool IsRetryableConnectionFailure(Exception exception, int? statusCode)
+    {
+        if (statusCode is 408 or 429 or 500 or 502 or 503 or 504)
+        {
+            return true;
+        }
+
+        if (statusCode is 200 or 401 or 403 or 404)
+        {
+            return false;
+        }
+
+        return exception is TimeoutException or WebSocketException or SocketException
+               || exception.InnerException is TimeoutException or WebSocketException or SocketException;
+    }
+
+    private static string DescribeFailure(string baseUrl, Exception exception, string credential)
+    {
+        var statusCode = GetStatusCode(exception);
+        return statusCode switch
+        {
+            503 => $"{baseUrl}: HTTP 503 — STN unavailable or at capacity.",
+            502 => $"{baseUrl}: HTTP 502 — the proxy cannot reach STN.",
+            404 => $"{baseUrl}: HTTP 404 — the /ws route is unavailable.",
+            401 or 403 => $"{baseUrl}: authentication rejected ({statusCode}).",
+            200 => $"{baseUrl}: HTTP 200 instead of WebSocket 101; authentication or routing was rejected.",
+            _ => $"{baseUrl}: {exception.Message.Replace(credential, "[REDACTED]", StringComparison.Ordinal)}",
+        };
     }
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposeState, 1) != 0)
+        {
+            return;
+        }
+
         await DisconnectAsync().ConfigureAwait(false);
         _sendGate.Dispose();
+        _lifecycleGate.Dispose();
     }
 }
