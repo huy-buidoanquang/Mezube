@@ -234,8 +234,10 @@ public sealed class PlayEnqueueService
         Action<Exception>? onError = null)
     {
         var ct = state.PrepCts?.Token ?? CancellationToken.None;
-        var kind = play.WantVideo ? PreparedAssetKind.Video : PreparedAssetKind.Audio;
-        _prep.StartBackgroundPrep(client, play.Track, kind, ct, onError);
+        // Bot playback is SFU audio-only. Keep the legacy video preparation
+        // available for unrelated callers, but never schedule it for a queue
+        // item that can reach the playback pump.
+        _prep.StartBackgroundPrep(client, play.Track, PreparedAssetKind.Audio, ct, onError);
     }
 
     private static Action<Exception>? OnPrepError(

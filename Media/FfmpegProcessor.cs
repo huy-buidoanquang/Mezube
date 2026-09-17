@@ -30,11 +30,13 @@ public sealed class FfmpegProcessor
         Directory.CreateDirectory(_options.TempDir);
         var outputPath = Path.Combine(
             _options.TempDir,
-            Path.GetFileNameWithoutExtension(inputPath) + ".ogg");
+            Path.GetFileNameWithoutExtension(inputPath) + ".normalized.ogg");
+        // The SFU publisher consumes one canonical wire format. Keep these
+        // values fixed even if the legacy media configuration is customized.
         var outputSettings = new PreparedAudioSettings(
             _options.PreparedAudioBitrateKbps,
-            _options.PreparedAudioSampleRate,
-            _options.PreparedAudioChannels);
+            SampleRate: 48000,
+            Channels: 2);
 
         var psi = new ProcessStartInfo
         {
@@ -42,7 +44,7 @@ public sealed class FfmpegProcessor
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        // STN streaming expects Ogg Opus 48 kHz stereo (see mezon-media-station README).
+        // SFU publisher input is normalized to Ogg Opus 48 kHz stereo.
         psi.ArgumentList.Add("-y");
         psi.ArgumentList.Add("-hide_banner");
         psi.ArgumentList.Add("-nostdin");
@@ -105,7 +107,7 @@ public sealed class FfmpegProcessor
     }
 
     /// <summary>
-    /// WebM Opus + VP8, GOP 2s at <paramref name="fps"/> so STN <c>max_keyframe_gap_ms</c> (2500) passes.
+    /// WebM Opus + VP8, GOP 2s at <paramref name="fps"/> for legacy video preparation.
     /// </summary>
     public async Task<string?> TranscodeToWebmAsync(
         string inputPath,

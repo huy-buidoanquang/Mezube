@@ -27,6 +27,11 @@ public sealed partial class MusicPlayer
         bool wantVideo,
         CancellationToken cancellationToken)
     {
+        if (mode == PlaybackMode.Streaming)
+        {
+            wantVideo = false;
+        }
+
         IReadOnlyList<TrackInfoEntity> hits;
         try
         {
@@ -143,6 +148,11 @@ public sealed partial class MusicPlayer
         bool wantVideo,
         CancellationToken cancellationToken)
     {
+        if (mode == PlaybackMode.Streaming)
+        {
+            wantVideo = false;
+        }
+
         if (IsTooLarge(track, wantVideo) || track.IsTooLarge)
         {
             await UpdateOrReplyAsync(
@@ -237,7 +247,7 @@ public sealed partial class MusicPlayer
             {
                 await ctx.RespondAsync(PlayerMessageBuilder.Error(
                         "Streaming only",
-                        "STN no longer publishes into voice channels. Run !play with a #stream channel."))
+                        "Mezube music plays in #stream channels. Run !play with a #stream channel."))
                     .ConfigureAwait(false);
                 return;
             }
@@ -279,6 +289,11 @@ public sealed partial class MusicPlayer
         long messageId,
         bool wantVideo)
     {
+        if (mode == PlaybackMode.Streaming)
+        {
+            wantVideo = false;
+        }
+
         if (IsTooLarge(track, wantVideo) || track.IsTooLarge)
         {
             await ctx.UpdateMessageAsync(PlayerMessageBuilder.CopyrightBlocked()).ConfigureAwait(false);

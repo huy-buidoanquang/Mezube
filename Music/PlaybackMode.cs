@@ -14,8 +14,8 @@ public enum PlayerDestroyReason
     QueueEmpty,
     UserStop,
     Skip,
-    StnFailed,
-    /// <summary>Single-track media prep/download failed — keep STN session, skip to next.</summary>
+    SfuFailed,
+    /// <summary>Single-track media prep/download failed - keep the SFU session, skip to next.</summary>
     TrackFailed,
     /// <summary>Pump-owned seek restart; do not advance the queue.</summary>
     Seek,

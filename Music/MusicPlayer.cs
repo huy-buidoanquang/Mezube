@@ -21,7 +21,7 @@ namespace Mezube.Music;
 public sealed partial class MusicPlayer
 {
     private readonly ITrackResolver _resolver;
-    private readonly StreamingChannelSink _streamingSink;
+    private readonly SfuStreamingChannelSink _streamingSink;
     private readonly BindStore _binds;
     private readonly MusicVizAssets _viz;
     private readonly PlaybackAccess _access;
@@ -44,7 +44,7 @@ public sealed partial class MusicPlayer
 
     public MusicPlayer(
         ITrackResolver resolver,
-        StreamingChannelSink streamingSink,
+        SfuStreamingChannelSink streamingSink,
         BindStore binds,
         MusicVizAssets viz,
         PlaybackAccess access,
@@ -88,7 +88,7 @@ public sealed partial class MusicPlayer
 
     /// <summary>
     /// Auto-mode for <c>!play</c>: hashtag / current channel / clan default stream channel.
-    /// Voice channels are not a STN publish target anymore.
+    /// Voice channels are not a bot music playback target; SFU voice is for users.
     /// </summary>
     public async Task PlayAutoAsync(
         ICommandContext ctx,
@@ -115,7 +115,7 @@ public sealed partial class MusicPlayer
         {
             await ctx.ReplyAsync(PlayerMessageBuilder.Error(
                     "Streaming only",
-                    "STN no longer publishes into voice channels. Tag a #stream channel."))
+                    "Mezube music plays in #stream channels. Tag a #stream channel."))
                 .ConfigureAwait(false);
             return;
         }
@@ -154,7 +154,7 @@ public sealed partial class MusicPlayer
             {
                 return (null, PlayerMessageBuilder.Error(
                     "Streaming only",
-                    "STN no longer publishes into voice channels. Tag a #stream channel."));
+                    "Mezube music plays in #stream channels. Tag a #stream channel."));
             }
 
             return (null, PlayerMessageBuilder.Error(
@@ -171,7 +171,7 @@ public sealed partial class MusicPlayer
         {
             return (null, PlayerMessageBuilder.Error(
                 "Streaming only",
-                "STN no longer publishes into voice channels. Tag a #stream channel, or set a default stream channel."));
+                "Mezube music plays in #stream channels. Tag a #stream channel, or set a default stream channel."));
         }
 
         var defaultStreamChannelId = await _binds.TryGetDefaultStreamChannelAsync(clanId, cancellationToken)
@@ -263,6 +263,11 @@ public sealed partial class MusicPlayer
                 .ConfigureAwait(false);
             return;
         }
+
+        // The bot is an SFU audio-only speaker. The old video flag remains in
+        // the command surface for compatibility, but must not select a video
+        // preparation or playback path.
+        wantVideo = false;
 
         var destination = PlayerMessageBuilder.FormatDestination("streaming", channel.Name);
         var preparing = await ctx.ReplyAsync(PlayerMessageBuilder.Preparing(destination))
@@ -587,7 +592,7 @@ public sealed partial class MusicPlayer
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "STN pause failed clan={ClanId} paused={Paused}", clanId, paused);
+            _logger.LogWarning(ex, "SFU pause failed clan={ClanId} paused={Paused}", clanId, paused);
             return ControlOutcome.Denied(PlayerMessageBuilder.Error(
                 "Couldn’t pause/resume",
                 "Something went wrong changing playback — try again."));
@@ -625,7 +630,7 @@ public sealed partial class MusicPlayer
         state.PrepCts?.Cancel();
         await _playerStore.SetLoopModeAsync(clanId, LoopMode.Off, cancellationToken).ConfigureAwait(false);
         await ClearPersistedSessionAsync(clanId, cancellationToken).ConfigureAwait(false);
-        // Cancel wakes WaitForTrackEnd; pump owns STN stop.
+        // Cancel wakes WaitForTrackEnd; pump owns SFU publisher stop.
         state.CancelTrack();
         state.IsPlaying = false;
         ScheduleIdleDestroy(clanId, state);

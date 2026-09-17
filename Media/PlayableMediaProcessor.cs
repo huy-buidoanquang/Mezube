@@ -10,7 +10,7 @@ using System.Diagnostics;
 namespace Mezube.Media;
 
 /// <summary>
-/// Ensures STN gets a stable HTTP URL (Mezon CDN), not an ephemeral googlevideo link.
+/// Ensures the SFU publisher gets a stable HTTP URL (Mezon CDN), not an ephemeral googlevideo link.
 /// Cache + persist live here; download/convert/upload stages live in <see cref="PipelineProcessor"/>.
 /// </summary>
 public sealed class PlayableMediaProcessor
@@ -97,11 +97,10 @@ public sealed class PlayableMediaProcessor
                 {
                     _cache.Set(cacheKey, cachedUrl!, PlayableCacheTtl);
                     _logger.LogDebug(
-                        "Using cached CDN media for {Source}/{Id} kind={Kind}: {Url} elapsedMs={ElapsedMs}",
+                        "Using cached CDN media for {Source}/{Id} kind={Kind} elapsedMs={ElapsedMs}",
                         id.Source,
                         id.ExternalId,
                         kind,
-                        cachedUrl,
                         stopwatch.ElapsedMilliseconds);
                     await _store.TouchPlayedAsync(id.Source, id.ExternalId, cancellationToken)
                         .ConfigureAwait(false);
@@ -123,10 +122,9 @@ public sealed class PlayableMediaProcessor
                      && !PlayableUrlHelper.IsPreparedAudioUrl(stored.PlayableUrl))
             {
                 _logger.LogWarning(
-                    "Ignoring invalid playable_url cache (not prepared CDN ogg/opus) {Source}/{Id}: {Url}",
+                    "Ignoring invalid playable_url cache (not prepared CDN ogg/opus) {Source}/{Id}",
                     id.Source,
-                    id.ExternalId,
-                    stored.PlayableUrl);
+                    id.ExternalId);
                 try
                 {
                     await _store.ClearPlayableUrlAsync(id.Source, id.ExternalId, cancellationToken)
@@ -153,21 +151,19 @@ public sealed class PlayableMediaProcessor
                     .ConfigureAwait(false);
 
                 _logger.LogDebug(
-                    "Playable media already direct for {Title} kind={Kind} elapsedMs={ElapsedMs} url={Url}",
+                    "Playable media already direct for {Title} kind={Kind} elapsedMs={ElapsedMs}",
                     track.Title,
                     kind,
-                    stopwatch.ElapsedMilliseconds,
-                    track.MediaUrl);
+                    stopwatch.ElapsedMilliseconds);
                 return track;
             }
             else
             {
                 _logger.LogDebug(
-                    "Playable media already direct for {Title} kind={Kind} elapsedMs={ElapsedMs} url={Url}",
+                    "Playable media already direct for {Title} kind={Kind} elapsedMs={ElapsedMs}",
                     track.Title,
                     kind,
-                    stopwatch.ElapsedMilliseconds,
-                    track.MediaUrl);
+                    stopwatch.ElapsedMilliseconds);
                 return track;
             }
         }
@@ -288,7 +284,22 @@ public sealed class PlayableMediaProcessor
     private static bool IsReadyUrl(string? url, PreparedAssetKind kind)
         => kind == PreparedAssetKind.Video
             ? PlayableUrlHelper.IsPreparedStreamingUrl(url)
-            : PlayableUrlHelper.IsPreparedAudioUrl(url);
+            : IsPreparedSfuAudioUrl(url);
+
+    private static bool IsPreparedSfuAudioUrl(string? rawUrl)
+    {
+        if (!PlayableUrlHelper.IsPreparedAudioUrl(rawUrl)
+            || !Uri.TryCreate(rawUrl, UriKind.Absolute, out var uri))
+        {
+            return false;
+        }
+
+        // The in-process SFU publisher consumes the canonical output produced by
+        // TranscodeToOggAsync. Older cached .ogg/.opus assets may have a
+        // different sample rate/channel layout, so they must be normalized
+        // once instead of being trusted by extension alone.
+        return uri.AbsolutePath.Contains(".normalized.", StringComparison.OrdinalIgnoreCase);
+    }
 
     private static TrackInfoEntity WithMediaUrl(TrackInfoEntity track, string mediaUrl)
         => new()

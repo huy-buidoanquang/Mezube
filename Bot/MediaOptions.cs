@@ -20,6 +20,4 @@ public sealed class MediaOptions
     public int PreparedVideoBitrateKbps { get; set; } = 1000;
     public int PreparedVideoHeight { get; set; } = 720;
     public int PreparedVideoFps { get; set; } = 30;
-    public string StnBaseUrl { get; set; } = string.Empty;
-    public string StnPublisherPassword { get; set; } = string.Empty;
 }

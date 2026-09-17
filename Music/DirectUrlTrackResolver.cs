@@ -55,7 +55,7 @@ public sealed class DirectUrlTrackResolver : ITrackResolver
             return null;
         }
 
-        // Prefer .ogg for STN when caller passes .mp3 (Komu convention).
+        // Prefer .ogg for SFU audio when caller passes .mp3 (Komu convention).
         var mediaUrl = url.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase)
             ? url[..^4] + ".ogg"
             : url;

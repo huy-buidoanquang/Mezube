@@ -8,7 +8,7 @@ using Mezube.Infrastructure.Persistence.Redis;
 using Mezube.Media;
 using Mezube.Music;
 using Mezube.Playback;
-using Mezube.Stn;
+using Mezube.Sfu;
 using Mezube.Ui;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -45,9 +45,8 @@ internal static class Program
         ConfigureLogging(builder.Logging, builder.Configuration, options);
 
         builder.Services.AddHttpClient(nameof(MezonCdnUploader));
-        builder.Services.AddSingleton<StnStreamingSessionManager>();
-        builder.Services.AddSingleton<StreamingChannelSinkHolder>();
-        builder.Services.AddSingleton<StnCredentialProvider>();
+        builder.Services.AddSingleton<SfuPublisherSessionManager>();
+        builder.Services.AddSingleton<SfuClientHolder>();
         builder.Services.AddSingleton<YtDlpProcessor>();
         builder.Services.AddSingleton<FfmpegProcessor>();
         builder.Services.AddSingleton<MezonCdnUploader>();
@@ -116,7 +115,7 @@ internal static class Program
             ]));
         builder.Services.AddSingleton<PlayEnqueueService>();
         builder.Services.AddSingleton<BindStore>();
-        builder.Services.AddSingleton<StreamingChannelSink>();
+        builder.Services.AddSingleton<SfuStreamingChannelSink>();
         builder.Services.AddSingleton<PlaybackAccess>();
         builder.Services.AddSingleton<MusicPlayer>();
         builder.Services.AddHostedService<PersistenceInitializer>();

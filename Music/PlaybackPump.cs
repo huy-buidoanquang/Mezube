@@ -205,7 +205,7 @@ public sealed partial class MusicPlayer
                     await _streamingSink.PlayAsync(
                             target,
                             track,
-                            item.WantVideo ? PreparedAssetKind.Video : PreparedAssetKind.Audio,
+                            PreparedAssetKind.Audio,
                             trackCts.Token)
                         .ConfigureAwait(false);
                     _logger.LogDebug(
@@ -278,13 +278,11 @@ public sealed partial class MusicPlayer
                 }
                 catch (Exception ex)
                 {
-                    // Media prep / single-track failures must NOT call StopAsync — that tears down
-                    // the STN publisher WS (channel_closed) and kicks every listener in the room.
-                    // Soft-end the track and continue the queue.
+                    // Media prep / single-track failures keep the SFU room alive and advance the queue.
                     var mediaFailure = IsMediaPrepFailure(ex);
                     state.LastDestroyReason = mediaFailure
                         ? PlayerDestroyReason.TrackFailed
-                        : PlayerDestroyReason.StnFailed;
+                        : PlayerDestroyReason.SfuFailed;
                     _logger.LogError(ex, "Playback failed for {Title} channel={ChannelId}", track.Title, target.ChannelId);
                     await NotifyPlaybackFailureAsync(state, track, ex).ConfigureAwait(false);
 
@@ -311,7 +309,7 @@ public sealed partial class MusicPlayer
                             _logger.LogDebug(stopEx, "Stop after failure ignored channel={ChannelId}", target.ChannelId);
                         }
 
-                        if (IsStnInfrastructureFailure(ex))
+                        if (IsSfuInfrastructureFailure(ex))
                         {
                             state.Queue.Clear(clearCurrent: true);
                             break;
@@ -331,7 +329,7 @@ public sealed partial class MusicPlayer
                     {
                         PlayerDestroyReason.Skip => PlayEndReason.Skip,
                         PlayerDestroyReason.UserStop => PlayEndReason.Stop,
-                        PlayerDestroyReason.StnFailed => PlayEndReason.Error,
+                        PlayerDestroyReason.SfuFailed => PlayEndReason.Error,
                         PlayerDestroyReason.TrackFailed => PlayEndReason.Error,
                         PlayerDestroyReason.Seek => PlayEndReason.Completed,
                         _ => PlayEndReason.Completed,
@@ -740,7 +738,7 @@ public sealed partial class MusicPlayer
             if (state.Mode == PlaybackMode.Voice)
             {
                 _logger.LogInformation(
-                    "Dropping restored voice session clan={ClanId}; STN voice/WHIP is gone",
+                    "Dropping restored voice session clan={ClanId}; bot playback is limited to stream channels",
                     clanId);
                 state.Queue.Clear();
                 await _playerStore.ClearSessionAsync(clanId, cancellationToken).ConfigureAwait(false);
@@ -895,7 +893,7 @@ public sealed partial class MusicPlayer
         PlaybackTarget target,
         CancellationToken cancellationToken)
     {
-        // STN stream_track_ended is authoritative; duration is only used for up-next UX.
+        // The in-process SFU publisher EOF is authoritative; duration is only used for up-next UX.
         using var endedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var endedWait = _streamingSink.WaitUntilTrackEndedAsync(target.ChannelId, endedCts.Token);
         var upNextTask = track.Duration is { } d && d > UpNextLead
@@ -913,7 +911,7 @@ public sealed partial class MusicPlayer
         }
 
         _logger.LogDebug(
-            "Streaming track ended by STN signal title={Title} channel={ChannelId}",
+            "Streaming track ended by SFU publisher EOF title={Title} channel={ChannelId}",
             track.Title,
             target.ChannelId);
     }
@@ -983,7 +981,7 @@ public sealed partial class MusicPlayer
             var content = ex is AudioTooLargeException
                 ? PlayerMessageBuilder.CopyrightBlocked()
                 : PlayerMessageBuilder.FromMediaFailure(ex)
-                    ?? PlayerMessageBuilder.FromStnFailure(ex)
+                    ?? PlayerMessageBuilder.FromSfuFailure(ex)
                     ?? PlayerMessageBuilder.Awkward();
             await channel.SendAsync(content).ConfigureAwait(false);
         }
@@ -1018,17 +1016,12 @@ public sealed partial class MusicPlayer
         return false;
     }
 
-    private static bool IsStnInfrastructureFailure(Exception ex)
+    private static bool IsSfuInfrastructureFailure(Exception ex)
     {
-        if (ex is Stn.StnCapacityException)
-        {
-            return true;
-        }
-
         var msg = ex.Message;
-        return msg.Contains("502", StringComparison.Ordinal)
-               || msg.Contains("status code '200'", StringComparison.Ordinal)
-               || msg.Contains("STN streaming WebSocket", StringComparison.Ordinal);
+        return msg.Contains("SFU", StringComparison.OrdinalIgnoreCase)
+               || msg.Contains("SFU publisher", StringComparison.OrdinalIgnoreCase)
+               || msg.Contains("session capacity", StringComparison.OrdinalIgnoreCase);
     }
 
     private ClanPlaybackSession GetState(long clanId)

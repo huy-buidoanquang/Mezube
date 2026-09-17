@@ -1,6 +1,6 @@
 using Mezube.Media;
 using Mezube.Music;
-using Mezube.Stn;
+using Mezube.Sfu;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -36,12 +36,12 @@ public sealed class MediaCleanupHostedService : IHostedService
 
         try
         {
-            _logger.LogDebug("Disposing all STN streaming sessions during host shutdown");
-            await _services.GetRequiredService<StnStreamingSessionManager>().DisposeAllAsync().ConfigureAwait(false);
+            _logger.LogDebug("Disposing all SFU publisher sessions during host shutdown");
+            await _services.GetRequiredService<SfuPublisherSessionManager>().DisposeAllAsync().ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to dispose STN streaming sessions during shutdown");
+            _logger.LogWarning(ex, "Failed to dispose SFU publisher sessions during shutdown");
         }
 
         try

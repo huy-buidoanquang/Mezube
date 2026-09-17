@@ -135,12 +135,11 @@ public sealed class PipelineProcessor
                 .ConfigureAwait(false);
 
             _logger.LogInformation(
-                "Pipeline prepare ready title={Title} kind=audio bytes={Bytes} elapsedMs={ElapsedMs} uploadMs={UploadMs} url={Url}",
+                "Pipeline prepare ready title={Title} kind=audio bytes={Bytes} elapsedMs={ElapsedMs} uploadMs={UploadMs}",
                 track.Title,
                 bytes,
                 total.ElapsedMilliseconds,
-                uploadStopwatch.ElapsedMilliseconds,
-                cdnUrl);
+                uploadStopwatch.ElapsedMilliseconds);
 
             return new PipelineResult(cdnUrl, bytes, PreparedAssetKind.Audio);
         }
@@ -195,7 +194,7 @@ public sealed class PipelineProcessor
             if (!_ffmpeg.IsAvailable)
             {
                 throw new MediaPrepException(
-                    "ffmpeg chưa có trên PATH — STN streaming video cần WebM Opus+VP8. " +
+                    "ffmpeg chưa có trên PATH — legacy video preparation needs WebM Opus+VP8. " +
                     "Cài ffmpeg rồi restart bot, hoặc set MEZUBE_FFMPEG_PATH.");
             }
 
@@ -236,12 +235,11 @@ public sealed class PipelineProcessor
                 .ConfigureAwait(false);
 
             _logger.LogInformation(
-                "Pipeline prepare ready title={Title} kind=video bytes={Bytes} elapsedMs={ElapsedMs} uploadMs={UploadMs} url={Url}",
+                "Pipeline prepare ready title={Title} kind=video bytes={Bytes} elapsedMs={ElapsedMs} uploadMs={UploadMs}",
                 track.Title,
                 bytes,
                 total.ElapsedMilliseconds,
-                uploadStopwatch.ElapsedMilliseconds,
-                cdnUrl);
+                uploadStopwatch.ElapsedMilliseconds);
 
             return new PipelineResult(cdnUrl, bytes, PreparedAssetKind.Video);
         }
@@ -257,32 +255,17 @@ public sealed class PipelineProcessor
 
     private async Task<string> EnsureOggAsync(string inputPath, CancellationToken cancellationToken)
     {
-        var ext = Path.GetExtension(inputPath).ToLowerInvariant();
-        if (ext is ".ogg" or ".opus")
-        {
-            return inputPath;
-        }
-
         if (!_ffmpeg.IsAvailable)
         {
             throw new MediaPrepException(
-                "ffmpeg chưa có trên PATH — STN cần file .ogg/.webm. " +
+                "ffmpeg chưa có trên PATH — audio preparation needs an Ogg output. " +
                 "Cài ffmpeg rồi restart bot, hoặc set MEZUBE_FFMPEG_PATH.");
-        }
-
-        if (ext is ".webm")
-        {
-            var copied = await _ffmpeg.RemuxOpusToOggAsync(inputPath, cancellationToken).ConfigureAwait(false);
-            if (!string.IsNullOrWhiteSpace(copied) && File.Exists(copied))
-            {
-                return copied;
-            }
         }
 
         var oggPath = await _ffmpeg.TranscodeToOggAsync(inputPath, cancellationToken).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(oggPath) || !File.Exists(oggPath))
         {
-            throw new MediaPrepException("ffmpeg convert → ogg thất bại; không upload m4a/webm cho STN.");
+            throw new MediaPrepException("ffmpeg convert → ogg thất bại; không upload a source container directly.");
         }
 
         return oggPath;
