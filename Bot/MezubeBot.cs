@@ -162,7 +162,13 @@ public sealed class MezubeBot : BackgroundService
                     case MezubeButtonId.ActionSkip:
                         {
                             var outcome = await _player
-                                .TrySkipAsync(ctx.Client, clanId, ctx.User.Id, ctx.CancellationToken)
+                                .TrySkipAsync(
+                                    ctx.Client,
+                                    clanId,
+                                    ctx.User.Id,
+                                    ctx.CancellationToken,
+                                    channelId: null,
+                                    controlMessageId: messageId)
                                 .ConfigureAwait(false);
                             if (!outcome.Allowed)
                             {
@@ -178,7 +184,13 @@ public sealed class MezubeBot : BackgroundService
                     case MezubeButtonId.ActionStop:
                         {
                             var outcome = await _player
-                                .TryStopAsync(ctx.Client, clanId, ctx.User.Id, ctx.CancellationToken)
+                                .TryStopAsync(
+                                    ctx.Client,
+                                    clanId,
+                                    ctx.User.Id,
+                                    ctx.CancellationToken,
+                                    channelId: null,
+                                    controlMessageId: messageId)
                                 .ConfigureAwait(false);
                             if (!outcome.Allowed)
                             {

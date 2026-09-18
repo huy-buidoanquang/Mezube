@@ -63,6 +63,21 @@ public sealed class ClanPlaybackSessionTests
         Assert.Equal(1, slots.CurrentCount);
     }
 
+    [Fact]
+    public void Two_channel_sessions_can_hold_slots_when_cap_allows()
+    {
+        using var slots = new SemaphoreSlim(2, 2);
+        using var a = new ClanPlaybackSession { ChannelId = 1 };
+        using var b = new ClanPlaybackSession { ChannelId = 2 };
+
+        Assert.True(TryClaim(slots, a));
+        Assert.True(TryClaim(slots, b));
+        Assert.Equal(0, slots.CurrentCount);
+        ReleaseIfHeld(slots, a);
+        ReleaseIfHeld(slots, b);
+        Assert.Equal(2, slots.CurrentCount);
+    }
+
     private static bool TryClaim(SemaphoreSlim slots, ClanPlaybackSession state)
     {
         if (state.HoldsPlaySlot)

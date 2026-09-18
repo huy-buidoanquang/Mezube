@@ -164,9 +164,12 @@ public sealed partial class MusicPlayer
             return;
         }
 
-        var play = new QueuedPlay(track, target, preparingMessageId, preparingCreateTime, WantVideo: wantVideo);
+        var state = GetState(target.ClanId, target.ChannelId);
+        var play = ClanSessionBinder.Pin(
+            state,
+            new QueuedPlay(track, target, preparingMessageId, preparingCreateTime, WantVideo: wantVideo));
         var kind = await EnqueueOrStartAsync(
-                GetState(target.ClanId),
+                state,
                 play,
                 mode,
                 ctx.Client,
@@ -175,7 +178,7 @@ public sealed partial class MusicPlayer
                 attachPreparingAsControl: true,
                 cancellationToken)
             .ConfigureAwait(false);
-        await ReplyEnqueueAsync(ctx, kind, play, target.ChannelLabel, preparingMessageId, preparingCreateTime)
+        await ReplyEnqueueAsync(ctx, kind, play, play.Target.ChannelLabel, preparingMessageId, preparingCreateTime)
             .ConfigureAwait(false);
     }
 
@@ -300,9 +303,12 @@ public sealed partial class MusicPlayer
             return;
         }
 
-        var play = new QueuedPlay(track, target, messageId, null, WantVideo: wantVideo);
+        var state = GetState(target.ClanId, target.ChannelId);
+        var play = ClanSessionBinder.Pin(
+            state,
+            new QueuedPlay(track, target, messageId, null, WantVideo: wantVideo));
         var kind = await EnqueueOrStartAsync(
-                GetState(target.ClanId),
+                state,
                 play,
                 mode,
                 ctx.Client,
@@ -322,7 +328,7 @@ public sealed partial class MusicPlayer
             PlayEnqueueKind.CutIn => PlayerMessageBuilder.PlayingNext(
                 track.Title,
                 "Cut in ahead of the default playlist."),
-            PlayEnqueueKind.Queued => PlayerMessageBuilder.Queued(track, 1, target.ChannelLabel),
+            PlayEnqueueKind.Queued => PlayerMessageBuilder.Queued(track, 1, play.Target.ChannelLabel),
             _ => null,
         };
         if (content is not null)

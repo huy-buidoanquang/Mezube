@@ -52,29 +52,38 @@ public sealed class SfuStreamingChannelSink : IPlaybackSink, ISfuPublisherSink
         }
 
         var client = _holder.GetClient();
-        var playable = await _prep.EnsurePreparedAsync(client, track, PreparedAssetKind.Audio, cancellationToken).ConfigureAwait(false);
-        if (!IsSupportedAudioUrl(playable.MediaUrl))
+        // First join must not enter the SFU room until the Ogg file exists on disk
+        // (or a prepared CDN URL is ready). Overlapping StartAsync with ffmpeg left
+        // the bot sitting in-channel as a silent speaker.
+        var playable = await _prep.EnsurePreparedAsync(
+                client,
+                track,
+                PreparedAssetKind.Audio,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!SfuMediaSource.TryParse(playable, out var media))
         {
-            throw new InvalidOperationException("SFU stream playback requires an absolute .ogg or .opus URL.");
+            throw new InvalidOperationException("SFU stream playback requires a local .ogg/.opus file or an absolute .ogg/.opus URL.");
         }
 
-        var token = await GenerateMeetTokenAsync(client, target.ChannelId, cancellationToken).ConfigureAwait(false);
         var session = _sessions.GetOrCreate(target.ChannelId);
-        var trackId = BuildTrackId(track);
-        await session.PlayAsync(
-                trackId,
-                playable.MediaUrl,
+        var token = await GenerateMeetTokenAsync(client, target.ChannelId, cancellationToken).ConfigureAwait(false);
+        await session.StartAsync(
                 token,
                 ct => GenerateMeetTokenAsync(client, target.ChannelId, ct),
                 cancellationToken)
             .ConfigureAwait(false);
 
+        var trackId = BuildTrackId(track);
+        session.BeginStream(trackId, media);
+
         _logger.LogDebug(
-            "SFU stream audio published title={Title} clan={ClanId} channel={ChannelId} track={TrackId}",
+            "SFU stream audio published title={Title} clan={ClanId} channel={ChannelId} track={TrackId} source={Source}",
             track.Title,
             target.ClanId,
             target.ChannelId,
-            trackId);
+            trackId,
+            media.IsLocal ? "local" : "cdn");
     }
 
     public async Task EndTrackAsync(PlaybackTarget target, CancellationToken cancellationToken = default)
@@ -129,19 +138,6 @@ public sealed class SfuStreamingChannelSink : IPlaybackSink, ISfuPublisherSink
 
     private static string BuildTrackId(TrackInfoEntity track)
         => (track.TrackId?.ToString() ?? track.ExternalId ?? track.Title).Trim();
-
-    private static bool IsSupportedAudioUrl(string mediaUrl)
-    {
-        if (!Uri.TryCreate(mediaUrl, UriKind.Absolute, out var uri)
-            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
-        {
-            return false;
-        }
-
-        var extension = Path.GetExtension(uri.AbsolutePath);
-        return extension.Equals(".ogg", StringComparison.OrdinalIgnoreCase)
-            || extension.Equals(".opus", StringComparison.OrdinalIgnoreCase);
-    }
 
     private static async Task<string> GenerateMeetTokenAsync(MezonClient client, long channelId, CancellationToken cancellationToken)
     {

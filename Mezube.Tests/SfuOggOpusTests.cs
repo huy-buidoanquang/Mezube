@@ -45,12 +45,35 @@ public sealed class SfuOggOpusTests
     public void Opus_duration_uses_toc_frame_duration(byte toc, uint expectedSamples)
         => Assert.Equal(expectedSamples, OpusPacket.GetDurationSamples(new[] { toc }));
 
-    private static byte[] BuildOgg(byte[] payload)
+    [Fact]
+    public async Task Compatible_file_requires_48k_stereo_opus_payload()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "mezube-ogg-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var stereo = Path.Combine(dir, "ok.ogg");
+            await File.WriteAllBytesAsync(stereo, BuildOgg(new byte[] { 0x08, 0x01 }));
+            Assert.True(await OggOpusReader.IsSfuCompatibleFileAsync(stereo, CancellationToken.None));
+
+            var mono = Path.Combine(dir, "mono.ogg");
+            await File.WriteAllBytesAsync(mono, BuildOgg(new byte[] { 0x08, 0x01 }, channels: 1));
+            Assert.False(await OggOpusReader.IsSfuCompatibleFileAsync(mono, CancellationToken.None));
+
+            Assert.False(await OggOpusReader.IsSfuCompatibleFileAsync(Path.Combine(dir, "missing.ogg"), CancellationToken.None));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    private static byte[] BuildOgg(byte[] payload, byte channels = 2)
     {
         var head = new byte[19];
         "OpusHead"u8.CopyTo(head.AsSpan());
         head[8] = 1;
-        head[9] = 2;
+        head[9] = channels;
         BinaryPrimitives.WriteUInt32LittleEndian(head.AsSpan(12, 4), 48000);
 
         var tags = "OpusTags\0\0\0\0"u8.ToArray();

@@ -19,6 +19,45 @@ internal sealed class OggOpusReader
 
     public OggOpusReader(Stream stream) => _stream = stream;
 
+    /// <summary>
+    /// True when the file is Ogg Opus 48 kHz stereo (mapping family 0) with at least
+    /// one audio packet — the exact contract <see cref="SfuPublisherSession"/> sends as RTP.
+    /// </summary>
+    internal static async Task<bool> IsSfuCompatibleFileAsync(string path, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            return false;
+        }
+
+        try
+        {
+            await using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: 4096,
+                FileOptions.Asynchronous);
+            return await IsSfuCompatibleAsync(stream, cancellationToken).ConfigureAwait(false);
+        }
+        catch (InvalidDataException)
+        {
+            return false;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
+    internal static async Task<bool> IsSfuCompatibleAsync(Stream stream, CancellationToken cancellationToken)
+    {
+        var reader = new OggOpusReader(stream);
+        var packet = await reader.ReadPacketAsync(cancellationToken).ConfigureAwait(false);
+        return packet is { Length: > 0 };
+    }
+
     public async Task<byte[]?> ReadPacketAsync(CancellationToken cancellationToken)
     {
         while (true)

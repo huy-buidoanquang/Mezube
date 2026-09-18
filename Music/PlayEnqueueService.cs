@@ -84,10 +84,12 @@ public sealed class PlayEnqueueService
             return PlayEnqueueKind.QueueFull;
         }
 
+        plays = ClanSessionBinder.PinAll(state, plays);
         var clanId = plays[0].Target.ClanId;
         var modeKey = mode == PlaybackMode.Voice ? "voice" : "streaming";
         return await state.WithStartLockAsync(async () =>
         {
+            plays = ClanSessionBinder.PinAll(state, plays);
             if (state.IsPlaying || state.PumpRunning)
             {
                 if (state.Mode != mode)
@@ -109,13 +111,13 @@ public sealed class PlayEnqueueService
                     if (interruptDefault && added == 0)
                     {
                         state.Queue.EnqueueFront(play);
-                        await PersistEnqueueAsync(clanId, play, modeKey, front: true, cancellationToken)
+                        await PersistEnqueueAsync(play, modeKey, front: true, cancellationToken)
                             .ConfigureAwait(false);
                     }
                     else
                     {
                         state.Queue.Enqueue(play);
-                        await PersistEnqueueAsync(clanId, play, modeKey, front: false, cancellationToken)
+                        await PersistEnqueueAsync(play, modeKey, front: false, cancellationToken)
                             .ConfigureAwait(false);
                     }
 
@@ -151,6 +153,7 @@ public sealed class PlayEnqueueService
 
             state.BumpGeneration();
             state.CancelIdleDestroy();
+            state.IdleAwaitingDisconnect = false;
             state.PlayingDefaultPlaylist = false;
             resetPrepToken(state);
 
@@ -163,7 +166,7 @@ public sealed class PlayEnqueueService
                 }
 
                 state.Queue.Enqueue(play);
-                await PersistEnqueueAsync(clanId, play, modeKey, front: false, cancellationToken)
+                await PersistEnqueueAsync(play, modeKey, front: false, cancellationToken)
                     .ConfigureAwait(false);
                 StartBackgroundPrep(client, state, play, OnPrepError(state, play, onTooLarge));
                 startedAdded++;
@@ -183,6 +186,7 @@ public sealed class PlayEnqueueService
             state.NotifyChannel = null;
             state.ControlUserId = controlUserId;
             state.ClanId = clanId;
+            state.ChannelId = first.Target.ChannelId;
             if (attachPreparingAsControl)
             {
                 state.ControlMessageId = first.ReplyMessageId;
@@ -196,12 +200,13 @@ public sealed class PlayEnqueueService
     }
 
     public async Task PersistEnqueueAsync(
-        long clanId,
         QueuedPlay play,
         string mode,
         bool front,
         CancellationToken cancellationToken)
     {
+        var clanId = play.Target.ClanId;
+        var channelId = play.Target.ChannelId;
         try
         {
             var payload = QueuedTrackPayload.From(
@@ -214,16 +219,16 @@ public sealed class PlayEnqueueService
                 play.WantVideo);
             if (front)
             {
-                await _playerStore.EnqueueFrontAsync(clanId, payload, cancellationToken).ConfigureAwait(false);
+                await _playerStore.EnqueueFrontAsync(clanId, channelId, payload, cancellationToken).ConfigureAwait(false);
             }
             else
             {
-                await _playerStore.EnqueueAsync(clanId, payload, cancellationToken).ConfigureAwait(false);
+                await _playerStore.EnqueueAsync(clanId, channelId, payload, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Redis enqueue failed clan={ClanId}", clanId);
+            _logger.LogWarning(ex, "Redis enqueue failed clan={ClanId} channel={ChannelId}", clanId, channelId);
         }
     }
 

@@ -101,9 +101,10 @@ public sealed class TrackPrepService
         // Shared work must not use a per-caller CT: CancelTrack / PrepCts cancel would abort
         // shared work for every waiter. Callers still observe cancel via AwaitSharedAsync.
         await _gate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        TrackInfoEntity prepared;
         try
         {
-            return await _processor.ProcessTrackAsync(client, track, kind, CancellationToken.None)
+            prepared = await _processor.ProcessTrackAsync(client, track, kind, CancellationToken.None)
                 .ConfigureAwait(false);
         }
         finally
@@ -111,6 +112,9 @@ public sealed class TrackPrepService
             _gate.Release();
             _inflight.TryRemove(key, out _);
         }
+
+        _processor.ScheduleCdnPersist(client, prepared, kind);
+        return prepared;
     }
 
     private async Task<TrackInfoEntity> RunGatedUngatedKeyAsync(
@@ -120,15 +124,19 @@ public sealed class TrackPrepService
         CancellationToken cancellationToken)
     {
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        TrackInfoEntity prepared;
         try
         {
-            return await _processor.ProcessTrackAsync(client, track, kind, cancellationToken)
+            prepared = await _processor.ProcessTrackAsync(client, track, kind, cancellationToken)
                 .ConfigureAwait(false);
         }
         finally
         {
             _gate.Release();
         }
+
+        _processor.ScheduleCdnPersist(client, prepared, kind);
+        return prepared;
     }
 
     private static async Task<TrackInfoEntity> AwaitSharedAsync(

@@ -2,6 +2,7 @@ using Mezube.Bot;
 using Mezube.Helpers;
 using Mezube.Sfu;
 using SIPSorcery.Net;
+using System.Text.Json;
 
 namespace Mezube.Tests;
 
@@ -68,6 +69,49 @@ public sealed class SfuAudioContractTests
         Assert.Equal(MediaStreamStatusEnum.SendOnly, parsedAnswer.Media[0].MediaStreamStatus);
         Assert.All(parsedAnswer.Media.Skip(1), media =>
             Assert.Equal(MediaStreamStatusEnum.Inactive, media.MediaStreamStatus));
+    }
+
+    [Fact]
+    public void Joined_ice_servers_parse_stun_and_turn()
+    {
+        using var document = JsonDocument.Parse(
+            """
+            {
+              "type": "joined",
+              "room": "1",
+              "iceServers": [
+                { "urls": "stun:stun.l.google.com:19302" },
+                { "urls": "turn:sfu.example.test:3478?transport=udp", "username": "u", "credential": "p" }
+              ]
+            }
+            """);
+
+        var servers = SfuPublisherSession.ParseIceServers(document.RootElement);
+
+        Assert.Equal(2, servers.Count);
+        Assert.Equal("stun:stun.l.google.com:19302", servers[0].urls);
+        Assert.Equal("turn:sfu.example.test:3478?transport=udp", servers[1].urls);
+        Assert.Equal("u", servers[1].username);
+        Assert.Equal("p", servers[1].credential);
+    }
+
+    [Fact]
+    public void Joined_without_ice_servers_returns_empty()
+    {
+        using var document = JsonDocument.Parse("""{ "type": "joined", "room": "1" }""");
+
+        Assert.Empty(SfuPublisherSession.ParseIceServers(document.RootElement));
+    }
+
+    [Fact]
+    public void Publisher_applies_ice_servers_from_joined()
+    {
+        var servers = new[] { new RTCIceServer { urls = "stun:stun.l.google.com:19302" } };
+        using var peerConnection = SfuPublisherSession.CreateAudioPublisherPeerConnection(servers);
+
+        Assert.NotNull(peerConnection.AudioLocalTrack);
+        Assert.NotNull(peerConnection.getConfiguration()?.iceServers);
+        Assert.Equal("stun:stun.l.google.com:19302", peerConnection.getConfiguration()!.iceServers[0].urls);
     }
 
     private static string FullSfuOffer => string.Join("\r\n", new[]
