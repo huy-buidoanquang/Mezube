@@ -130,6 +130,11 @@ public sealed class PlayEnqueueService
                     return PlayEnqueueKind.QueueFull;
                 }
 
+                // The request was accepted and now owns the session again.
+                // Do not let a previous !stop/idle/failure reason make the
+                // next natural EOF tear down SFU.
+                state.ResetTerminalDestroyReason();
+
                 if (interruptDefault)
                 {
                     state.LastDestroyReason = PlayerDestroyReason.Skip;
@@ -177,6 +182,11 @@ public sealed class PlayEnqueueService
                 releaseSlot?.Invoke(state);
                 return PlayEnqueueKind.QueueFull;
             }
+
+            // The request was accepted and now owns the session again. This
+            // must happen after enqueue/persistence succeeds so rejected
+            // mode/queue/slot requests cannot alter the existing state.
+            state.ResetTerminalDestroyReason();
 
             var first = plays[0];
             state.Mode = mode;

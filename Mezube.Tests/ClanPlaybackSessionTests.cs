@@ -78,6 +78,49 @@ public sealed class ClanPlaybackSessionTests
         Assert.Equal(2, slots.CurrentCount);
     }
 
+    [Theory]
+    [InlineData(PlayerDestroyReason.UserStop)]
+    [InlineData(PlayerDestroyReason.QueueEmpty)]
+    [InlineData(PlayerDestroyReason.SfuFailed)]
+    [InlineData(PlayerDestroyReason.TrackFailed)]
+    [InlineData(PlayerDestroyReason.IdleTimeout)]
+    [InlineData(PlayerDestroyReason.ModeConflict)]
+    [InlineData(PlayerDestroyReason.RoomConflict)]
+    [InlineData(PlayerDestroyReason.CapacityExceeded)]
+    public void New_playback_clears_previous_terminal_reason(PlayerDestroyReason reason)
+    {
+        using var state = new ClanPlaybackSession { LastDestroyReason = reason };
+
+        state.ResetTerminalDestroyReason();
+
+        Assert.Equal(PlayerDestroyReason.None, state.LastDestroyReason);
+    }
+
+    [Theory]
+    [InlineData(PlayerDestroyReason.None)]
+    [InlineData(PlayerDestroyReason.Skip)]
+    [InlineData(PlayerDestroyReason.Seek)]
+    public void Reset_terminal_destroy_reason_preserves_active_control_reason(PlayerDestroyReason reason)
+    {
+        using var state = new ClanPlaybackSession { LastDestroyReason = reason };
+
+        state.ResetTerminalDestroyReason();
+
+        Assert.Equal(reason, state.LastDestroyReason);
+    }
+
+    [Fact]
+    public void Natural_eof_never_selects_sfu_stop_even_if_reason_is_stale()
+        => Assert.False(MusicPlayer.ShouldStopSfuAfterTrack(
+            trackEndedNaturally: true,
+            PlayerDestroyReason.UserStop));
+
+    [Fact]
+    public void Explicit_stop_cancellation_selects_sfu_stop()
+        => Assert.True(MusicPlayer.ShouldStopSfuAfterTrack(
+            trackEndedNaturally: false,
+            PlayerDestroyReason.UserStop));
+
     private static bool TryClaim(SemaphoreSlim slots, ClanPlaybackSession state)
     {
         if (state.HoldsPlaySlot)

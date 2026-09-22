@@ -270,9 +270,11 @@ public sealed partial class MusicPlayer
                     state.PlayHistoryId = await BeginHistoryAsync(clanId, item, modeKey, trackCts.Token)
                         .ConfigureAwait(false);
 
+                    var trackEndedNaturally = false;
                     try
                     {
                         await WaitForTrackEndAsync(state, track, target, trackCts.Token).ConfigureAwait(false);
+                        trackEndedNaturally = !trackCts.IsCancellationRequested;
                     }
                     catch (OperationCanceledException) when (trackCts.IsCancellationRequested)
                     {
@@ -280,8 +282,9 @@ public sealed partial class MusicPlayer
 
                     try
                     {
-                        // Keep the WS + listeners across tracks; only !stop tears the session down.
-                        if (state.LastDestroyReason == PlayerDestroyReason.UserStop)
+                        // Keep the WS + listeners across normal EOF; only an
+                        // explicit cancellation marked UserStop tears it down here.
+                        if (ShouldStopSfuAfterTrack(trackEndedNaturally, state.LastDestroyReason))
                         {
                             await _streamingSink.StopAsync(target, CancellationToken.None).ConfigureAwait(false);
                         }
@@ -1060,6 +1063,11 @@ public sealed partial class MusicPlayer
             track.Title,
             target.ChannelId);
     }
+
+    internal static bool ShouldStopSfuAfterTrack(
+        bool trackEndedNaturally,
+        PlayerDestroyReason destroyReason)
+        => !trackEndedNaturally && destroyReason == PlayerDestroyReason.UserStop;
 
     private async Task NotifyStreamingUpNextAsync(
         ClanPlaybackSession state,

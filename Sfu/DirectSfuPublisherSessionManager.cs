@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Runtime.ExceptionServices;
 using System.Text;
@@ -118,6 +119,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
     private CancellationTokenSource? _trackCts;
     private string? _trackId;
     private Func<CancellationToken, Task<string>>? _tokenProvider;
+    private Exception? _terminalFailure;
     private bool _started;
     private bool _stopped;
     private bool _paused;
@@ -313,23 +315,23 @@ public sealed class SfuPublisherSession : IAsyncDisposable
     private async Task RunReconnectLoopAsync(string initialToken, CancellationToken cancellationToken)
     {
         var token = initialToken;
+        var reconnectAttempts = 0;
+
         while (!cancellationToken.IsCancellationRequested)
         {
-            try
+            var result = await ConnectAndRunAsync(token, cancellationToken).ConfigureAwait(false);
+            if (result.WasStable)
             {
-                await ConnectAndRunAsync(token, cancellationToken).ConfigureAwait(false);
+                reconnectAttempts = 0;
             }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (Exception ex)
+
+            if (result.Failure is not null)
             {
                 _logger.LogWarning(
                     "SFU publisher connection failed channel={ChannelId}; reconnecting error_type={ErrorType} error={Error}",
                     ChannelId,
-                    ex.GetType().Name,
-                    ex.Message);
+                    result.Failure.GetType().Name,
+                    result.Failure.Message);
             }
 
             if (cancellationToken.IsCancellationRequested)
@@ -337,51 +339,92 @@ public sealed class SfuPublisherSession : IAsyncDisposable
                 return;
             }
 
-            var provider = GetTokenProvider();
-            if (provider is null)
+            string? refreshedToken = null;
+            while (refreshedToken is null && !cancellationToken.IsCancellationRequested)
             {
-                return;
-            }
-
-            try
-            {
-                // Never reuse the previous JWT after a WebSocket/PeerConnection failure.
-                token = await provider(cancellationToken).ConfigureAwait(false);
-                if (string.IsNullOrWhiteSpace(token))
+                if (reconnectAttempts >= _options.SfuReconnectMaxAttempts)
                 {
-                    throw new InvalidOperationException("Mezon returned an empty SFU meet token.");
+                    FailSession(new InvalidOperationException(
+                        $"SFU publisher reconnect limit reached after {_options.SfuReconnectMaxAttempts} attempts."));
+                    return;
+                }
+
+                reconnectAttempts++;
+                ResetConnectionSignal();
+                var delay = SfuReconnectPolicy.GetDelay(
+                    reconnectAttempts,
+                    _options.SfuReconnectBackoffMs,
+                    _options.SfuReconnectMaxBackoffMs,
+                    _options.SfuReconnectJitterMs);
+                _logger.LogWarning(
+                    "SFU publisher reconnect scheduled channel={ChannelId} attempt={Attempt}/{MaxAttempts} delay_ms={DelayMs}",
+                    ChannelId,
+                    reconnectAttempts,
+                    _options.SfuReconnectMaxAttempts,
+                    (int)delay.TotalMilliseconds);
+
+                try
+                {
+                    await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                var provider = GetTokenProvider();
+                if (provider is null)
+                {
+                    FailSession(new InvalidOperationException("SFU publisher token provider is unavailable."));
+                    return;
+                }
+
+                try
+                {
+                    // Never reuse the previous JWT after a WebSocket/PeerConnection failure.
+                    refreshedToken = await provider(cancellationToken).ConfigureAwait(false);
+                    if (string.IsNullOrWhiteSpace(refreshedToken))
+                    {
+                        throw new InvalidOperationException("Mezon returned an empty SFU meet token.");
+                    }
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(
+                        "SFU publisher token refresh failed channel={ChannelId} error_type={ErrorType} error={Error}",
+                        ChannelId,
+                        ex.GetType().Name,
+                        ex.Message);
                 }
             }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(
-                    "SFU publisher token refresh failed channel={ChannelId} error_type={ErrorType} error={Error}",
-                    ChannelId,
-                    ex.GetType().Name,
-                    ex.Message);
-                await DelayReconnectAsync(cancellationToken).ConfigureAwait(false);
-                continue;
-            }
 
-            ResetConnectionSignal();
-            await DelayReconnectAsync(cancellationToken).ConfigureAwait(false);
+            if (refreshedToken is not null)
+            {
+                token = refreshedToken;
+            }
         }
     }
 
-    private async Task ConnectAndRunAsync(string token, CancellationToken cancellationToken)
-    {
-        using var websocket = new ClientWebSocket();
-        websocket.Options.SetRequestHeader("User-Agent", "mezube/1.0");
-        await websocket.ConnectAsync(new Uri(_options.SfuWebSocketUrl), cancellationToken).ConfigureAwait(false);
+    private readonly record struct ConnectionRunResult(bool WasStable, Exception? Failure);
 
+    private async Task<ConnectionRunResult> ConnectAndRunAsync(
+        string token,
+        CancellationToken cancellationToken)
+    {
         RTCPeerConnection? peerConnection = null;
         DirectSfuConnection? connection = null;
+        Exception? failure = null;
+        var wasStable = false;
         try
         {
+            using var websocket = new ClientWebSocket();
+            websocket.Options.SetRequestHeader("User-Agent", "mezube/1.0");
+            await websocket.ConnectAsync(new Uri(_options.SfuWebSocketUrl), cancellationToken).ConfigureAwait(false);
+
             await SendJsonAsync(
                     websocket,
                     new
@@ -427,8 +470,19 @@ public sealed class SfuPublisherSession : IAsyncDisposable
                 await AwaitQuietlyAsync(heartbeatTask, CancellationToken.None).ConfigureAwait(false);
             }
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+        }
         finally
         {
+            wasStable = connection is not null
+                && connection.HasBeenConnected
+                && connection.ConnectedDuration >= TimeSpan.FromMilliseconds(_options.SfuReconnectStableResetMs);
             connection?.Close();
             peerConnection?.Dispose();
             lock (_gate)
@@ -439,6 +493,8 @@ public sealed class SfuPublisherSession : IAsyncDisposable
                 }
             }
         }
+
+        return new ConnectionRunResult(wasStable, failure);
     }
 
     internal static RTCPeerConnection CreateAudioPublisherPeerConnection(
@@ -553,6 +609,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
         {
             if (state == RTCPeerConnectionState.connected)
             {
+                connection.MarkConnected();
                 lock (_gate)
                 {
                     _connected.TrySetResult();
@@ -781,7 +838,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
 
         try
         {
-            await WaitForConnectedAsync(cancellationToken).ConfigureAwait(false);
+            await WaitForConnectedConnectionAsync(cancellationToken).ConfigureAwait(false);
             await Task.Factory.StartNew(
                     () => PumpOpusSendLoop(packets.Reader, cancellationToken),
                     cancellationToken,
@@ -841,21 +898,42 @@ public sealed class SfuPublisherSession : IAsyncDisposable
             var connection = GetConnection();
             if (connection is not { IsConnected: true })
             {
-                WaitForConnectedAsync(cancellationToken).GetAwaiter().GetResult();
-                connection = GetConnection();
-                if (connection is null)
-                {
-                    throw new InvalidOperationException("SFU publisher connection is unavailable.");
-                }
-
+                connection = WaitForConnectedConnectionAsync(cancellationToken)
+                    .GetAwaiter()
+                    .GetResult();
                 pacer.Reset();
             }
 
             // Wait-then-send: first packet is due at t=0, each later packet at
             // cumulative samples / 48 kHz. mezon-sfu forwards audio immediately,
             // so a send-side burst is a receive-side JB overrun.
-            pacer.Wait(cancellationToken);
-            connection.PeerConnection.SendAudio(duration, packet);
+            while (true)
+            {
+                pacer.Wait(cancellationToken);
+                try
+                {
+                    connection.PeerConnection.SendAudio(duration, packet);
+                    break;
+                }
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+                {
+                    // Do not drop the packet that was already removed from the
+                    // bounded queue. The connection is the failed resource;
+                    // the Ogg reader and RTP pacing timeline remain owned by
+                    // this track and resume with this same packet.
+                    _logger.LogDebug(
+                        "SFU audio send interrupted channel={ChannelId} error_type={ErrorType}",
+                        ChannelId,
+                        ex.GetType().Name);
+                    connection.SetFailure(ex);
+                    connection.Close();
+                    connection = WaitForReplacementConnectionAsync(connection, cancellationToken)
+                        .GetAwaiter()
+                        .GetResult();
+                    pacer.Reset();
+                }
+            }
+
             pacer.Account(duration);
             pacer.ReleaseCatchUp();
         }
@@ -896,14 +974,43 @@ public sealed class SfuPublisherSession : IAsyncDisposable
         }
     }
 
-    private async Task WaitForConnectedAsync(CancellationToken cancellationToken)
+    private async Task<DirectSfuConnection> WaitForConnectedConnectionAsync(CancellationToken cancellationToken)
     {
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (GetConnection() is { IsConnected: true })
+            var terminalFailure = GetTerminalFailure();
+            if (terminalFailure is not null)
             {
-                return;
+                throw new InvalidOperationException("SFU publisher reconnect is no longer available.", terminalFailure);
+            }
+
+            if (GetConnection() is { IsConnected: true } connection)
+            {
+                return connection;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(50), cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task<DirectSfuConnection> WaitForReplacementConnectionAsync(
+        DirectSfuConnection previous,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var terminalFailure = GetTerminalFailure();
+            if (terminalFailure is not null)
+            {
+                throw new InvalidOperationException("SFU publisher reconnect is no longer available.", terminalFailure);
+            }
+
+            var connection = GetConnection();
+            if (connection is { IsConnected: true } && !ReferenceEquals(connection, previous))
+            {
+                return connection;
             }
 
             await Task.Delay(TimeSpan.FromMilliseconds(50), cancellationToken).ConfigureAwait(false);
@@ -1013,6 +1120,14 @@ public sealed class SfuPublisherSession : IAsyncDisposable
         }
     }
 
+    private Exception? GetTerminalFailure()
+    {
+        lock (_gate)
+        {
+            return _terminalFailure;
+        }
+    }
+
     private Func<CancellationToken, Task<string>>? GetTokenProvider()
     {
         lock (_gate)
@@ -1045,6 +1160,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
             _runCts = null;
             _runTask = null;
             _connected = NewSignal();
+            _terminalFailure = null;
         }
 
         runCts?.Cancel();
@@ -1052,12 +1168,20 @@ public sealed class SfuPublisherSession : IAsyncDisposable
         runCts?.Dispose();
     }
 
-    private async Task DelayReconnectAsync(CancellationToken cancellationToken)
+    private void FailSession(Exception exception)
     {
-        if (_options.SfuReconnectBackoffMs > 0)
+        lock (_gate)
         {
-            await Task.Delay(_options.SfuReconnectBackoffMs, cancellationToken).ConfigureAwait(false);
+            _terminalFailure ??= exception;
+            _connected.TrySetException(_terminalFailure);
+            _trackEnded?.TrySetException(_terminalFailure);
         }
+
+        _logger.LogError(
+            "SFU publisher reconnect stopped channel={ChannelId} error_type={ErrorType} error={Error}",
+            ChannelId,
+            exception.GetType().Name,
+            exception.Message);
     }
 
     private void CompleteTrack(string trackId)
@@ -1096,6 +1220,9 @@ public sealed class SfuPublisherSession : IAsyncDisposable
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
         }
+        catch (OperationCanceledException) when (task.IsCanceled)
+        {
+        }
         catch (Exception ex)
         {
             _logger.LogDebug(
@@ -1112,6 +1239,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
     private sealed class DirectSfuConnection : IDisposable
     {
         private int _closed;
+        private long _connectedAtTimestamp;
         private Exception? _failure;
 
         public DirectSfuConnection(ClientWebSocket websocket, RTCPeerConnection peerConnection)
@@ -1124,8 +1252,16 @@ public sealed class SfuPublisherSession : IAsyncDisposable
         public RTCPeerConnection PeerConnection { get; }
         public bool IsConnected => PeerConnection.connectionState == RTCPeerConnectionState.connected;
         public Exception? Failure => _failure;
+        public bool HasBeenConnected => Volatile.Read(ref _connectedAtTimestamp) != 0;
+        public TimeSpan ConnectedDuration
+            => HasBeenConnected
+                ? Stopwatch.GetElapsedTime(Volatile.Read(ref _connectedAtTimestamp))
+                : TimeSpan.Zero;
 
         public void SetFailure(Exception failure) => Interlocked.CompareExchange(ref _failure, failure, null);
+
+        public void MarkConnected()
+            => Interlocked.CompareExchange(ref _connectedAtTimestamp, Stopwatch.GetTimestamp(), 0);
 
         public void Close()
         {

@@ -46,7 +46,9 @@ public sealed class RedisConnection : IDisposable
         }
 
         var mux = ConnectionMultiplexer.Connect(options.RedisConnectionString);
-        logger.LogInformation("Redis connected ({Endpoints})", options.RedisConnectionString);
+        logger.LogInformation(
+            "Redis connected ({Endpoints})",
+            string.Join(",", mux.GetEndPoints().Select(endpoint => endpoint.ToString())));
         return mux;
     }
 }

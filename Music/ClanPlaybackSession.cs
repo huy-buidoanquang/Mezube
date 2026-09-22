@@ -48,6 +48,26 @@ public sealed class ClanPlaybackSession : IDisposable
 
     public int BumpGeneration() => Interlocked.Increment(ref _generation);
 
+    /// <summary>
+    /// Clears a teardown result when a new playback request takes ownership of
+    /// the session. Skip and seek are intentionally preserved because they are
+    /// active-pump control signals for the current track.
+    /// </summary>
+    public void ResetTerminalDestroyReason()
+    {
+        if (LastDestroyReason is PlayerDestroyReason.UserStop
+            or PlayerDestroyReason.QueueEmpty
+            or PlayerDestroyReason.SfuFailed
+            or PlayerDestroyReason.TrackFailed
+            or PlayerDestroyReason.IdleTimeout
+            or PlayerDestroyReason.ModeConflict
+            or PlayerDestroyReason.RoomConflict
+            or PlayerDestroyReason.CapacityExceeded)
+        {
+            LastDestroyReason = PlayerDestroyReason.None;
+        }
+    }
+
     public async Task<Mezon.Net.Sdk.Entities.Channel?> ResolveNotifyChannelAsync(
         CancellationToken cancellationToken = default)
     {

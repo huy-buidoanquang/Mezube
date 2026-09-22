@@ -35,6 +35,14 @@ public sealed class BotOptions
     public string SfuWebSocketUrl { get; set; } = string.Empty;
     public int SfuConnectTimeoutMs { get; set; } = 10000;
     public int SfuReconnectBackoffMs { get; set; } = 1000;
+    /// <summary>Maximum number of consecutive reconnect attempts after a failed SFU connection.</summary>
+    public int SfuReconnectMaxAttempts { get; set; } = 8;
+    /// <summary>Upper bound for exponential SFU reconnect backoff.</summary>
+    public int SfuReconnectMaxBackoffMs { get; set; } = 30000;
+    /// <summary>Random delay added to reconnects to avoid synchronized retry bursts.</summary>
+    public int SfuReconnectJitterMs { get; set; } = 250;
+    /// <summary>How long a connection must stay connected before the retry counter resets.</summary>
+    public int SfuReconnectStableResetMs { get; set; } = 30000;
     public int SfuMaxSessions { get; set; } = 32;
     public string YtDlpPath { get; set; } = "yt-dlp";
     /// <summary>
@@ -175,9 +183,14 @@ public sealed class BotOptions
             throw new InvalidOperationException("Mezube:SfuWebSocketUrl must be an absolute ws:// or wss:// URI.");
         }
 
-        if (SfuConnectTimeoutMs < 1000 || SfuReconnectBackoffMs < 0)
+        if (SfuConnectTimeoutMs < 1000
+            || SfuReconnectBackoffMs < 1
+            || SfuReconnectMaxAttempts < 0
+            || SfuReconnectMaxBackoffMs < SfuReconnectBackoffMs
+            || SfuReconnectJitterMs < 0
+            || SfuReconnectStableResetMs < 0)
         {
-            throw new InvalidOperationException("Mezube SFU connect timeout/backoff have invalid values.");
+            throw new InvalidOperationException("Mezube SFU connect timeout/reconnect settings have invalid values.");
         }
 
         if (SfuMaxSessions < 1)
