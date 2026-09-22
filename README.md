@@ -2,17 +2,17 @@
 
 Bot phát nhạc cho [Mezon](https://mezon.ai) — prefix `!`, nguồn YouTube (`yt-dlp`) + SoundCloud + direct URL.
 
-- **Streaming only** (`!play`): STN WebSocket `/ws` `connect_publisher` / `stop_publisher` với CDN **WebM** (Opus+VP8, GOP ~2s) hoặc Ogg fallback
-- STN **không** còn `/api/voice/*` hay `/api/whip/*`. Voice/Gmeet channel không phải publish target.
+- **Streaming only** (`!play`): SFU WebSocket + publisher WebRTC in-process, với CDN **Ogg Opus 48 kHz stereo**.
+- SFU là media transport duy nhất cho audio của stream channel và Mezon voice channel. Mezube chỉ publish audio vào stream channel.
 
-Bot encode trước khi publish; STN passthrough, không ffmpeg (xem [mezon-media-server](../mezon-media-server/docs/PROTOCOL.md)).
+Bot chuẩn hóa audio bằng FFmpeg, upload CDN, rồi Mezube đọc Ogg/Opus và gửi RTP audio qua SFU.
 
 ## Yêu cầu
 
 - .NET 10 SDK (deploy) / .NET 10 runtime (chạy framework-dependent)
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) trên PATH
-- [ffmpeg](https://ffmpeg.org/) trên PATH (Ogg Opus + WebM Opus+VP8 GOP 2s cho STN passthrough)
-- NuGet: `Mezon.Net.Sdk` (không cần sibling `Mezon.Net` source)
+- [ffmpeg](https://ffmpeg.org/) trên PATH (chuẩn hóa Ogg Opus cho SFU publisher)
+- NuGet: `Mezon.Net.Sdk` và `SIPSorcery` (publisher WebRTC chạy trực tiếp trong Mezube)
 
 ## Cấu hình
 
@@ -21,7 +21,7 @@ Chọn môi trường bằng `DOTNET_ENVIRONMENT` / `ASPNETCORE_ENVIRONMENT` = `
 | File | Vai trò |
 |------|---------|
 | `appsettings.json` | Shared defaults (prefix, paths, viz/CDN URLs, logging) — **không** chứa token |
-| `appsettings.dev.json` / `appsettings.prod.json` | Host / STN / ServerKey theo môi trường |
+| `appsettings.dev.json` / `appsettings.prod.json` | Host / SFU / ServerKey theo môi trường |
 | `appsettings.dev.local.json` / `appsettings.prod.local.json` (gitignore) | Secrets máy local — `Mezon:BotId` / `Mezon:Token` |
 
 ```powershell
@@ -46,10 +46,16 @@ dotnet run --project Mezube.csproj
 | `Mezon:BotId` / `Mezon:Token` | Bot credentials |
 | `Mezon:ServerKey` | Gateway Basic-Auth — Dev `defaultkey`, Prod `HTTP3m3zonPr0dkey` |
 | `Mezon:Host` / `Mezon:Port` | Dev `dev-mezon.nccsoft.vn:8088`, Prod `gw.mezon.ai:443` |
-| `Mezube:StnBaseUrl` | STN origin (vd. `https://stn.mezon.ai`) — derive `ws(s)://…/ws` |
-| `Mezube:StnAuthMode` | `Auto` ưu tiên Mezon SID và fallback JWT; dùng `Jwt` để rollback |
-| `Mezube:PreparedAudioBitrateKbps` / `PreparedAudioChannels` / `PreparedAudioSampleRate` | Preset cho file CDN audio (Ogg Opus) |
-| `Mezube:PreparedVideoBitrateKbps` / `PreparedVideoHeight` / `PreparedVideoFps` | Streaming WebM VP8 (GOP = 2×fps, STN `max_keyframe_gap_ms` 2500) |
+| `Mezube:SfuWebSocketUrl` | SFU signaling endpoint `ws://` hoặc `wss://`; bắt buộc cấu hình khi deploy |
+| `Mezube:SfuConnectTimeoutMs` | Timeout kết nối WebSocket/WebRTC publisher |
+| `Mezube:SfuReconnectBackoffMs` / `SfuReconnectMaxBackoffMs` | Exponential reconnect backoff cơ sở và trần tối đa |
+| `Mezube:SfuReconnectMaxAttempts` | Số lần reconnect liên tiếp tối đa trước khi session báo lỗi và dừng retry |
+| `Mezube:SfuReconnectJitterMs` / `Mezube:SfuReconnectStableResetMs` | Jitter chống retry đồng bộ và khoảng kết nối ổn định để reset bộ đếm |
+| `Mezube:SfuMaxSessions` | Giới hạn stream session đồng thời |
+
+| `Mezube:PreparedAudioBitrateKbps` | Bitrate cho file CDN audio (Ogg Opus) |
+| `Mezube:PreparedAudioChannels` / `Mezube:PreparedAudioSampleRate` | Cấu hình media preparation; audio wire của SFU luôn cố định 2 kênh / 48 kHz |
+| `Mezube:PreparedVideoBitrateKbps` / `PreparedVideoHeight` / `PreparedVideoFps` | Legacy video preparation; Mezube music không publish video vào SFU |
 | `Mezube:CdnBaseUrl` | Public CDN sau upload |
 | `Mezube:BotAvatarUrl` | Avatar bot — embed author + thumbnail fallback |
 | `Mezube:VizImageUrl` / `Mezube:VizPositionUrl` | Equalizer sprite + JSON cho `!np` |
@@ -57,10 +63,13 @@ dotnet run --project Mezube.csproj
 
 ### Preset gợi ý
 
-- Audio: `PreparedAudioBitrateKbps=128`
+- Audio SFU: `PreparedAudioBitrateKbps=128`, wire format cố định Ogg Opus 48 kHz stereo
 - Video: `PreparedVideoBitrateKbps=1000`, `PreparedVideoHeight=720`, `PreparedVideoFps=30` (GOP 2s)
 
-Shutdown bot cancel pump + dispose mọi STN WS publisher.
+Shutdown bot cancel pump + dispose mọi SFU publisher session.
+
+Playback audio published to SFU is always normalized by FFmpeg to Ogg/Opus,
+48 kHz stereo; publisher chỉ nhận URL audio đã chuẩn hóa và không tạo/gửi video track.
 
 ## Chạy
 

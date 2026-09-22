@@ -38,7 +38,7 @@ public sealed partial class MusicPlayer
                 play.ReplyCreateTimeSeconds,
                 play.IsFromDefault,
                 play.WantVideo);
-            await _playerStore.EnqueueAsync(clanId, payload).ConfigureAwait(false);
+            await _playerStore.EnqueueAsync(clanId, play.Target.ChannelId, payload).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -115,10 +115,12 @@ public sealed partial class MusicPlayer
                     ExternalId = play.Track.ExternalId,
                     SourceBytes = play.Track.SourceBytes,
                     IsTooLarge = play.Track.IsTooLarge,
+                    LocalMediaPath = play.Track.LocalMediaPath,
                 };
-            await _playerStore.SetPlayHistoryIdAsync(clanId, historyId, cancellationToken).ConfigureAwait(false);
+            await _playerStore.SetPlayHistoryIdAsync(clanId, play.Target.ChannelId, historyId, cancellationToken).ConfigureAwait(false);
             await _playerStore.SetCurrentAsync(
                     clanId,
+                    play.Target.ChannelId,
                     QueuedTrackPayload.From(
                         trackWithId,
                         mode,
@@ -158,6 +160,7 @@ public sealed partial class MusicPlayer
     /// <summary>CAS advance used by skip / natural end / vote-skip. Returns false if stale.</summary>
     private async Task<bool> TryAdvancePersistedAsync(
         long clanId,
+        long channelId,
         long expectedHistoryId,
         bool skipLoop,
         string endReason,
@@ -166,27 +169,26 @@ public sealed partial class MusicPlayer
         await CloseHistoryAsync(expectedHistoryId, endReason, cancellationToken).ConfigureAwait(false);
         try
         {
-            var result = await _playerStore.TryAdvanceAsync(clanId, expectedHistoryId, skipLoop, cancellationToken)
+            var result = await _playerStore.TryAdvanceAsync(clanId, channelId, expectedHistoryId, skipLoop, cancellationToken)
                 .ConfigureAwait(false);
             return result.Ok;
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Redis advance failed clan={ClanId}", clanId);
+            _logger.LogWarning(ex, "Redis advance failed clan={ClanId} channel={ChannelId}", clanId, channelId);
             return true; // fall back to in-memory advance
         }
     }
 
-    private async Task ClearPersistedSessionAsync(long clanId, CancellationToken cancellationToken)
+    private async Task ClearPersistedSessionAsync(long clanId, long channelId, CancellationToken cancellationToken)
     {
         try
         {
-            await _history.CloseOpenForClanAsync(clanId, PlayEndReason.Stop, cancellationToken).ConfigureAwait(false);
-            await _playerStore.ClearSessionAsync(clanId, cancellationToken).ConfigureAwait(false);
+            await _playerStore.ClearSessionAsync(clanId, channelId, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to clear Redis session clan={ClanId}", clanId);
+            _logger.LogWarning(ex, "Failed to clear Redis session clan={ClanId} channel={ChannelId}", clanId, channelId);
         }
     }
 }

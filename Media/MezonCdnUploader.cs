@@ -8,7 +8,7 @@ namespace Mezube.Media;
 
     /// <summary>
     /// Uploads media via Mezon presigned URL to Cloudflare R2 (single PUT or multipart),
-    /// returning a public CDN URL STN can fetch.
+    /// returning a public CDN URL the SFU publisher can fetch.
     /// </summary>
 public sealed class MezonCdnUploader
 {
@@ -62,7 +62,7 @@ public sealed class MezonCdnUploader
                 await PutFileAsync(upload.Url, localPath, cancellationToken).ConfigureAwait(false);
                 var publicUrl = ToPublicCdnUrl(upload.Url, upload.Filename);
                 await EnsureReachableAsync(publicUrl, cancellationToken).ConfigureAwait(false);
-                _logger.LogDebug("Uploaded media to CDN {Url} ({Bytes} bytes)", publicUrl, fileInfo.Length);
+                _logger.LogDebug("Uploaded media to CDN ({Bytes} bytes)", fileInfo.Length);
                 return publicUrl;
             }
             catch (Exception ex) when (attempt < 3 && IsRetryable(ex))
@@ -188,14 +188,13 @@ public sealed class MezonCdnUploader
 
         await EnsureReachableAsync(publicUrl, cancellationToken).ConfigureAwait(false);
         _logger.LogDebug(
-            "Multipart CDN upload ready url={Url} parts={Parts} bytes={Bytes}",
-            publicUrl,
+            "Multipart CDN upload ready parts={Parts} bytes={Bytes}",
             completedParts.Count,
             totalBytes);
         return (publicUrl, totalBytes);
     }
 
-    /// <summary>True if a previously cached playable URL still responds (STN will download it).</summary>
+    /// <summary>True if a previously cached playable URL still responds to the SFU publisher fetch.</summary>
     public async Task<bool> IsReachableAsync(string url, CancellationToken cancellationToken = default)
     {
         try

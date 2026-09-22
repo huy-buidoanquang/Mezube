@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using Mezube.Bot;
+using Mezube.Sfu;
 using Microsoft.Extensions.Logging;
 
 namespace Mezube.Media;
@@ -20,21 +21,100 @@ public sealed class FfmpegProcessor
 
     public bool IsAvailable => _available.Value;
 
-    public async Task<string?> TranscodeToOggAsync(string inputPath, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Produce the SFU wire format (Ogg Opus 48 kHz stereo) at <paramref name="outputPath"/>.
+    /// Prefer copy, then remux (<c>-c:a copy</c>), then libopus transcode.
+    /// Compatibility is decided by <see cref="OggOpusReader"/> — the same parser the publisher uses.
+    /// </summary>
+    public async Task<string?> PrepareSfuOggAsync(
+        string inputPath,
+        string outputPath,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(inputPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
+
+        var outputDir = Path.GetDirectoryName(outputPath);
+        if (!string.IsNullOrWhiteSpace(outputDir))
+        {
+            Directory.CreateDirectory(outputDir);
+        }
+
+        if (await OggOpusReader.IsSfuCompatibleFileAsync(inputPath, cancellationToken).ConfigureAwait(false))
+        {
+            if (!PathsEqual(inputPath, outputPath))
+            {
+                File.Copy(inputPath, outputPath, overwrite: true);
+            }
+
+            _logger.LogDebug(
+                "Preparing audio master via copy inputExt={InputExt} outputExt={OutputExt}",
+                Path.GetExtension(inputPath),
+                Path.GetExtension(outputPath));
+            return outputPath;
+        }
+
+        if (!IsAvailable)
+        {
+            return null;
+        }
+
+        var remuxed = await RemuxOpusToOggAsync(inputPath, outputPath, cancellationToken).ConfigureAwait(false);
+        if (remuxed is not null
+            && await OggOpusReader.IsSfuCompatibleFileAsync(remuxed, cancellationToken).ConfigureAwait(false))
+        {
+            _logger.LogDebug(
+                "Preparing audio master via remux copy inputExt={InputExt} outputExt={OutputExt}",
+                Path.GetExtension(inputPath),
+                Path.GetExtension(outputPath));
+            return remuxed;
+        }
+
+        DownloadedMediaFiles.TryDelete(outputPath);
+
+        var transcoded = await TranscodeToOggAsync(inputPath, outputPath, cancellationToken).ConfigureAwait(false);
+        if (transcoded is not null)
+        {
+            _logger.LogDebug(
+                "Preparing audio master via libopus transcode inputExt={InputExt} outputExt={OutputExt}",
+                Path.GetExtension(inputPath),
+                Path.GetExtension(outputPath));
+        }
+
+        return transcoded;
+    }
+
+    public Task<string?> TranscodeToOggAsync(string inputPath, CancellationToken cancellationToken = default)
+    {
+        Directory.CreateDirectory(_options.TempDir);
+        var outputPath = Path.Combine(
+            _options.TempDir,
+            Path.GetFileNameWithoutExtension(inputPath) + ".normalized.ogg");
+        return TranscodeToOggAsync(inputPath, outputPath, cancellationToken);
+    }
+
+    public async Task<string?> TranscodeToOggAsync(
+        string inputPath,
+        string outputPath,
+        CancellationToken cancellationToken = default)
     {
         if (!IsAvailable)
         {
             return null;
         }
 
-        Directory.CreateDirectory(_options.TempDir);
-        var outputPath = Path.Combine(
-            _options.TempDir,
-            Path.GetFileNameWithoutExtension(inputPath) + ".ogg");
+        var outputDir = Path.GetDirectoryName(outputPath);
+        if (!string.IsNullOrWhiteSpace(outputDir))
+        {
+            Directory.CreateDirectory(outputDir);
+        }
+
+        // The SFU publisher consumes one canonical wire format. Keep these
+        // values fixed even if the legacy media configuration is customized.
         var outputSettings = new PreparedAudioSettings(
             _options.PreparedAudioBitrateKbps,
-            _options.PreparedAudioSampleRate,
-            _options.PreparedAudioChannels);
+            SampleRate: 48000,
+            Channels: 2);
 
         var psi = new ProcessStartInfo
         {
@@ -42,7 +122,7 @@ public sealed class FfmpegProcessor
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        // STN streaming expects Ogg Opus 48 kHz stereo (see mezon-media-station README).
+        // SFU publisher input is normalized to Ogg Opus 48 kHz stereo.
         psi.ArgumentList.Add("-y");
         psi.ArgumentList.Add("-hide_banner");
         psi.ArgumentList.Add("-nostdin");
@@ -105,7 +185,7 @@ public sealed class FfmpegProcessor
     }
 
     /// <summary>
-    /// WebM Opus + VP8, GOP 2s at <paramref name="fps"/> so STN <c>max_keyframe_gap_ms</c> (2500) passes.
+    /// WebM Opus + VP8, GOP 2s at <paramref name="fps"/> for legacy video preparation.
     /// </summary>
     public async Task<string?> TranscodeToWebmAsync(
         string inputPath,
@@ -272,17 +352,31 @@ public sealed class FfmpegProcessor
         }
     }
 
-    public async Task<string?> RemuxOpusToOggAsync(string inputPath, CancellationToken cancellationToken = default)
+    public Task<string?> RemuxOpusToOggAsync(string inputPath, CancellationToken cancellationToken = default)
+    {
+        Directory.CreateDirectory(_options.TempDir);
+        var outputPath = Path.Combine(
+            _options.TempDir,
+            Path.GetFileNameWithoutExtension(inputPath) + ".normalized.ogg");
+        return RemuxOpusToOggAsync(inputPath, outputPath, cancellationToken);
+    }
+
+    public async Task<string?> RemuxOpusToOggAsync(
+        string inputPath,
+        string outputPath,
+        CancellationToken cancellationToken = default)
     {
         if (!IsAvailable)
         {
             return null;
         }
 
-        Directory.CreateDirectory(_options.TempDir);
-        var outputPath = Path.Combine(
-            _options.TempDir,
-            Path.GetFileNameWithoutExtension(inputPath) + ".ogg");
+        var outputDir = Path.GetDirectoryName(outputPath);
+        if (!string.IsNullOrWhiteSpace(outputDir))
+        {
+            Directory.CreateDirectory(outputDir);
+        }
+
         var psi = new ProcessStartInfo
         {
             FileName = _options.FfmpegPath,
@@ -301,13 +395,31 @@ public sealed class FfmpegProcessor
         psi.ArgumentList.Add("ogg");
         psi.ArgumentList.Add(outputPath);
 
-        var result = await ChildProcessRunner.RunAsync(
-                psi,
-                ChildProcessRunner.DefaultTranscodeTimeout,
-                cancellationToken)
-            .ConfigureAwait(false);
-        return result.ExitCode == 0 && File.Exists(outputPath) ? outputPath : null;
+        try
+        {
+            var result = await ChildProcessRunner.RunAsync(
+                    psi,
+                    ChildProcessRunner.DefaultTranscodeTimeout,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return result.ExitCode == 0 && File.Exists(outputPath) ? outputPath : null;
+        }
+        catch (Win32Exception)
+        {
+            return null;
+        }
+        catch (TimeoutException)
+        {
+            DownloadedMediaFiles.TryDelete(outputPath);
+            return null;
+        }
     }
+
+    private static bool PathsEqual(string left, string right)
+        => string.Equals(
+            Path.GetFullPath(left),
+            Path.GetFullPath(right),
+            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 
     private bool ProbeAvailable()
     {

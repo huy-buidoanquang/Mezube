@@ -7,7 +7,7 @@
 #
 # FFmpeg 8.0.1 from Assets/ffmpeg/ffmpeg_8.0.1.orig.tar.xz
 #
-# Audio + common video codecs for STN passthrough prep (H.264 / H.265 / VP8 / VP9 / AV1).
+# Audio + common video codecs for prepared media (H.264 / H.265 / VP8 / VP9 / AV1).
 # OpenSSL for HTTPS. Native demux/decode stay on via default configure;
 # external libs below cover encode + fast AV1 decode.
 

@@ -22,8 +22,28 @@ public sealed partial class MusicPlayer
             return;
         }
 
+        var preferred = await TryPreferredStreamChannelIdAsync(ctx, cancellationToken).ConfigureAwait(false);
+        var kind = TryResolveControlSession(clanId, preferred, out var state);
+        if (kind == ControlSessionResolve.Ambiguous)
+        {
+            await ctx.ReplyAsync(AmbiguousChannelMessage()).ConfigureAwait(false);
+            return;
+        }
+
+        var channelId = kind == ControlSessionResolve.Found && state is not null
+            ? SessionChannelId(state)
+            : preferred ?? 0;
+        if (channelId == 0)
+        {
+            await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                    "Which stream?",
+                    "Loop is per #stream. Run this in that stream channel, or tag it."))
+                .ConfigureAwait(false);
+            return;
+        }
+
         var arg = ctx.Args.Count > 0 ? ctx.Args[0].Trim().ToLowerInvariant() : "cycle";
-        var current = await _playerStore.GetLoopModeAsync(clanId, cancellationToken).ConfigureAwait(false);
+        var current = await _playerStore.GetLoopModeAsync(clanId, channelId, cancellationToken).ConfigureAwait(false);
         LoopMode next = arg switch
         {
             "off" or "none" or "0" => LoopMode.Off,
@@ -36,7 +56,7 @@ public sealed partial class MusicPlayer
                 _ => LoopMode.Off,
             },
         };
-        await _playerStore.SetLoopModeAsync(clanId, next, cancellationToken).ConfigureAwait(false);
+        await _playerStore.SetLoopModeAsync(clanId, channelId, next, cancellationToken).ConfigureAwait(false);
         await ctx.ReplyAsync(PlayerMessageBuilder.Ok(
                 "Loop mode",
                 next switch
@@ -51,9 +71,11 @@ public sealed partial class MusicPlayer
     public async Task VoteSkipAsync(ICommandContext ctx, CancellationToken cancellationToken = default)
     {
         var clanId = ctx.Clan?.Id ?? ctx.Channel.ClanId;
-        if (!TryGetState(clanId, out var state))
+        var preferred = await TryPreferredStreamChannelIdAsync(ctx, cancellationToken).ConfigureAwait(false);
+        if (!TryPickControlSession(clanId, preferred, controlMessageId: null, out var state, out var resolveError)
+            || state.Queue.Current is null)
         {
-            await ctx.ReplyAsync(PlayerMessageBuilder.Status(
+            await ctx.ReplyAsync(resolveError ?? PlayerMessageBuilder.Status(
                     "Nothing playing",
                     "There’s no track to vote on right now."))
                 .ConfigureAwait(false);
@@ -61,7 +83,8 @@ public sealed partial class MusicPlayer
         }
 
         var historyId = state.PlayHistoryId
-            ?? await _playerStore.GetPlayHistoryIdAsync(clanId, cancellationToken).ConfigureAwait(false);
+            ?? await _playerStore.GetPlayHistoryIdAsync(clanId, SessionChannelId(state), cancellationToken)
+                .ConfigureAwait(false);
         if (historyId is not long hid)
         {
             await ctx.ReplyAsync(PlayerMessageBuilder.Status(

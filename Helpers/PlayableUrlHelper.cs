@@ -1,7 +1,7 @@
 namespace Mezube.Helpers;
 
 /// <summary>
-/// Prepared STN-ready CDN assets: <c>.ogg</c>/<c>.opus</c> audio, or <c>.webm</c> video.
+/// Prepared CDN assets: <c>.ogg</c>/<c>.opus</c> audio, or <c>.webm</c> video.
 /// Never a YouTube/SoundCloud webpage URL.
 /// </summary>
 public static class PlayableUrlHelper
@@ -15,7 +15,7 @@ public static class PlayableUrlHelper
     public static bool IsPreparedStreamingUrl(string? rawUrl)
         => IsPreparedAudioUrl(rawUrl) || IsPreparedVideoUrl(rawUrl);
 
-    /// <summary>Any STN-passthrough asset (audio or video).</summary>
+    /// <summary>Any prepared passthrough asset (audio or video).</summary>
     public static bool IsPreparedPlayableUrl(string? rawUrl)
         => IsPreparedStreamingUrl(rawUrl);
 

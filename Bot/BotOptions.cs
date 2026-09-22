@@ -1,5 +1,4 @@
 using Mezube.Domain;
-using Mezube.Stn;
 using Mezon.Net.Logging;
 using Microsoft.Extensions.Configuration;
 
@@ -30,17 +29,21 @@ public sealed class BotOptions
     public long DefaultClanId { get; set; }
     public long DefaultStreamChannelId { get; set; }
     /// <summary>
-    /// STN origin only (no path), e.g. <c>https://stn.mezon.ai</c> or <c>http://localhost:8081</c>.
+    /// SFU signaling WebSocket endpoint, for example <c>wss://sfu.example/ws</c>.
     /// Streaming WS uses <c>ws(s)://…/ws</c>.
     /// </summary>
-    public string StnBaseUrl { get; set; } = string.Empty;
-    /// <summary>
-    /// Optional STN streaming <c>publisher_password</c>. Sent in WS <c>Value.Password</c>.
-    /// Leave empty when STN does not require a publisher password.
-    /// </summary>
-    public string StnPublisherPassword { get; set; } = string.Empty;
-    /// <summary>STN websocket authentication mode. Auto prefers SID and falls back to a refreshed JWT.</summary>
-    public StnAuthMode StnAuthMode { get; set; } = StnAuthMode.Auto;
+    public string SfuWebSocketUrl { get; set; } = string.Empty;
+    public int SfuConnectTimeoutMs { get; set; } = 10000;
+    public int SfuReconnectBackoffMs { get; set; } = 1000;
+    /// <summary>Maximum number of consecutive reconnect attempts after a failed SFU connection.</summary>
+    public int SfuReconnectMaxAttempts { get; set; } = 8;
+    /// <summary>Upper bound for exponential SFU reconnect backoff.</summary>
+    public int SfuReconnectMaxBackoffMs { get; set; } = 30000;
+    /// <summary>Random delay added to reconnects to avoid synchronized retry bursts.</summary>
+    public int SfuReconnectJitterMs { get; set; } = 250;
+    /// <summary>How long a connection must stay connected before the retry counter resets.</summary>
+    public int SfuReconnectStableResetMs { get; set; } = 30000;
+    public int SfuMaxSessions { get; set; } = 32;
     public string YtDlpPath { get; set; } = "yt-dlp";
     /// <summary>
     /// YouTube Innertube clients for yt-dlp (<c>--extractor-args youtube:player_client=…</c>).
@@ -108,11 +111,6 @@ public sealed class BotOptions
             options.CommandPrefix = "!";
         }
 
-        if (!string.IsNullOrWhiteSpace(options.StnBaseUrl))
-        {
-            options.StnBaseUrl = StnUrl.NormalizeBase(options.StnBaseUrl);
-        }
-
         return options;
     }
 
@@ -142,9 +140,6 @@ public sealed class BotOptions
         Media.PreparedVideoBitrateKbps = PreparedVideoBitrateKbps;
         Media.PreparedVideoHeight = PreparedVideoHeight;
         Media.PreparedVideoFps = PreparedVideoFps;
-        Media.StnBaseUrl = StnBaseUrl;
-        Media.StnPublisherPassword = StnPublisherPassword;
-
         Persistence.PostgresConnectionString = PostgresConnectionString;
         Persistence.RedisConnectionString = RedisConnectionString;
         Persistence.TracksDbPath = TracksDbPath;
@@ -177,9 +172,30 @@ public sealed class BotOptions
             throw new InvalidOperationException("Mezon:Token is required.");
         }
 
-        if (string.IsNullOrWhiteSpace(StnBaseUrl))
+        if (string.IsNullOrWhiteSpace(SfuWebSocketUrl))
         {
-            throw new InvalidOperationException("Mezube:StnBaseUrl is required.");
+            throw new InvalidOperationException("Mezube:SfuWebSocketUrl is required.");
+        }
+
+        if (!Uri.TryCreate(SfuWebSocketUrl, UriKind.Absolute, out var sfuUri)
+            || (sfuUri.Scheme != Uri.UriSchemeWs && sfuUri.Scheme != Uri.UriSchemeWss))
+        {
+            throw new InvalidOperationException("Mezube:SfuWebSocketUrl must be an absolute ws:// or wss:// URI.");
+        }
+
+        if (SfuConnectTimeoutMs < 1000
+            || SfuReconnectBackoffMs < 1
+            || SfuReconnectMaxAttempts < 0
+            || SfuReconnectMaxBackoffMs < SfuReconnectBackoffMs
+            || SfuReconnectJitterMs < 0
+            || SfuReconnectStableResetMs < 0)
+        {
+            throw new InvalidOperationException("Mezube SFU connect timeout/reconnect settings have invalid values.");
+        }
+
+        if (SfuMaxSessions < 1)
+        {
+            throw new InvalidOperationException("Mezube:SfuMaxSessions must be >= 1.");
         }
 
         if (string.IsNullOrWhiteSpace(CdnBaseUrl))

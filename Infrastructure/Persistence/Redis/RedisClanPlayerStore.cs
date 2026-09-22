@@ -86,49 +86,137 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
         _redis = redis;
     }
 
-    public async Task TouchTtlAsync(long clanId, CancellationToken cancellationToken = default)
+    public async Task TouchTtlAsync(long clanId, long channelId, CancellationToken cancellationToken = default)
     {
         var db = _redis.Db;
         var ttl = RedisKeyNames.PlayerTtl;
-        await db.KeyExpireAsync(RedisKeyNames.Player(clanId), ttl).ConfigureAwait(false);
-        await db.KeyExpireAsync(RedisKeyNames.Queue(clanId), ttl).ConfigureAwait(false);
-        await db.SetAddAsync(RedisKeyNames.ActiveClans, clanId).ConfigureAwait(false);
+        var key = new PlayerSessionKey(clanId, channelId);
+        await db.KeyExpireAsync(RedisKeyNames.Player(clanId, channelId), ttl).ConfigureAwait(false);
+        await db.KeyExpireAsync(RedisKeyNames.Queue(clanId, channelId), ttl).ConfigureAwait(false);
+        await db.SetAddAsync(RedisKeyNames.ActiveSessions, key.IndexValue).ConfigureAwait(false);
     }
 
-    public async Task<IReadOnlyList<long>> ListActiveClanIdsAsync(CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<PlayerSessionKey>> ListActiveSessionsAsync(
+        CancellationToken cancellationToken = default)
     {
-        var members = await _redis.Db.SetMembersAsync(RedisKeyNames.ActiveClans).ConfigureAwait(false);
-        var ids = new HashSet<long>();
+        var keys = new Dictionary<(long ClanId, long ChannelId), PlayerSessionKey>();
+        var members = await _redis.Db.SetMembersAsync(RedisKeyNames.ActiveSessions).ConfigureAwait(false);
         foreach (var m in members)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (long.TryParse((string?)m, out var clanId) && clanId != 0)
+            if (!PlayerSessionKey.TryParse((string?)m, out var key))
             {
-                // Drop stale index entries whose player+queue keys are gone.
-                var playerExists = await _redis.Db.KeyExistsAsync(RedisKeyNames.Player(clanId)).ConfigureAwait(false);
-                var queueLen = await _redis.Db.ListLengthAsync(RedisKeyNames.Queue(clanId)).ConfigureAwait(false);
-                if (!playerExists && queueLen == 0)
-                {
-                    await _redis.Db.SetRemoveAsync(RedisKeyNames.ActiveClans, clanId).ConfigureAwait(false);
-                    continue;
-                }
+                await _redis.Db.SetRemoveAsync(RedisKeyNames.ActiveSessions, m).ConfigureAwait(false);
+                continue;
+            }
 
-                ids.Add(clanId);
+            if (await SessionExistsAsync(key.ClanId, key.ChannelId).ConfigureAwait(false))
+            {
+                keys[(key.ClanId, key.ChannelId)] = key;
+                continue;
+            }
+
+            await _redis.Db.SetRemoveAsync(RedisKeyNames.ActiveSessions, key.IndexValue).ConfigureAwait(false);
+        }
+
+        await CollectLegacySessionsAsync(keys, cancellationToken).ConfigureAwait(false);
+        if (keys.Count > 0)
+        {
+            return keys.Values.OrderBy(x => x.ClanId).ThenBy(x => x.ChannelId).ToArray();
+        }
+
+        return await ListActiveSessionsByScanAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task CollectLegacySessionsAsync(
+        Dictionary<(long ClanId, long ChannelId), PlayerSessionKey> keys,
+        CancellationToken cancellationToken)
+    {
+        var legacyClans = await _redis.Db.SetMembersAsync(RedisKeyNames.ActiveClans).ConfigureAwait(false);
+        foreach (var m in legacyClans)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!long.TryParse((string?)m, out var clanId) || clanId == 0)
+            {
+                continue;
+            }
+
+            var channelId = await TryReadLegacyChannelIdAsync(clanId).ConfigureAwait(false);
+            if (channelId is not long ch)
+            {
+                await _redis.Db.SetRemoveAsync(RedisKeyNames.ActiveClans, clanId).ConfigureAwait(false);
+                continue;
+            }
+
+            var key = new PlayerSessionKey(clanId, ch);
+            keys[(clanId, ch)] = key;
+            await _redis.Db.SetAddAsync(RedisKeyNames.ActiveSessions, key.IndexValue).ConfigureAwait(false);
+        }
+    }
+
+    private async Task<long?> TryReadLegacyChannelIdAsync(long clanId)
+    {
+        var channel = await _redis.Db.HashGetAsync(RedisKeyNames.LegacyPlayer(clanId), "channel_id")
+            .ConfigureAwait(false);
+        if (long.TryParse((string?)channel, out var fromHash) && fromHash != 0)
+        {
+            return fromHash;
+        }
+
+        var current = await GetLegacyCurrentAsync(clanId).ConfigureAwait(false);
+        if (current is { ChannelId: not 0 })
+        {
+            return current.ChannelId;
+        }
+
+        var pending = await _redis.Db.ListRangeAsync(RedisKeyNames.LegacyQueue(clanId), 0, 0).ConfigureAwait(false);
+        if (pending.Length > 0)
+        {
+            var item = RedisJson.Deserialize<QueuedTrackPayload>((string?)pending[0]);
+            if (item is { ChannelId: not 0 })
+            {
+                return item.ChannelId;
             }
         }
 
-        if (ids.Count > 0)
-        {
-            return ids.OrderBy(x => x).ToArray();
-        }
-
-        // One-time fallback if index empty but legacy keys remain (pre-migration).
-        return await ListActiveClanIdsByScanAsync(cancellationToken).ConfigureAwait(false);
+        var playerExists = await _redis.Db.KeyExistsAsync(RedisKeyNames.LegacyPlayer(clanId)).ConfigureAwait(false);
+        var queueLen = await _redis.Db.ListLengthAsync(RedisKeyNames.LegacyQueue(clanId)).ConfigureAwait(false);
+        return playerExists || queueLen > 0 ? null : null;
     }
 
-    private async Task<IReadOnlyList<long>> ListActiveClanIdsByScanAsync(CancellationToken cancellationToken)
+    private async Task<QueuedTrackPayload?> GetLegacyCurrentAsync(long clanId)
     {
-        var ids = new HashSet<long>();
+        var json = await _redis.Db.HashGetAsync(RedisKeyNames.LegacyPlayer(clanId), "current_json").ConfigureAwait(false);
+        return json.IsNullOrEmpty ? null : RedisJson.Deserialize<QueuedTrackPayload>((string)json!);
+    }
+
+    private async Task<bool> SessionExistsAsync(long clanId, long channelId)
+    {
+        var playerExists = await _redis.Db.KeyExistsAsync(RedisKeyNames.Player(clanId, channelId)).ConfigureAwait(false);
+        if (playerExists)
+        {
+            return true;
+        }
+
+        var queueLen = await _redis.Db.ListLengthAsync(RedisKeyNames.Queue(clanId, channelId)).ConfigureAwait(false);
+        if (queueLen > 0)
+        {
+            return true;
+        }
+
+        return await LegacySessionMatchesAsync(clanId, channelId).ConfigureAwait(false);
+    }
+
+    private async Task<bool> LegacySessionMatchesAsync(long clanId, long channelId)
+    {
+        var legacyChannel = await TryReadLegacyChannelIdAsync(clanId).ConfigureAwait(false);
+        return legacyChannel == channelId;
+    }
+
+    private async Task<IReadOnlyList<PlayerSessionKey>> ListActiveSessionsByScanAsync(
+        CancellationToken cancellationToken)
+    {
+        var keys = new Dictionary<(long ClanId, long ChannelId), PlayerSessionKey>();
         foreach (var endpoint in _redis.Multiplexer.GetEndPoints())
         {
             var server = _redis.Multiplexer.GetServer(endpoint);
@@ -137,44 +225,58 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
                 continue;
             }
 
-            await foreach (var key in server.KeysAsync(pattern: $"{RedisKeyNames.Prefix}player:*")
+            await foreach (var redisKey in server.KeysAsync(pattern: $"{RedisKeyNames.Prefix}player:*")
                                .WithCancellation(cancellationToken)
                                .ConfigureAwait(false))
             {
-                if (TryParseClanId((string?)key, "player", out var clanId))
+                if (!TryParsePlayerKey((string?)redisKey, "player", out var key))
                 {
-                    ids.Add(clanId);
-                    await _redis.Db.SetAddAsync(RedisKeyNames.ActiveClans, clanId).ConfigureAwait(false);
+                    continue;
                 }
+
+                keys[(key.ClanId, key.ChannelId)] = key;
+                await _redis.Db.SetAddAsync(RedisKeyNames.ActiveSessions, key.IndexValue).ConfigureAwait(false);
             }
 
-            await foreach (var key in server.KeysAsync(pattern: $"{RedisKeyNames.Prefix}queue:*")
+            await foreach (var redisKey in server.KeysAsync(pattern: $"{RedisKeyNames.Prefix}queue:*")
                                .WithCancellation(cancellationToken)
                                .ConfigureAwait(false))
             {
-                if (TryParseClanId((string?)key, "queue", out var clanId))
+                if (!TryParsePlayerKey((string?)redisKey, "queue", out var key))
                 {
-                    ids.Add(clanId);
-                    await _redis.Db.SetAddAsync(RedisKeyNames.ActiveClans, clanId).ConfigureAwait(false);
+                    continue;
                 }
+
+                keys[(key.ClanId, key.ChannelId)] = key;
+                await _redis.Db.SetAddAsync(RedisKeyNames.ActiveSessions, key.IndexValue).ConfigureAwait(false);
             }
         }
 
-        return ids.OrderBy(x => x).ToArray();
+        return keys.Values.OrderBy(x => x.ClanId).ThenBy(x => x.ChannelId).ToArray();
     }
 
-    public async Task EnqueueAsync(long clanId, QueuedTrackPayload item, CancellationToken cancellationToken = default)
+    public async Task EnqueueAsync(
+        long clanId,
+        long channelId,
+        QueuedTrackPayload item,
+        CancellationToken cancellationToken = default)
     {
         var db = _redis.Db;
-        await db.ListRightPushAsync(RedisKeyNames.Queue(clanId), RedisJson.Serialize(item)).ConfigureAwait(false);
-        await TouchTtlAsync(clanId, cancellationToken).ConfigureAwait(false);
+        await db.ListRightPushAsync(RedisKeyNames.Queue(clanId, channelId), RedisJson.Serialize(item))
+            .ConfigureAwait(false);
+        await TouchTtlAsync(clanId, channelId, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task EnqueueFrontAsync(long clanId, QueuedTrackPayload item, CancellationToken cancellationToken = default)
+    public async Task EnqueueFrontAsync(
+        long clanId,
+        long channelId,
+        QueuedTrackPayload item,
+        CancellationToken cancellationToken = default)
     {
         var db = _redis.Db;
-        await db.ListLeftPushAsync(RedisKeyNames.Queue(clanId), RedisJson.Serialize(item)).ConfigureAwait(false);
-        await TouchTtlAsync(clanId, cancellationToken).ConfigureAwait(false);
+        await db.ListLeftPushAsync(RedisKeyNames.Queue(clanId, channelId), RedisJson.Serialize(item))
+            .ConfigureAwait(false);
+        await TouchTtlAsync(clanId, channelId, cancellationToken).ConfigureAwait(false);
     }
 
     private const string EnsureCurrentLua =
@@ -206,23 +308,27 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
 
     public async Task<QueuedTrackPayload?> EnsureCurrentAsync(
         long clanId,
+        long channelId,
         CancellationToken cancellationToken = default)
     {
+        await EnsureMigratedAsync(clanId, channelId).ConfigureAwait(false);
         var raw = (string?)await _redis.Db.ScriptEvaluateAsync(
             EnsureCurrentLua,
-            [RedisKeyNames.Player(clanId), RedisKeyNames.Queue(clanId)],
+            [RedisKeyNames.Player(clanId, channelId), RedisKeyNames.Queue(clanId, channelId)],
             [((int)RedisKeyNames.PlayerTtl.TotalSeconds).ToString()]).ConfigureAwait(false);
         return string.IsNullOrWhiteSpace(raw) ? null : RedisJson.Deserialize<QueuedTrackPayload>(raw);
     }
 
-    public async Task<long> QueueLengthAsync(long clanId, CancellationToken cancellationToken = default)
-        => await _redis.Db.ListLengthAsync(RedisKeyNames.Queue(clanId)).ConfigureAwait(false);
+    public async Task<long> QueueLengthAsync(long clanId, long channelId, CancellationToken cancellationToken = default)
+        => await _redis.Db.ListLengthAsync(RedisKeyNames.Queue(clanId, channelId)).ConfigureAwait(false);
 
     public async Task<IReadOnlyList<QueuedTrackPayload>> SnapshotQueueAsync(
         long clanId,
+        long channelId,
         CancellationToken cancellationToken = default)
     {
-        var values = await _redis.Db.ListRangeAsync(RedisKeyNames.Queue(clanId)).ConfigureAwait(false);
+        await EnsureMigratedAsync(clanId, channelId).ConfigureAwait(false);
+        var values = await _redis.Db.ListRangeAsync(RedisKeyNames.Queue(clanId, channelId)).ConfigureAwait(false);
         var list = new List<QueuedTrackPayload>(values.Length);
         foreach (var v in values)
         {
@@ -236,19 +342,26 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
         return list;
     }
 
-    public async Task<QueuedTrackPayload?> GetCurrentAsync(long clanId, CancellationToken cancellationToken = default)
+    public async Task<QueuedTrackPayload?> GetCurrentAsync(
+        long clanId,
+        long channelId,
+        CancellationToken cancellationToken = default)
     {
-        var json = await _redis.Db.HashGetAsync(RedisKeyNames.Player(clanId), "current_json").ConfigureAwait(false);
+        await EnsureMigratedAsync(clanId, channelId).ConfigureAwait(false);
+        var json = await _redis.Db.HashGetAsync(RedisKeyNames.Player(clanId, channelId), "current_json")
+            .ConfigureAwait(false);
         return json.IsNullOrEmpty ? null : RedisJson.Deserialize<QueuedTrackPayload>((string)json!);
     }
 
     public async Task SetCurrentAsync(
         long clanId,
+        long channelId,
         QueuedTrackPayload? current,
         CancellationToken cancellationToken = default)
     {
+        await EnsureMigratedAsync(clanId, channelId).ConfigureAwait(false);
         var db = _redis.Db;
-        var key = RedisKeyNames.Player(clanId);
+        var key = RedisKeyNames.Player(clanId, channelId);
         if (current is null)
         {
             await db.HashDeleteAsync(key, "current_json").ConfigureAwait(false);
@@ -278,11 +391,12 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
                 ]).ConfigureAwait(false);
         }
 
-        await TouchTtlAsync(clanId, cancellationToken).ConfigureAwait(false);
+        await TouchTtlAsync(clanId, channelId, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task SetPlayerFieldAsync(
         long clanId,
+        long channelId,
         string field,
         RedisValueLike value,
         CancellationToken cancellationToken = default)
@@ -294,15 +408,18 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
                 : value.BoolValue is { } b
                     ? (b ? "1" : "0")
                     : RedisValue.EmptyString;
-        await _redis.Db.HashSetAsync(RedisKeyNames.Player(clanId), field, rv).ConfigureAwait(false);
-        await TouchTtlAsync(clanId, cancellationToken).ConfigureAwait(false);
+        await EnsureMigratedAsync(clanId, channelId).ConfigureAwait(false);
+        await _redis.Db.HashSetAsync(RedisKeyNames.Player(clanId, channelId), field, rv).ConfigureAwait(false);
+        await TouchTtlAsync(clanId, channelId, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<Dictionary<string, string>> GetPlayerAsync(
         long clanId,
+        long channelId,
         CancellationToken cancellationToken = default)
     {
-        var entries = await _redis.Db.HashGetAllAsync(RedisKeyNames.Player(clanId)).ConfigureAwait(false);
+        await EnsureMigratedAsync(clanId, channelId).ConfigureAwait(false);
+        var entries = await _redis.Db.HashGetAllAsync(RedisKeyNames.Player(clanId, channelId)).ConfigureAwait(false);
         var dict = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var e in entries)
         {
@@ -312,9 +429,14 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
         return dict;
     }
 
-    public Task SetLoopModeAsync(long clanId, LoopMode mode, CancellationToken cancellationToken = default)
+    public Task SetLoopModeAsync(
+        long clanId,
+        long channelId,
+        LoopMode mode,
+        CancellationToken cancellationToken = default)
         => SetPlayerFieldAsync(
             clanId,
+            channelId,
             "loop_mode",
             mode switch
             {
@@ -324,9 +446,14 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
             },
             cancellationToken);
 
-    public async Task<LoopMode> GetLoopModeAsync(long clanId, CancellationToken cancellationToken = default)
+    public async Task<LoopMode> GetLoopModeAsync(
+        long clanId,
+        long channelId,
+        CancellationToken cancellationToken = default)
     {
-        var v = await _redis.Db.HashGetAsync(RedisKeyNames.Player(clanId), "loop_mode").ConfigureAwait(false);
+        await EnsureMigratedAsync(clanId, channelId).ConfigureAwait(false);
+        var v = await _redis.Db.HashGetAsync(RedisKeyNames.Player(clanId, channelId), "loop_mode")
+            .ConfigureAwait(false);
         return ((string?)v)?.ToLowerInvariant() switch
         {
             "track" => LoopMode.Track,
@@ -337,19 +464,26 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
 
     public async Task SetPlayHistoryIdAsync(
         long clanId,
+        long channelId,
         long? historyId,
         CancellationToken cancellationToken = default)
     {
+        await EnsureMigratedAsync(clanId, channelId).ConfigureAwait(false);
         await _redis.Db.HashSetAsync(
-            RedisKeyNames.Player(clanId),
+            RedisKeyNames.Player(clanId, channelId),
             "play_history_id",
             historyId?.ToString() ?? string.Empty).ConfigureAwait(false);
-        await TouchTtlAsync(clanId, cancellationToken).ConfigureAwait(false);
+        await TouchTtlAsync(clanId, channelId, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<long?> GetPlayHistoryIdAsync(long clanId, CancellationToken cancellationToken = default)
+    public async Task<long?> GetPlayHistoryIdAsync(
+        long clanId,
+        long channelId,
+        CancellationToken cancellationToken = default)
     {
-        var v = await _redis.Db.HashGetAsync(RedisKeyNames.Player(clanId), "play_history_id").ConfigureAwait(false);
+        await EnsureMigratedAsync(clanId, channelId).ConfigureAwait(false);
+        var v = await _redis.Db.HashGetAsync(RedisKeyNames.Player(clanId, channelId), "play_history_id")
+            .ConfigureAwait(false);
         if (v.IsNullOrEmpty || !long.TryParse((string?)v, out var id) || id == 0)
         {
             return null;
@@ -360,14 +494,16 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
 
     public async Task SetPositionAsync(
         long clanId,
+        long channelId,
         long positionMs,
         long durationMs,
         bool paused,
         CancellationToken cancellationToken = default)
     {
+        await EnsureMigratedAsync(clanId, channelId).ConfigureAwait(false);
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         await _redis.Db.HashSetAsync(
-            RedisKeyNames.Player(clanId),
+            RedisKeyNames.Player(clanId, channelId),
             [
                 new HashEntry("position_ms", positionMs.ToString()),
                 new HashEntry("position_epoch_ms", now.ToString()),
@@ -375,15 +511,17 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
                 new HashEntry("paused", paused ? "1" : "0"),
                 new HashEntry("updated_at", now.ToString()),
             ]).ConfigureAwait(false);
-        await TouchTtlAsync(clanId, cancellationToken).ConfigureAwait(false);
+        await TouchTtlAsync(clanId, channelId, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<(long PositionMs, long DurationMs, bool Paused)> GetPositionAsync(
         long clanId,
+        long channelId,
         CancellationToken cancellationToken = default)
     {
+        await EnsureMigratedAsync(clanId, channelId).ConfigureAwait(false);
         var fields = await _redis.Db.HashGetAsync(
-            RedisKeyNames.Player(clanId),
+            RedisKeyNames.Player(clanId, channelId),
             ["position_ms", "duration_ms", "paused"]).ConfigureAwait(false);
         long.TryParse((string?)fields[0], out var pos);
         long.TryParse((string?)fields[1], out var dur);
@@ -391,10 +529,14 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
         return (pos, dur, paused);
     }
 
-    public async Task<long> EffectivePositionMsAsync(long clanId, CancellationToken cancellationToken = default)
+    public async Task<long> EffectivePositionMsAsync(
+        long clanId,
+        long channelId,
+        CancellationToken cancellationToken = default)
     {
+        await EnsureMigratedAsync(clanId, channelId).ConfigureAwait(false);
         var fields = await _redis.Db.HashGetAsync(
-            RedisKeyNames.Player(clanId),
+            RedisKeyNames.Player(clanId, channelId),
             ["position_ms", "position_epoch_ms", "duration_ms", "paused"]).ConfigureAwait(false);
         long.TryParse((string?)fields[0], out var pos);
         long.TryParse((string?)fields[1], out var epoch);
@@ -416,16 +558,18 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
 
     public async Task<AdvanceResult> TryAdvanceAsync(
         long clanId,
+        long channelId,
         long expectedPlayHistoryId,
         bool skipLoop,
         CancellationToken cancellationToken = default)
     {
+        await EnsureMigratedAsync(clanId, channelId).ConfigureAwait(false);
         var voteKey = RedisKeyNames.VoteSkip(clanId, expectedPlayHistoryId);
         var raw = (string?)await _redis.Db.ScriptEvaluateAsync(
             AdvanceLua,
             [
-                RedisKeyNames.Player(clanId),
-                RedisKeyNames.Queue(clanId),
+                RedisKeyNames.Player(clanId, channelId),
+                RedisKeyNames.Queue(clanId, channelId),
             ],
             [
                 expectedPlayHistoryId.ToString(),
@@ -469,14 +613,17 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
         };
     }
 
-    public async Task ClearSessionAsync(long clanId, CancellationToken cancellationToken = default)
+    public async Task ClearSessionAsync(long clanId, long channelId, CancellationToken cancellationToken = default)
     {
-        var historyId = await GetPlayHistoryIdAsync(clanId, cancellationToken).ConfigureAwait(false);
+        await EnsureMigratedAsync(clanId, channelId).ConfigureAwait(false);
+        var historyId = await GetPlayHistoryIdAsync(clanId, channelId, cancellationToken).ConfigureAwait(false);
         var db = _redis.Db;
         var keys = new List<RedisKey>
         {
-            RedisKeyNames.Player(clanId),
-            RedisKeyNames.Queue(clanId),
+            RedisKeyNames.Player(clanId, channelId),
+            RedisKeyNames.Queue(clanId, channelId),
+            RedisKeyNames.LegacyPlayer(clanId),
+            RedisKeyNames.LegacyQueue(clanId),
         };
         if (historyId is long hid)
         {
@@ -484,6 +631,8 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
         }
 
         await db.KeyDeleteAsync(keys.ToArray()).ConfigureAwait(false);
+        await db.SetRemoveAsync(RedisKeyNames.ActiveSessions, new PlayerSessionKey(clanId, channelId).IndexValue)
+            .ConfigureAwait(false);
         await db.SetRemoveAsync(RedisKeyNames.ActiveClans, clanId).ConfigureAwait(false);
     }
 
@@ -512,10 +661,11 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
 
     public async Task RemovePendingMatchingAsync(
         long clanId,
+        long channelId,
         Func<QueuedTrackPayload, bool> predicate,
         CancellationToken cancellationToken = default)
     {
-        var items = await SnapshotQueueAsync(clanId, cancellationToken).ConfigureAwait(false);
+        var items = await SnapshotQueueAsync(clanId, channelId, cancellationToken).ConfigureAwait(false);
         QueuedTrackPayload? match = null;
         foreach (var item in items)
         {
@@ -533,7 +683,7 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
 
         await _redis.Db.ScriptEvaluateAsync(
             RemovePendingLua,
-            [RedisKeyNames.Queue(clanId)],
+            [RedisKeyNames.Queue(clanId, channelId)],
             [
                 match.Source,
                 match.ExternalId,
@@ -541,9 +691,44 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
             ]).ConfigureAwait(false);
     }
 
-    private static bool TryParseClanId(string? key, string entity, out long clanId)
+    private async Task EnsureMigratedAsync(long clanId, long channelId)
     {
-        clanId = 0;
+        var player = RedisKeyNames.Player(clanId, channelId);
+        var queue = RedisKeyNames.Queue(clanId, channelId);
+        if (await _redis.Db.KeyExistsAsync(player).ConfigureAwait(false)
+            || await _redis.Db.ListLengthAsync(queue).ConfigureAwait(false) > 0)
+        {
+            return;
+        }
+
+        if (!await LegacySessionMatchesAsync(clanId, channelId).ConfigureAwait(false))
+        {
+            return;
+        }
+
+        var db = _redis.Db;
+        var legacyPlayer = RedisKeyNames.LegacyPlayer(clanId);
+        var legacyQueue = RedisKeyNames.LegacyQueue(clanId);
+        if (await db.KeyExistsAsync(legacyPlayer).ConfigureAwait(false)
+            && !await db.KeyExistsAsync(player).ConfigureAwait(false))
+        {
+            await db.KeyRenameAsync(legacyPlayer, player).ConfigureAwait(false);
+        }
+
+        if (await db.KeyExistsAsync(legacyQueue).ConfigureAwait(false)
+            && await db.ListLengthAsync(queue).ConfigureAwait(false) == 0)
+        {
+            await db.KeyRenameAsync(legacyQueue, queue).ConfigureAwait(false);
+        }
+
+        await db.SetRemoveAsync(RedisKeyNames.ActiveClans, clanId).ConfigureAwait(false);
+        await db.SetAddAsync(RedisKeyNames.ActiveSessions, new PlayerSessionKey(clanId, channelId).IndexValue)
+            .ConfigureAwait(false);
+    }
+
+    private static bool TryParsePlayerKey(string? key, string entity, out PlayerSessionKey session)
+    {
+        session = default;
         if (string.IsNullOrWhiteSpace(key))
         {
             return false;
@@ -555,6 +740,6 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
             return false;
         }
 
-        return long.TryParse(key[prefix.Length..], out clanId) && clanId != 0;
+        return PlayerSessionKey.TryParse(key[prefix.Length..], out session);
     }
 }

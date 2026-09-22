@@ -1,5 +1,6 @@
 using Mezon.Net.Core;
 using Mezon.Net.Sdk;
+using Mezon.Net.Sdk.Commands;
 using Mezube.Bot;
 using Mezube.Domain.Entities;
 using Mezube.Infrastructure.Persistence.Redis;
@@ -74,7 +75,7 @@ public sealed partial class MusicPlayer
             return false;
         }
 
-        if (await _binds.TryGetDefaultStreamChannelAsync(clanId, cancellationToken).ConfigureAwait(false) is not long)
+        if (await _binds.TryGetDefaultStreamChannelAsync(clanId, cancellationToken).ConfigureAwait(false) is not long streamId)
         {
             _logger.LogDebug("Default autoplay not armed: no default stream channel clan={ClanId}", clanId);
             return false;
@@ -82,6 +83,10 @@ public sealed partial class MusicPlayer
 
         var state = GetState(clanId);
         state.ClanId = clanId;
+        if (!ClanSessionBinder.IsLive(state))
+        {
+            state.ChannelId = streamId;
+        }
         state.NotifyClient ??= client;
         state.DefaultAutoplayArmed = true;
         state.PlayingDefaultPlaylist = false;
@@ -99,12 +104,40 @@ public sealed partial class MusicPlayer
         CancellationToken cancellationToken = default)
     {
         var restored = new HashSet<long>();
-        var clanIds = await _playerStore.ListActiveClanIdsAsync(cancellationToken).ConfigureAwait(false);
-        foreach (var clanId in clanIds)
+        var sessions = await _playerStore.ListActiveSessionsAsync(cancellationToken).ConfigureAwait(false);
+        var closedClans = new HashSet<long>();
+        foreach (var session in sessions)
         {
-            if (await TryRestoreClanSessionAsync(clanId, client, cancellationToken).ConfigureAwait(false))
+            if (closedClans.Add(session.ClanId))
             {
-                restored.Add(clanId);
+                try
+                {
+                    await _history.CloseOpenForClanAsync(session.ClanId, PlayEndReason.Restart, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Close open history failed clan={ClanId}", session.ClanId);
+                }
+            }
+
+            if (restored.Contains(session.ClanId)
+                && TryGetState(session.ClanId, out var live)
+                && ClanSessionBinder.IsLive(live))
+            {
+                if (live.ChannelId != session.ChannelId)
+                {
+                    await _playerStore.ClearSessionAsync(session.ClanId, session.ChannelId, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+
+                continue;
+            }
+
+            if (await TryRestoreClanSessionAsync(session.ClanId, session.ChannelId, client, cancellationToken)
+                    .ConfigureAwait(false))
+            {
+                restored.Add(session.ClanId);
             }
         }
 
@@ -176,18 +209,28 @@ public sealed partial class MusicPlayer
                     return;
                 }
 
+                var track = item.Track;
+                var target = ClanSessionBinder.BoundTarget(state) ?? item.Target;
+                state.Target = target;
+                if (target.ChannelId != 0)
+                {
+                    state.ChannelId = target.ChannelId;
+                }
+
                 try
                 {
-                    await _playerStore.EnsureCurrentAsync(clanId, cancellationToken).ConfigureAwait(false);
+                    await _playerStore.EnsureCurrentAsync(clanId, SessionChannelId(state), cancellationToken)
+                        .ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogDebug(ex, "Redis EnsureCurrent failed clan={ClanId}", clanId);
+                    _logger.LogDebug(
+                        ex,
+                        "Redis EnsureCurrent failed clan={ClanId} channel={ChannelId}",
+                        clanId,
+                        state.ChannelId);
                 }
 
-                var track = item.Track;
-                var target = item.Target;
-                state.Target = target;
                 state.CancelIdleDestroy();
                 state.IsPlaying = true;
                 using var trackCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -205,7 +248,7 @@ public sealed partial class MusicPlayer
                     await _streamingSink.PlayAsync(
                             target,
                             track,
-                            item.WantVideo ? PreparedAssetKind.Video : PreparedAssetKind.Audio,
+                            PreparedAssetKind.Audio,
                             trackCts.Token)
                         .ConfigureAwait(false);
                     _logger.LogDebug(
@@ -227,9 +270,11 @@ public sealed partial class MusicPlayer
                     state.PlayHistoryId = await BeginHistoryAsync(clanId, item, modeKey, trackCts.Token)
                         .ConfigureAwait(false);
 
+                    var trackEndedNaturally = false;
                     try
                     {
                         await WaitForTrackEndAsync(state, track, target, trackCts.Token).ConfigureAwait(false);
+                        trackEndedNaturally = !trackCts.IsCancellationRequested;
                     }
                     catch (OperationCanceledException) when (trackCts.IsCancellationRequested)
                     {
@@ -237,8 +282,9 @@ public sealed partial class MusicPlayer
 
                     try
                     {
-                        // Keep the WS + listeners across tracks; only !stop tears the session down.
-                        if (state.LastDestroyReason == PlayerDestroyReason.UserStop)
+                        // Keep the WS + listeners across normal EOF; only an
+                        // explicit cancellation marked UserStop tears it down here.
+                        if (ShouldStopSfuAfterTrack(trackEndedNaturally, state.LastDestroyReason))
                         {
                             await _streamingSink.StopAsync(target, CancellationToken.None).ConfigureAwait(false);
                         }
@@ -278,13 +324,11 @@ public sealed partial class MusicPlayer
                 }
                 catch (Exception ex)
                 {
-                    // Media prep / single-track failures must NOT call StopAsync — that tears down
-                    // the STN publisher WS (channel_closed) and kicks every listener in the room.
-                    // Soft-end the track and continue the queue.
+                    // Media prep / single-track failures keep the SFU room alive and advance the queue.
                     var mediaFailure = IsMediaPrepFailure(ex);
                     state.LastDestroyReason = mediaFailure
                         ? PlayerDestroyReason.TrackFailed
-                        : PlayerDestroyReason.StnFailed;
+                        : PlayerDestroyReason.SfuFailed;
                     _logger.LogError(ex, "Playback failed for {Title} channel={ChannelId}", track.Title, target.ChannelId);
                     await NotifyPlaybackFailureAsync(state, track, ex).ConfigureAwait(false);
 
@@ -311,7 +355,7 @@ public sealed partial class MusicPlayer
                             _logger.LogDebug(stopEx, "Stop after failure ignored channel={ChannelId}", target.ChannelId);
                         }
 
-                        if (IsStnInfrastructureFailure(ex))
+                        if (IsSfuInfrastructureFailure(ex))
                         {
                             state.Queue.Clear(clearCurrent: true);
                             break;
@@ -331,7 +375,7 @@ public sealed partial class MusicPlayer
                     {
                         PlayerDestroyReason.Skip => PlayEndReason.Skip,
                         PlayerDestroyReason.UserStop => PlayEndReason.Stop,
-                        PlayerDestroyReason.StnFailed => PlayEndReason.Error,
+                        PlayerDestroyReason.SfuFailed => PlayEndReason.Error,
                         PlayerDestroyReason.TrackFailed => PlayEndReason.Error,
                         PlayerDestroyReason.Seek => PlayEndReason.Completed,
                         _ => PlayEndReason.Completed,
@@ -342,6 +386,7 @@ public sealed partial class MusicPlayer
                             or PlayEndReason.Stop or PlayEndReason.Error or PlayEndReason.TooLarge;
                         var advanced = await TryAdvancePersistedAsync(
                                 clanId,
+                                SessionChannelId(state),
                                 hid,
                                 skipLoop,
                                 endReason,
@@ -352,7 +397,7 @@ public sealed partial class MusicPlayer
                             && !skipLoop
                             && !item.IsFromDefault)
                         {
-                            var loop = await _playerStore.GetLoopModeAsync(clanId).ConfigureAwait(false);
+                            var loop = await _playerStore.GetLoopModeAsync(clanId, SessionChannelId(state)).ConfigureAwait(false);
                             if (loop == LoopMode.Track)
                             {
                                 state.Queue.EnqueueFront(item);
@@ -458,7 +503,7 @@ public sealed partial class MusicPlayer
     {
         var generation = state.Generation;
         state.ScheduleIdleDestroy(
-            IdleSessionTtl,
+            ClanSessionBinder.IdleDelay(state),
             generation,
             gen =>
             {
@@ -472,7 +517,13 @@ public sealed partial class MusicPlayer
                     return;
                 }
 
-                if (state.LastDestroyReason == PlayerDestroyReason.UserStop || !state.DefaultAutoplayArmed)
+                if (state.LastDestroyReason == PlayerDestroyReason.UserStop)
+                {
+                    TearDownIdleSession(clanId, state);
+                    return;
+                }
+
+                if (state.IdleAwaitingDisconnect || !state.DefaultAutoplayArmed)
                 {
                     TearDownIdleSession(clanId, state);
                     return;
@@ -493,14 +544,19 @@ public sealed partial class MusicPlayer
         state.LastDestroyReason = PlayerDestroyReason.IdleTimeout;
         var target = state.Target;
         var mode = state.Mode;
+        var channelId = SessionChannelId(state);
         state.Target = null;
         state.PlayingDefaultPlaylist = false;
         _logger.LogDebug(
-            "Idle player session destroyed clan={ClanId} reason={Reason}",
+            "Idle player session destroyed clan={ClanId} channel={ChannelId} reason={Reason}",
             clanId,
+            channelId,
             state.LastDestroyReason);
 
-        _ = ClearPersistedSessionAsync(clanId, CancellationToken.None);
+        if (channelId != 0)
+        {
+            _ = ClearPersistedSessionAsync(clanId, channelId, CancellationToken.None);
+        }
 
         if (mode == PlaybackMode.Streaming && target is { })
         {
@@ -534,7 +590,8 @@ public sealed partial class MusicPlayer
                 .ConfigureAwait(false);
             if (!started)
             {
-                TearDownIdleSession(clanId, state);
+                state.IdleAwaitingDisconnect = true;
+                ScheduleIdleDestroy(clanId, state);
             }
         }
         catch (Exception ex)
@@ -559,6 +616,7 @@ public sealed partial class MusicPlayer
 
         state.PlayingDefaultPlaylist = true;
         state.DefaultAutoplayArmed = true;
+        state.IdleAwaitingDisconnect = false;
         state.Mode = PlaybackMode.Streaming;
         state.ClanId = clanId;
         state.LastDestroyReason = PlayerDestroyReason.None;
@@ -594,14 +652,26 @@ public sealed partial class MusicPlayer
         {
             state.CachedDefaultPlaylistItems = null;
             state.CachedDefaultPlaylistId = null;
+            state.DefaultAutoplayArmed = false;
+            state.PlayingDefaultPlaylist = false;
             return false;
         }
 
-        var streamChannelId = await _binds.TryGetDefaultStreamChannelAsync(clanId, cancellationToken)
-            .ConfigureAwait(false);
-        if (streamChannelId is not long channelId)
+        var bound = ClanSessionBinder.BoundTarget(state);
+        long channelId;
+        string? channelLabel = bound?.ChannelLabel;
+        if (bound is { ChannelId: not 0 })
         {
-            _logger.LogDebug("Default playlist skipped: no default_stream_channel_id clan={ClanId}", clanId);
+            channelId = bound.ChannelId;
+        }
+        else if (await _binds.TryGetDefaultStreamChannelAsync(clanId, cancellationToken).ConfigureAwait(false)
+                 is long defaultChannelId)
+        {
+            channelId = defaultChannelId;
+        }
+        else
+        {
+            _logger.LogDebug("Default playlist skipped: no bound or default stream channel clan={ClanId}", clanId);
             return false;
         }
 
@@ -621,8 +691,7 @@ public sealed partial class MusicPlayer
             return false;
         }
 
-        string? channelLabel = null;
-        if (state.NotifyClient is not null)
+        if (string.IsNullOrEmpty(channelLabel) && state.NotifyClient is not null)
         {
             try
             {
@@ -638,6 +707,7 @@ public sealed partial class MusicPlayer
 
         var target = new PlaybackTarget(clanId, channelId, ChannelLabel: channelLabel);
         state.Target = target;
+        state.ChannelId = channelId;
         state.Mode = PlaybackMode.Streaming;
 
         // Walk playlist once looking for a playable track from the cursor.
@@ -654,6 +724,7 @@ public sealed partial class MusicPlayer
             {
                 await _playerStore.SetPlayerFieldAsync(
                         clanId,
+                        channelId,
                         "default_playlist_cursor",
                         state.DefaultPlaylistCursor,
                         cancellationToken)
@@ -674,7 +745,7 @@ public sealed partial class MusicPlayer
             }
 
             var info = entry.Track.ToTrackInfo("Auto");
-            var play = new QueuedPlay(info, target, IsFromDefault: true);
+            var play = ClanSessionBinder.Pin(state, new QueuedPlay(info, target, IsFromDefault: true));
             state.Queue.Enqueue(play);
             await PersistEnqueueAsync(clanId, play, "streaming").ConfigureAwait(false);
             if (state.NotifyClient is not null)
@@ -690,22 +761,30 @@ public sealed partial class MusicPlayer
 
     private async Task<bool> TryRestoreClanSessionAsync(
         long clanId,
+        long channelId,
         MezonClient client,
         CancellationToken cancellationToken)
     {
         try
         {
-            var current = await _playerStore.GetCurrentAsync(clanId, cancellationToken).ConfigureAwait(false);
-            var pending = await _playerStore.SnapshotQueueAsync(clanId, cancellationToken).ConfigureAwait(false);
+            var current = await _playerStore.GetCurrentAsync(clanId, channelId, cancellationToken).ConfigureAwait(false);
+            var pending = await _playerStore.SnapshotQueueAsync(clanId, channelId, cancellationToken).ConfigureAwait(false);
             if (current is null && pending.Count == 0)
             {
                 return false;
             }
 
             var state = GetState(clanId);
+            if (ClanSessionBinder.IsLive(state) && state.ChannelId != 0 && state.ChannelId != channelId)
+            {
+                await _playerStore.ClearSessionAsync(clanId, channelId, cancellationToken).ConfigureAwait(false);
+                return true;
+            }
+
             state.CancelIdleDestroy();
             state.Queue.Clear();
             state.ClanId = clanId;
+            state.ChannelId = channelId;
             state.NotifyClient = client;
             state.ControlMessageId = null;
             state.ControlMessageCreateTimeSeconds = null;
@@ -740,37 +819,38 @@ public sealed partial class MusicPlayer
             if (state.Mode == PlaybackMode.Voice)
             {
                 _logger.LogInformation(
-                    "Dropping restored voice session clan={ClanId}; STN voice/WHIP is gone",
-                    clanId);
+                    "Dropping restored voice session clan={ClanId} channel={ChannelId}; bot playback is limited to stream channels",
+                    clanId,
+                    channelId);
                 state.Queue.Clear();
-                await _playerStore.ClearSessionAsync(clanId, cancellationToken).ConfigureAwait(false);
+                await _playerStore.ClearSessionAsync(clanId, channelId, cancellationToken).ConfigureAwait(false);
                 return false;
             }
 
-            await _history.CloseOpenForClanAsync(clanId, PlayEndReason.Restart, cancellationToken).ConfigureAwait(false);
-            await _playerStore.SetPlayHistoryIdAsync(clanId, null, cancellationToken).ConfigureAwait(false);
-            await _playerStore.SetPositionAsync(clanId, 0, 0, paused: false, cancellationToken).ConfigureAwait(false);
+            await _playerStore.SetPlayHistoryIdAsync(clanId, channelId, null, cancellationToken).ConfigureAwait(false);
+            await _playerStore.SetPositionAsync(clanId, channelId, 0, 0, paused: false, cancellationToken)
+                .ConfigureAwait(false);
 
-            if (state.ClanId is long restoredClan)
+            try
             {
-                try
+                var cursorRaw = await _playerStore.GetPlayerAsync(clanId, channelId, cancellationToken)
+                    .ConfigureAwait(false);
+                if (cursorRaw.TryGetValue("default_playlist_cursor", out var c)
+                    && int.TryParse(c, out var cursor))
                 {
-                    var cursorRaw = await _playerStore.GetPlayerAsync(restoredClan, cancellationToken)
-                        .ConfigureAwait(false);
-                    if (cursorRaw.TryGetValue("default_playlist_cursor", out var c)
-                        && int.TryParse(c, out var cursor))
-                    {
-                        state.DefaultPlaylistCursor = cursor;
-                    }
+                    state.DefaultPlaylistCursor = cursor;
                 }
-                catch
-                {
-                }
+            }
+            catch
+            {
             }
 
             if (!state.HoldsPlaySlot && !TryClaimPlaySlot(state))
             {
-                _logger.LogWarning("Restore skipped for clan={ClanId}: playback slots full", clanId);
+                _logger.LogWarning(
+                    "Restore skipped for clan={ClanId} channel={ChannelId}: playback slots full",
+                    clanId,
+                    channelId);
                 state.Queue.Clear();
                 return false;
             }
@@ -792,8 +872,9 @@ public sealed partial class MusicPlayer
             }
 
             _logger.LogInformation(
-                "Restored playback session clan={ClanId} current={HasCurrent} pending={PendingCount} mode={Mode}",
+                "Restored playback session clan={ClanId} channel={ChannelId} current={HasCurrent} pending={PendingCount} mode={Mode}",
                 clanId,
+                channelId,
                 current is not null,
                 pending.Count,
                 state.Mode);
@@ -802,15 +883,18 @@ public sealed partial class MusicPlayer
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to restore playback session clan={ClanId}", clanId);
+            _logger.LogWarning(ex, "Failed to restore playback session clan={ClanId} channel={ChannelId}", clanId, channelId);
             try
             {
-                await _history.CloseOpenForClanAsync(clanId, PlayEndReason.Restart, cancellationToken).ConfigureAwait(false);
-                await _playerStore.ClearSessionAsync(clanId, cancellationToken).ConfigureAwait(false);
+                await _playerStore.ClearSessionAsync(clanId, channelId, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception clearEx)
             {
-                _logger.LogWarning(clearEx, "Failed to clear broken restored session clan={ClanId}", clanId);
+                _logger.LogWarning(
+                    clearEx,
+                    "Failed to clear broken restored session clan={ClanId} channel={ChannelId}",
+                    clanId,
+                    channelId);
             }
 
             return false;
@@ -846,8 +930,70 @@ public sealed partial class MusicPlayer
         }
     }
 
-    /// <summary>How long to keep clan player state + streaming publisher WS after the queue empties.</summary>
-    private static readonly TimeSpan IdleSessionTtl = TimeSpan.FromMinutes(5);
+    /// <summary>How long to keep clan player state after !stop, and the default-playlist idle wait.</summary>
+    private static readonly TimeSpan IdleSessionTtl = ClanSessionBinder.IdleDefaultResume;
+
+    private ClanPlaybackSession GetState(long clanId)
+    {
+        if (clanId == 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(clanId));
+        }
+
+        return _states.GetOrAdd(clanId, id => new ClanPlaybackSession { ClanId = id });
+    }
+
+    private ClanPlaybackSession GetState(long clanId, long channelId)
+    {
+        var state = GetState(clanId);
+        if (channelId != 0 && (state.ChannelId == 0 || !ClanSessionBinder.IsLive(state)))
+        {
+            state.ChannelId = channelId;
+        }
+
+        return state;
+    }
+
+    private static long SessionChannelId(ClanPlaybackSession state)
+        => state.ChannelId != 0 ? state.ChannelId : state.Target?.ChannelId ?? 0;
+
+    private bool TryGetState(long clanId, out ClanPlaybackSession state)
+        => _states.TryGetValue(clanId, out state!);
+
+    private static bool IsSessionActive(ClanPlaybackSession state)
+        => ClanSessionBinder.IsLive(state);
+
+    private ClanPlaybackSession? FindSessionByControlMessage(long clanId, long messageId)
+    {
+        if (!TryGetState(clanId, out var state) || state.ControlMessageId != messageId)
+        {
+            return null;
+        }
+
+        return state;
+    }
+
+    private enum ControlSessionResolve
+    {
+        Found,
+        Nothing,
+        Ambiguous,
+    }
+
+    private ControlSessionResolve TryResolveControlSession(
+        long clanId,
+        long? preferredChannelId,
+        out ClanPlaybackSession? state)
+    {
+        state = null;
+        if (!TryGetState(clanId, out var resolved) || resolved.ClanId != clanId || !IsSessionActive(resolved))
+        {
+            return ControlSessionResolve.Nothing;
+        }
+
+        state = resolved;
+        return ControlSessionResolve.Found;
+    }
 
     private async Task SendNowPlayingAsync(ClanPlaybackSession state, bool includeMusicViz)
     {
@@ -895,7 +1041,7 @@ public sealed partial class MusicPlayer
         PlaybackTarget target,
         CancellationToken cancellationToken)
     {
-        // STN stream_track_ended is authoritative; duration is only used for up-next UX.
+        // The in-process SFU publisher EOF is authoritative; duration is only used for up-next UX.
         using var endedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var endedWait = _streamingSink.WaitUntilTrackEndedAsync(target.ChannelId, endedCts.Token);
         var upNextTask = track.Duration is { } d && d > UpNextLead
@@ -913,10 +1059,15 @@ public sealed partial class MusicPlayer
         }
 
         _logger.LogDebug(
-            "Streaming track ended by STN signal title={Title} channel={ChannelId}",
+            "Streaming track ended by SFU publisher EOF title={Title} channel={ChannelId}",
             track.Title,
             target.ChannelId);
     }
+
+    internal static bool ShouldStopSfuAfterTrack(
+        bool trackEndedNaturally,
+        PlayerDestroyReason destroyReason)
+        => !trackEndedNaturally && destroyReason == PlayerDestroyReason.UserStop;
 
     private async Task NotifyStreamingUpNextAsync(
         ClanPlaybackSession state,
@@ -983,7 +1134,7 @@ public sealed partial class MusicPlayer
             var content = ex is AudioTooLargeException
                 ? PlayerMessageBuilder.CopyrightBlocked()
                 : PlayerMessageBuilder.FromMediaFailure(ex)
-                    ?? PlayerMessageBuilder.FromStnFailure(ex)
+                    ?? PlayerMessageBuilder.FromSfuFailure(ex)
                     ?? PlayerMessageBuilder.Awkward();
             await channel.SendAsync(content).ConfigureAwait(false);
         }
@@ -1018,22 +1169,29 @@ public sealed partial class MusicPlayer
         return false;
     }
 
-    private static bool IsStnInfrastructureFailure(Exception ex)
+    private static bool IsSfuInfrastructureFailure(Exception ex)
     {
-        if (ex is Stn.StnCapacityException)
-        {
-            return true;
-        }
-
         var msg = ex.Message;
-        return msg.Contains("502", StringComparison.Ordinal)
-               || msg.Contains("status code '200'", StringComparison.Ordinal)
-               || msg.Contains("STN streaming WebSocket", StringComparison.Ordinal);
+        return msg.Contains("SFU", StringComparison.OrdinalIgnoreCase)
+               || msg.Contains("SFU publisher", StringComparison.OrdinalIgnoreCase)
+               || msg.Contains("session capacity", StringComparison.OrdinalIgnoreCase);
     }
 
-    private ClanPlaybackSession GetState(long clanId)
-        => _states.GetOrAdd(clanId, id => new ClanPlaybackSession { ClanId = id });
+    private async Task<long?> TryPreferredStreamChannelIdAsync(
+        ICommandContext ctx,
+        CancellationToken cancellationToken)
+    {
+        if (ctx.Channel.Type == (int)ChannelType.Streaming)
+        {
+            return ctx.Channel.Id;
+        }
 
-    private bool TryGetState(long clanId, out ClanPlaybackSession state)
-        => _states.TryGetValue(clanId, out state!);
+        var clanId = ctx.Clan?.Id ?? ctx.Channel.ClanId;
+        return await _binds.TryGetDefaultStreamChannelAsync(clanId, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static Mezon.Net.Client.MessageContent AmbiguousChannelMessage()
+        => PlayerMessageBuilder.Error(
+            "Which stream?",
+            "This clan has more than one stream playing. Run the command in that #stream channel, or tag it.");
 }

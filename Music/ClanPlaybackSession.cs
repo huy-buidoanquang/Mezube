@@ -3,7 +3,7 @@ using Mezube.Playback;
 
 namespace Mezube.Music;
 
-/// <summary>Per-clan playback session state (queue, pump gate, UI handles, idle timer).</summary>
+/// <summary>Per-clan playback session (one live stream channel, queue, pump, idle timer).</summary>
 public sealed class ClanPlaybackSession : IDisposable
 {
     private readonly SemaphoreSlim _pumpGate = new(1, 1);
@@ -14,6 +14,7 @@ public sealed class ClanPlaybackSession : IDisposable
     private int _generation;
 
     public MusicQueue Queue { get; } = new();
+    public long ChannelId { get; set; }
     public PlaybackTarget? Target { get; set; }
     public PlaybackMode Mode { get; set; } = PlaybackMode.Streaming;
     public bool IsPlaying { get; set; }
@@ -35,6 +36,8 @@ public sealed class ClanPlaybackSession : IDisposable
     public bool PlayingDefaultPlaylist { get; set; }
     /// <summary>When false (after !stop / default none), idle TTL must not resume default autoplay.</summary>
     public bool DefaultAutoplayArmed { get; set; }
+    /// <summary>True after the 5-minute default-resume wait failed or was skipped; next idle fire disconnects.</summary>
+    public bool IdleAwaitingDisconnect { get; set; }
     public int DefaultPlaylistCursor { get; set; }
     public long? CachedDefaultPlaylistId { get; set; }
     public IReadOnlyList<Domain.Entities.PlaylistItemEntity>? CachedDefaultPlaylistItems { get; set; }
@@ -44,6 +47,26 @@ public sealed class ClanPlaybackSession : IDisposable
     public int Generation => Volatile.Read(ref _generation);
 
     public int BumpGeneration() => Interlocked.Increment(ref _generation);
+
+    /// <summary>
+    /// Clears a teardown result when a new playback request takes ownership of
+    /// the session. Skip and seek are intentionally preserved because they are
+    /// active-pump control signals for the current track.
+    /// </summary>
+    public void ResetTerminalDestroyReason()
+    {
+        if (LastDestroyReason is PlayerDestroyReason.UserStop
+            or PlayerDestroyReason.QueueEmpty
+            or PlayerDestroyReason.SfuFailed
+            or PlayerDestroyReason.TrackFailed
+            or PlayerDestroyReason.IdleTimeout
+            or PlayerDestroyReason.ModeConflict
+            or PlayerDestroyReason.RoomConflict
+            or PlayerDestroyReason.CapacityExceeded)
+        {
+            LastDestroyReason = PlayerDestroyReason.None;
+        }
+    }
 
     public async Task<Mezon.Net.Sdk.Entities.Channel?> ResolveNotifyChannelAsync(
         CancellationToken cancellationToken = default)

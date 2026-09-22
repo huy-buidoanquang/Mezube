@@ -5,7 +5,6 @@ using Mezube.Domain.Entities;
 using Mezube.Music;
 using Mezube.Music.Interactive;
 using Mezube.Playback;
-using Mezube.Stn;
 using System.Buffers;
 using System.Text.Json;
 
@@ -27,15 +26,15 @@ public static class PlayerMessageBuilder
     public static void Configure(BotOptions options)
         => _options = options ?? throw new ArgumentNullException(nameof(options));
 
-    /// <summary>Map STN failures to a clear user-facing embed.</summary>
-    public static MessageContent? FromStnFailure(Exception ex)
+    /// <summary>Map SFU publisher failures to a clear user-facing embed.</summary>
+    public static MessageContent? FromSfuFailure(Exception ex)
     {
         var message = ex.Message ?? string.Empty;
-        if (Contains(message, "503") || StnServerLoad.MentionsCapacity(message))
+        if (Contains(message, "503") || Contains(message, "capacity") || Contains(message, "transport busy"))
         {
             return Error(
-                "STN busy",
-                "Streaming is out of free slots for a moment. Try again shortly.");
+                "Audio transport busy",
+                "The SFU audio transport is busy for a moment. Try again shortly.");
         }
 
         if (Contains(message, "download_failed") || Contains(message, "404"))
@@ -58,7 +57,7 @@ public static class PlayerMessageBuilder
             => haystack.Contains(needle, StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>yt-dlp / CDN / local media prep failures (not STN room teardown).</summary>
+    /// <summary>yt-dlp / CDN / local media prep failures.</summary>
     public static MessageContent? FromMediaFailure(Exception ex)
     {
         for (var cur = ex; cur is not null; cur = cur.InnerException)

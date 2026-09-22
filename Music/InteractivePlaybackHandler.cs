@@ -27,6 +27,11 @@ public sealed partial class MusicPlayer
         bool wantVideo,
         CancellationToken cancellationToken)
     {
+        if (mode == PlaybackMode.Streaming)
+        {
+            wantVideo = false;
+        }
+
         IReadOnlyList<TrackInfoEntity> hits;
         try
         {
@@ -143,6 +148,11 @@ public sealed partial class MusicPlayer
         bool wantVideo,
         CancellationToken cancellationToken)
     {
+        if (mode == PlaybackMode.Streaming)
+        {
+            wantVideo = false;
+        }
+
         if (IsTooLarge(track, wantVideo) || track.IsTooLarge)
         {
             await UpdateOrReplyAsync(
@@ -154,9 +164,12 @@ public sealed partial class MusicPlayer
             return;
         }
 
-        var play = new QueuedPlay(track, target, preparingMessageId, preparingCreateTime, WantVideo: wantVideo);
+        var state = GetState(target.ClanId, target.ChannelId);
+        var play = ClanSessionBinder.Pin(
+            state,
+            new QueuedPlay(track, target, preparingMessageId, preparingCreateTime, WantVideo: wantVideo));
         var kind = await EnqueueOrStartAsync(
-                GetState(target.ClanId),
+                state,
                 play,
                 mode,
                 ctx.Client,
@@ -165,7 +178,7 @@ public sealed partial class MusicPlayer
                 attachPreparingAsControl: true,
                 cancellationToken)
             .ConfigureAwait(false);
-        await ReplyEnqueueAsync(ctx, kind, play, target.ChannelLabel, preparingMessageId, preparingCreateTime)
+        await ReplyEnqueueAsync(ctx, kind, play, play.Target.ChannelLabel, preparingMessageId, preparingCreateTime)
             .ConfigureAwait(false);
     }
 
@@ -237,7 +250,7 @@ public sealed partial class MusicPlayer
             {
                 await ctx.RespondAsync(PlayerMessageBuilder.Error(
                         "Streaming only",
-                        "STN no longer publishes into voice channels. Run !play with a #stream channel."))
+                        "Mezube music plays in #stream channels. Run !play with a #stream channel."))
                     .ConfigureAwait(false);
                 return;
             }
@@ -279,15 +292,23 @@ public sealed partial class MusicPlayer
         long messageId,
         bool wantVideo)
     {
+        if (mode == PlaybackMode.Streaming)
+        {
+            wantVideo = false;
+        }
+
         if (IsTooLarge(track, wantVideo) || track.IsTooLarge)
         {
             await ctx.UpdateMessageAsync(PlayerMessageBuilder.CopyrightBlocked()).ConfigureAwait(false);
             return;
         }
 
-        var play = new QueuedPlay(track, target, messageId, null, WantVideo: wantVideo);
+        var state = GetState(target.ClanId, target.ChannelId);
+        var play = ClanSessionBinder.Pin(
+            state,
+            new QueuedPlay(track, target, messageId, null, WantVideo: wantVideo));
         var kind = await EnqueueOrStartAsync(
-                GetState(target.ClanId),
+                state,
                 play,
                 mode,
                 ctx.Client,
@@ -307,7 +328,7 @@ public sealed partial class MusicPlayer
             PlayEnqueueKind.CutIn => PlayerMessageBuilder.PlayingNext(
                 track.Title,
                 "Cut in ahead of the default playlist."),
-            PlayEnqueueKind.Queued => PlayerMessageBuilder.Queued(track, 1, target.ChannelLabel),
+            PlayEnqueueKind.Queued => PlayerMessageBuilder.Queued(track, 1, play.Target.ChannelLabel),
             _ => null,
         };
         if (content is not null)

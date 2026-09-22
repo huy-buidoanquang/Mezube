@@ -7,10 +7,15 @@ using System.Diagnostics;
 
 namespace Mezube.Media;
 
-public sealed record PipelineResult(string CdnUrl, long? SourceBytes, PreparedAssetKind Kind);
+public sealed record PipelineResult(
+    string? CdnUrl,
+    long? SourceBytes,
+    PreparedAssetKind Kind,
+    string? LocalPath = null);
 
 /// <summary>
-/// Prepare stages: download to temp → convert (Ogg or WebM) → multipart CDN upload → cleanup.
+/// Prepare stages: download to temp → convert to SFU Ogg (audio) or WebM (legacy video).
+/// Audio CDN upload is owned by <see cref="PlayableMediaProcessor"/> so playback is not blocked on it.
 /// </summary>
 public sealed class PipelineProcessor
 {
@@ -65,11 +70,10 @@ public sealed class PipelineProcessor
             }
         }
 
-        return await RunAudioPipelineAsync(client, track, cancellationToken).ConfigureAwait(false);
+        return await RunAudioPipelineAsync(track, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<PipelineResult> RunAudioPipelineAsync(
-        MezonClient client,
         TrackInfoEntity track,
         CancellationToken cancellationToken)
     {
@@ -102,47 +106,24 @@ public sealed class PipelineProcessor
                 downloadStopwatch.ElapsedMilliseconds);
 
             var convertStopwatch = Stopwatch.StartNew();
-            var uploadPath = await EnsureOggAsync(downloaded, cancellationToken).ConfigureAwait(false);
+            var preparedPath = PreparedAudioCache.TryGetPath(_options.TempDir, track)
+                               ?? PreparedAudioCache.NewFallbackPath(_options.TempDir);
+            var uploadPath = await EnsureOggAsync(downloaded, preparedPath, cancellationToken).ConfigureAwait(false);
             var oggBytes = new FileInfo(uploadPath).Length;
             if (oggBytes > _options.MaxAudioBytes)
             {
+                DownloadedMediaFiles.TryDelete(uploadPath);
                 throw new AudioTooLargeException(track.Title, oggBytes, _options.MaxAudioBytes);
             }
 
-            _logger.LogDebug(
-                "Pipeline convert title={Title} outputExt={OutputExt} bytes={Bytes} elapsedMs={ElapsedMs}",
+            _logger.LogInformation(
+                "Pipeline prepare ready title={Title} kind=audio bytes={Bytes} elapsedMs={ElapsedMs} convertMs={ConvertMs}",
                 track.Title,
-                Path.GetExtension(uploadPath),
                 oggBytes,
+                total.ElapsedMilliseconds,
                 convertStopwatch.ElapsedMilliseconds);
 
-            var uploadStopwatch = Stopwatch.StartNew();
-            await using var oggStream = File.OpenRead(uploadPath);
-            var filename = Path.GetFileName(uploadPath);
-            if (!filename.EndsWith(".ogg", StringComparison.OrdinalIgnoreCase)
-                && !filename.EndsWith(".opus", StringComparison.OrdinalIgnoreCase))
-            {
-                filename = Path.ChangeExtension(filename, ".ogg") ?? $"{workId}.ogg";
-            }
-
-            var (cdnUrl, bytes) = await _uploader.UploadMultipartFromStreamAsync(
-                    client,
-                    oggStream,
-                    filename,
-                    "audio/ogg",
-                    cancellationToken,
-                    _options.MaxAudioBytes)
-                .ConfigureAwait(false);
-
-            _logger.LogInformation(
-                "Pipeline prepare ready title={Title} kind=audio bytes={Bytes} elapsedMs={ElapsedMs} uploadMs={UploadMs} url={Url}",
-                track.Title,
-                bytes,
-                total.ElapsedMilliseconds,
-                uploadStopwatch.ElapsedMilliseconds,
-                cdnUrl);
-
-            return new PipelineResult(cdnUrl, bytes, PreparedAssetKind.Audio);
+            return new PipelineResult(CdnUrl: null, oggBytes, PreparedAssetKind.Audio, uploadPath);
         }
         finally
         {
@@ -195,7 +176,7 @@ public sealed class PipelineProcessor
             if (!_ffmpeg.IsAvailable)
             {
                 throw new MediaPrepException(
-                    "ffmpeg chưa có trên PATH — STN streaming video cần WebM Opus+VP8. " +
+                    "ffmpeg chưa có trên PATH — legacy video preparation needs WebM Opus+VP8. " +
                     "Cài ffmpeg rồi restart bot, hoặc set MEZUBE_FFMPEG_PATH.");
             }
 
@@ -236,12 +217,11 @@ public sealed class PipelineProcessor
                 .ConfigureAwait(false);
 
             _logger.LogInformation(
-                "Pipeline prepare ready title={Title} kind=video bytes={Bytes} elapsedMs={ElapsedMs} uploadMs={UploadMs} url={Url}",
+                "Pipeline prepare ready title={Title} kind=video bytes={Bytes} elapsedMs={ElapsedMs} uploadMs={UploadMs}",
                 track.Title,
                 bytes,
                 total.ElapsedMilliseconds,
-                uploadStopwatch.ElapsedMilliseconds,
-                cdnUrl);
+                uploadStopwatch.ElapsedMilliseconds);
 
             return new PipelineResult(cdnUrl, bytes, PreparedAssetKind.Video);
         }
@@ -255,34 +235,23 @@ public sealed class PipelineProcessor
         }
     }
 
-    private async Task<string> EnsureOggAsync(string inputPath, CancellationToken cancellationToken)
+    private async Task<string> EnsureOggAsync(
+        string inputPath,
+        string outputPath,
+        CancellationToken cancellationToken)
     {
-        var ext = Path.GetExtension(inputPath).ToLowerInvariant();
-        if (ext is ".ogg" or ".opus")
-        {
-            return inputPath;
-        }
-
-        if (!_ffmpeg.IsAvailable)
-        {
-            throw new MediaPrepException(
-                "ffmpeg chưa có trên PATH — STN cần file .ogg/.webm. " +
-                "Cài ffmpeg rồi restart bot, hoặc set MEZUBE_FFMPEG_PATH.");
-        }
-
-        if (ext is ".webm")
-        {
-            var copied = await _ffmpeg.RemuxOpusToOggAsync(inputPath, cancellationToken).ConfigureAwait(false);
-            if (!string.IsNullOrWhiteSpace(copied) && File.Exists(copied))
-            {
-                return copied;
-            }
-        }
-
-        var oggPath = await _ffmpeg.TranscodeToOggAsync(inputPath, cancellationToken).ConfigureAwait(false);
+        var oggPath = await _ffmpeg.PrepareSfuOggAsync(inputPath, outputPath, cancellationToken)
+            .ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(oggPath) || !File.Exists(oggPath))
         {
-            throw new MediaPrepException("ffmpeg convert → ogg thất bại; không upload m4a/webm cho STN.");
+            if (!_ffmpeg.IsAvailable)
+            {
+                throw new MediaPrepException(
+                    "ffmpeg chưa có trên PATH — audio preparation needs an Ogg output. " +
+                    "Cài ffmpeg rồi restart bot, hoặc set MEZUBE_FFMPEG_PATH.");
+            }
+
+            throw new MediaPrepException("ffmpeg convert → ogg thất bại; không upload a source container directly.");
         }
 
         return oggPath;

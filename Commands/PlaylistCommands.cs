@@ -313,7 +313,7 @@ public sealed partial class MusicPlayer
                     }
 
                     var kind = await EnqueueManyOrStartAsync(
-                            GetState(clanId),
+                            GetState(clanId, target.ChannelId),
                             plays,
                             mode,
                             ctx.Client,
@@ -406,9 +406,11 @@ public sealed partial class MusicPlayer
             }
 
             await _playlists.SetDefaultAsync(clanId, null, cancellationToken).ConfigureAwait(false);
-            var state = GetState(clanId);
-            state.DefaultAutoplayArmed = false;
-            state.PlayingDefaultPlaylist = false;
+            if (TryGetState(clanId, out var state))
+            {
+                state.DefaultAutoplayArmed = false;
+                state.PlayingDefaultPlaylist = false;
+            }
             await ctx.ReplyAsync(PlayerMessageBuilder.Ok(
                     "Default playlist cleared",
                     "Idle autoplay won’t kick in anymore."))
@@ -457,7 +459,8 @@ public sealed partial class MusicPlayer
         }
 
         await _playlists.SetDefaultAsync(clanId, pl.Id, cancellationToken).ConfigureAwait(false);
-        var playerState = GetState(clanId);
+        var playerState = GetState(clanId, streamId.Value);
+        playerState.ChannelId = streamId.Value;
         playerState.DefaultPlaylistCursor = 0;
         playerState.DefaultAutoplayArmed = true;
         playerState.NotifyClient ??= ctx.Client;
