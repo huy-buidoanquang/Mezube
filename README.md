@@ -48,7 +48,10 @@ dotnet run --project Mezube.csproj
 | `Mezon:Host` / `Mezon:Port` | Dev `dev-mezon.nccsoft.vn:8088`, Prod `gw.mezon.ai:443` |
 | `Mezube:SfuWebSocketUrl` | SFU signaling endpoint `ws://` hoặc `wss://`; bắt buộc cấu hình khi deploy |
 | `Mezube:SfuConnectTimeoutMs` | Timeout kết nối WebSocket/WebRTC publisher |
-| `Mezube:SfuReconnectBackoffMs` / `Mezube:SfuMaxSessions` | Backoff reconnect và giới hạn stream session |
+| `Mezube:SfuReconnectBackoffMs` / `SfuReconnectMaxBackoffMs` | Exponential reconnect backoff cơ sở và trần tối đa |
+| `Mezube:SfuReconnectMaxAttempts` | Số lần reconnect liên tiếp tối đa trước khi session báo lỗi và dừng retry |
+| `Mezube:SfuReconnectJitterMs` / `Mezube:SfuReconnectStableResetMs` | Jitter chống retry đồng bộ và khoảng kết nối ổn định để reset bộ đếm |
+| `Mezube:SfuMaxSessions` | Giới hạn stream session đồng thời |
 
 | `Mezube:PreparedAudioBitrateKbps` | Bitrate cho file CDN audio (Ogg Opus) |
 | `Mezube:PreparedAudioChannels` / `Mezube:PreparedAudioSampleRate` | Cấu hình media preparation; audio wire của SFU luôn cố định 2 kênh / 48 kHz |
