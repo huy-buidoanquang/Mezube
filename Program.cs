@@ -67,7 +67,7 @@ internal static class Program
             throw new InvalidOperationException("Mezube:RedisConnectionString is required.");
         }
 
-        var redisMux = await ConnectionMultiplexer.ConnectAsync(
+        var redisMux = await RedisConnection.ConnectAsync(
                 options.Persistence.RedisConnectionString)
             .ConfigureAwait(false);
         builder.Services.AddSingleton(options.Mezon);

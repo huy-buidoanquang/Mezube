@@ -5,6 +5,7 @@ using Mezon.Net.Sdk.Caching;
 using Mezon.Net.Sdk.Entities;
 using Mezube.Infrastructure.Caching.Snapshots;
 using Microsoft.Extensions.Logging;
+using StackExchange.Redis;
 
 namespace Mezube.Infrastructure.Caching;
 
@@ -60,7 +61,15 @@ public sealed class MezonEntityCacheBridge : IAsyncDisposable
         client.RoleAssigned += OnRoleAssignedAsync;
         client.ClanJoined += OnClanJoinedAsync;
 
-        await _invalidation.StartListeningAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await _invalidation.StartListeningAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (RedisException ex)
+        {
+            // SubscribeAsync retains the handler; the multiplexer resubscribes on reconnect.
+            _logger.LogWarning(ex, "Mezon L2 cache invalidation subscription deferred until Redis reconnects");
+        }
         _logger.LogInformation(
             "Mezon L2 entity cache bridge attached (env={Env} account={AccountId})",
             _keys.EnvironmentName,

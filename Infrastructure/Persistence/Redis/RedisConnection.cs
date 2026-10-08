@@ -10,8 +10,11 @@ public sealed class RedisConnection : IDisposable
     private readonly ILogger<RedisConnection> _logger;
     private readonly bool _ownsMultiplexer;
 
+    public static Task<ConnectionMultiplexer> ConnectAsync(string connectionString)
+        => ConnectionMultiplexer.ConnectAsync(CreateConfiguration(connectionString));
+
     public RedisConnection(BotOptions options, ILogger<RedisConnection> logger)
-        : this(Connect(options, logger), logger, ownsMultiplexer: true)
+        : this(ConnectionMultiplexer.Connect(CreateConfiguration(options.RedisConnectionString)), logger, ownsMultiplexer: true)
     {
     }
 
@@ -23,7 +26,11 @@ public sealed class RedisConnection : IDisposable
         _mux = multiplexer ?? throw new ArgumentNullException(nameof(multiplexer));
         _logger = logger;
         _ownsMultiplexer = ownsMultiplexer;
-        _logger.LogInformation("Redis ready ({Endpoints})", string.Join(",", _mux.GetEndPoints().Select(e => e.ToString())));
+        _logger.Log(
+            _mux.IsConnected ? LogLevel.Information : LogLevel.Warning,
+            "Redis initialized (connected={Connected}, endpoints={Endpoints})",
+            _mux.IsConnected,
+            string.Join(",", _mux.GetEndPoints().Select(e => e.ToString())));
     }
 
     public IDatabase Db => _mux.GetDatabase();
@@ -38,17 +45,16 @@ public sealed class RedisConnection : IDisposable
         }
     }
 
-    private static IConnectionMultiplexer Connect(BotOptions options, ILogger logger)
+    private static ConfigurationOptions CreateConfiguration(string connectionString)
     {
-        if (string.IsNullOrWhiteSpace(options.RedisConnectionString))
+        if (string.IsNullOrWhiteSpace(connectionString))
         {
             throw new InvalidOperationException("Mezube:RedisConnectionString is required.");
         }
 
-        var mux = ConnectionMultiplexer.Connect(options.RedisConnectionString);
-        logger.LogInformation(
-            "Redis connected ({Endpoints})",
-            string.Join(",", mux.GetEndPoints().Select(endpoint => endpoint.ToString())));
-        return mux;
+        var configuration = ConfigurationOptions.Parse(connectionString);
+        // Keep the multiplexer alive so it can reconnect when Redis becomes available.
+        configuration.AbortOnConnectFail = false;
+        return configuration;
     }
 }
