@@ -446,7 +446,10 @@ public sealed class SfuPublisherSession : IAsyncDisposable
                     var message = await ReceiveTextAsync(websocket, cancellationToken).ConfigureAwait(false);
                     if (message is null)
                     {
-                        throw connection?.Failure ?? new InvalidOperationException("SFU signaling connection closed.");
+                        // mezon-sfu reports why it dropped us in the close code
+                        // (4012 duplicate_session, 4011 alone_timeout, 4014 dtls_handshake_timeout).
+                        throw connection?.Failure ?? new InvalidOperationException(
+                            $"SFU signaling connection closed status={(int?)websocket.CloseStatus} reason={websocket.CloseStatusDescription}.");
                     }
 
                     if (connection is null)
@@ -454,6 +457,13 @@ public sealed class SfuPublisherSession : IAsyncDisposable
                         connection = TryAttachAfterJoined(websocket, message, cancellationToken, out peerConnection);
                         if (connection is not null)
                         {
+                            // mezon-sfu creates every session muted and no longer
+                            // auto-unmutes on audio RTP. Declare the state before
+                            // answering the first offer; the SFU applies it with the answer.
+                            var isMute = IsPaused;
+                            await SendJsonAsync(connection, new { type = "mute", is_mute = isMute }, cancellationToken)
+                                .ConfigureAwait(false);
+                            connection.DeclaredMute = isMute;
                             continue;
                         }
 
@@ -1034,15 +1044,18 @@ public sealed class SfuPublisherSession : IAsyncDisposable
             paused = _paused;
         }
 
-        if (!paused)
+        // PauseAsync only signals connected peers, so a toggle during negotiation
+        // is reconciled here against the state declared after `joined`.
+        if (paused == connection.DeclaredMute)
         {
             return;
         }
 
         try
         {
-            await SendJsonAsync(connection, new { type = "mute", is_mute = true }, cancellationToken)
+            await SendJsonAsync(connection, new { type = "mute", is_mute = paused }, cancellationToken)
                 .ConfigureAwait(false);
+            connection.DeclaredMute = paused;
         }
         catch (Exception ex) when (ex is InvalidOperationException or WebSocketException or ObjectDisposedException or OperationCanceledException)
         {
@@ -1239,6 +1252,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
     private sealed class DirectSfuConnection : IDisposable
     {
         private int _closed;
+        private int _declaredMute;
         private long _connectedAtTimestamp;
         private Exception? _failure;
 
@@ -1252,6 +1266,14 @@ public sealed class SfuPublisherSession : IAsyncDisposable
         public RTCPeerConnection PeerConnection { get; }
         public bool IsConnected => PeerConnection.connectionState == RTCPeerConnectionState.connected;
         public Exception? Failure => _failure;
+
+        /// <summary>Last mute state sent to the SFU on this signaling connection.</summary>
+        public bool DeclaredMute
+        {
+            get => Volatile.Read(ref _declaredMute) != 0;
+            set => Volatile.Write(ref _declaredMute, value ? 1 : 0);
+        }
+
         public bool HasBeenConnected => Volatile.Read(ref _connectedAtTimestamp) != 0;
         public TimeSpan ConnectedDuration
             => HasBeenConnected
