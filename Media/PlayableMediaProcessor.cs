@@ -151,7 +151,7 @@ public sealed class PlayableMediaProcessor
             }
         }
 
-        if (!NeedsRepackage(track.MediaUrl, kind))
+        if (!NeedsRepackage(track.MediaUrl, kind, _options.CdnBaseUrl))
         {
             if (!IsReadyUrl(track.MediaUrl, kind))
             {
@@ -566,32 +566,16 @@ public sealed class PlayableMediaProcessor
         }
     }
 
-    private static bool NeedsRepackage(string mediaUrl, PreparedAssetKind kind)
+    internal static bool NeedsRepackage(string mediaUrl, PreparedAssetKind kind, string cdnBaseUrl)
     {
-        if (!Uri.TryCreate(mediaUrl, UriKind.Absolute, out var uri))
-        {
-            return true;
-        }
-
-        var host = uri.Host.ToLowerInvariant();
-        if (host.Contains("googlevideo.com", StringComparison.Ordinal)
-            || host.Contains("youtube.com", StringComparison.Ordinal)
-            || host.Contains("ytimg.com", StringComparison.Ordinal)
-            || host.Contains("youtu.be", StringComparison.Ordinal))
+        if (!Uri.TryCreate(mediaUrl, UriKind.Absolute, out var uri)
+            || !Uri.TryCreate(cdnBaseUrl, UriKind.Absolute, out var cdn)
+            || !string.Equals(uri.Host, cdn.Host, StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }
 
         var path = uri.AbsolutePath.ToLowerInvariant();
-        var onMezonCdn = host.Contains("cdn.mezon", StringComparison.Ordinal)
-                         || host.Contains("cdn.komu", StringComparison.Ordinal)
-                         || host.Contains("cdn.nccsoft", StringComparison.Ordinal)
-                         || host.Contains("r2.dev", StringComparison.Ordinal);
-        if (!onMezonCdn)
-        {
-            return true;
-        }
-
         return kind == PreparedAssetKind.Video
             ? !path.EndsWith(".webm")
             : !(path.EndsWith(".ogg") || path.EndsWith(".opus"));
