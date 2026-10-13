@@ -174,18 +174,7 @@ public sealed partial class MusicPlayer
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                QueuedPlay? item;
-                if (state.ReplayCurrent && state.Queue.CurrentItem is { } current)
-                {
-                    item = current;
-                    state.ReplayCurrent = false;
-                    state.PendingSeekMs = 0;
-                }
-                else
-                {
-                    item = state.Queue.TryDequeueNext();
-                }
-
+                var item = state.Queue.TryDequeueNext();
                 var mode = state.Mode;
                 if (item is null)
                 {
@@ -385,12 +374,8 @@ public sealed partial class MusicPlayer
                 }
                 finally
                 {
-                    var wasSeek = state.LastDestroyReason == PlayerDestroyReason.Seek;
                     var historyId = state.PlayHistoryId;
-                    if (!wasSeek)
-                    {
-                        state.PlayHistoryId = null;
-                    }
+                    state.PlayHistoryId = null;
 
                     var endReason = state.LastDestroyReason switch
                     {
@@ -398,11 +383,9 @@ public sealed partial class MusicPlayer
                         PlayerDestroyReason.UserStop => PlayEndReason.Stop,
                         PlayerDestroyReason.SfuFailed => PlayEndReason.Error,
                         PlayerDestroyReason.TrackFailed => PlayEndReason.Error,
-                        PlayerDestroyReason.Seek => PlayEndReason.Completed,
                         _ => PlayEndReason.Completed,
                     };
-                    if (ShouldAdvanceAfterTrack(state.LastDestroyReason, _lifetime.ApplicationStopping.IsCancellationRequested)
-                        && historyId is long hid)
+                    if (!_lifetime.ApplicationStopping.IsCancellationRequested && historyId is long hid)
                     {
                         var skipLoop = endReason is PlayEndReason.Skip
                             or PlayEndReason.Stop or PlayEndReason.Error or PlayEndReason.TooLarge;
@@ -432,17 +415,10 @@ public sealed partial class MusicPlayer
                         }
                     }
 
-                    if (state.LastDestroyReason != PlayerDestroyReason.UserStop
-                        && state.LastDestroyReason != PlayerDestroyReason.Seek)
+                    if (state.LastDestroyReason != PlayerDestroyReason.UserStop)
                     {
                         state.LastDestroyReason = PlayerDestroyReason.None;
                     }
-                }
-
-                if (state.LastDestroyReason == PlayerDestroyReason.Seek)
-                {
-                    state.ClearTrackCts();
-                    continue;
                 }
 
                 if (state.LastDestroyReason is PlayerDestroyReason.Skip or PlayerDestroyReason.UserStop)
@@ -462,11 +438,6 @@ public sealed partial class MusicPlayer
                 }
                 catch (OperationCanceledException) when (trackCts.IsCancellationRequested)
                 {
-                    if (state.LastDestroyReason == PlayerDestroyReason.Seek)
-                    {
-                        continue;
-                    }
-
                     if (state.LastDestroyReason == PlayerDestroyReason.UserStop)
                     {
                         break;
@@ -1085,9 +1056,6 @@ public sealed partial class MusicPlayer
             track.Title,
             target.ChannelId);
     }
-
-    internal static bool ShouldAdvanceAfterTrack(PlayerDestroyReason destroyReason, bool shuttingDown)
-        => destroyReason != PlayerDestroyReason.Seek && !shuttingDown;
 
     internal static bool ShouldStopSfuAfterTrack(
         bool trackEndedNaturally,
