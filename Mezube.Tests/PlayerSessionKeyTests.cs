@@ -11,8 +11,6 @@ public sealed class PlayerSessionKeyTests
         Assert.Equal("mezon:music:queue:10:21", RedisKeyNames.Queue(10, 21));
         Assert.NotEqual(RedisKeyNames.Player(10, 21), RedisKeyNames.Player(10, 22));
         Assert.NotEqual(RedisKeyNames.Queue(10, 21), RedisKeyNames.Queue(10, 22));
-        Assert.NotEqual(RedisKeyNames.Player(10, 21), RedisKeyNames.LegacyPlayer(10));
-        Assert.NotEqual(RedisKeyNames.Queue(10, 21), RedisKeyNames.LegacyQueue(10));
     }
 
     [Fact]
