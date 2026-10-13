@@ -10,10 +10,6 @@ public sealed class BotOptions
     private const int DefaultAudioChannels = 2;
     private const int DefaultAudioSampleRate = 48000;
 
-    public MezonOptions Mezon { get; set; } = new();
-    public MediaOptions Media { get; set; } = new();
-    public PersistenceOptions Persistence { get; set; } = new();
-
     public long BotId { get; set; }
     public string Token { get; set; } = string.Empty;
     /// <summary>Gateway Basic-Auth server key.</summary>
@@ -64,8 +60,6 @@ public sealed class BotOptions
     public int YtDlpRetryDelayMs { get; set; } = 5000;
     public string FfmpegPath { get; set; } = "ffmpeg";
     public string TempDir { get; set; } = "temp";
-    /// <summary>Legacy SQLite path (migration script only). Runtime uses Postgres.</summary>
-    public string TracksDbPath { get; set; } = "data/tracks.db";
     /// <summary>Npgsql connection string, e.g. Host=localhost;Database=mezube;Username=mezube;Password=…</summary>
     public string PostgresConnectionString { get; set; } = string.Empty;
     /// <summary>StackExchange.Redis configuration string, e.g. localhost:6379</summary>
@@ -100,10 +94,6 @@ public sealed class BotOptions
         var options = new BotOptions();
         configuration.GetSection("Mezon").Bind(options);
         configuration.GetSection("Mezube").Bind(options);
-        configuration.GetSection("Mezon").Bind(options.Mezon);
-        configuration.GetSection("Mezube").Bind(options.Media);
-        configuration.GetSection("Mezube").Bind(options.Persistence);
-        options.CopyToNested();
         options.MezonNetLogLevel = ParseMezonNetLogLevel(configuration);
 
         if (string.IsNullOrWhiteSpace(options.CommandPrefix))
@@ -112,37 +102,6 @@ public sealed class BotOptions
         }
 
         return options;
-    }
-
-    private void CopyToNested()
-    {
-        Mezon.BotId = BotId;
-        Mezon.Token = Token;
-        Mezon.ServerKey = ServerKey;
-        Mezon.Host = Host;
-        Mezon.Port = Port;
-        Mezon.UseSsl = UseSsl;
-
-        Media.YtDlpPath = YtDlpPath;
-        Media.YtDlpPlayerClients = YtDlpPlayerClients;
-        Media.YtDlpJsRuntime = YtDlpJsRuntime;
-        Media.YtDlpJsRuntimePath = YtDlpJsRuntimePath;
-        Media.YtDlpCookiesPath = YtDlpCookiesPath;
-        Media.YtDlpDownloadRetries = YtDlpDownloadRetries;
-        Media.YtDlpRetryDelayMs = YtDlpRetryDelayMs;
-        Media.FfmpegPath = FfmpegPath;
-        Media.TempDir = TempDir;
-        Media.CdnBaseUrl = CdnBaseUrl;
-        Media.MultipartUploadPartBytes = MultipartUploadPartBytes;
-        Media.PreparedAudioBitrateKbps = PreparedAudioBitrateKbps;
-        Media.PreparedAudioChannels = PreparedAudioChannels;
-        Media.PreparedAudioSampleRate = PreparedAudioSampleRate;
-        Media.PreparedVideoBitrateKbps = PreparedVideoBitrateKbps;
-        Media.PreparedVideoHeight = PreparedVideoHeight;
-        Media.PreparedVideoFps = PreparedVideoFps;
-        Persistence.PostgresConnectionString = PostgresConnectionString;
-        Persistence.RedisConnectionString = RedisConnectionString;
-        Persistence.TracksDbPath = TracksDbPath;
     }
 
     private static LogLevel ParseMezonNetLogLevel(IConfiguration configuration)

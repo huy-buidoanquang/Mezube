@@ -105,13 +105,7 @@ public sealed class PlaylistImportConfirmOnceTests
         public Task SaveSearchPickAsync(long messageId, SearchPickSession session, CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
 
-        public Task<SearchPickSession?> TryGetSearchPickAsync(long messageId, CancellationToken cancellationToken = default)
-            => throw new NotSupportedException();
-
         public Task<SearchPickSession?> TakeSearchPickAsync(long messageId, CancellationToken cancellationToken = default)
-            => throw new NotSupportedException();
-
-        public Task DeleteSearchPickAsync(long messageId, CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
 
         public Task SavePlaylistImportAsync(long messageId, PlaylistImportSession session, CancellationToken cancellationToken = default)

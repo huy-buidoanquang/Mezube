@@ -6,8 +6,6 @@ public interface ITrackRepository
 {
     Task<TrackEntity?> TryGetAsync(string source, string externalId, CancellationToken cancellationToken = default);
 
-    Task<TrackEntity?> TryGetByIdAsync(long trackId, CancellationToken cancellationToken = default);
-
     Task<TrackEntity?> TryGetByAliasAsync(string aliasKey, CancellationToken cancellationToken = default);
 
     Task<long> UpsertMetadataAsync(TrackEntity track, CancellationToken cancellationToken = default);

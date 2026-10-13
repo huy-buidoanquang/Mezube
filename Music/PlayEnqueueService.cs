@@ -37,33 +37,6 @@ public sealed class PlayEnqueueService
         _logger = logger;
     }
 
-    public async Task<PlayEnqueueKind> EnqueueOrStartAsync(
-        ClanPlaybackSession state,
-        QueuedPlay play,
-        PlaybackMode mode,
-        MezonClient client,
-        long notifyChannelId,
-        long controlUserId,
-        bool attachPreparingAsControl,
-        Func<ClanPlaybackSession, bool> tryClaimSlot,
-        Action<ClanPlaybackSession> resetPrepToken,
-        Action<ClanPlaybackSession, long> startPump,
-        CancellationToken cancellationToken = default)
-        => await EnqueueManyOrStartAsync(
-            state,
-            [play],
-            mode,
-            client,
-            notifyChannelId,
-            controlUserId,
-            attachPreparingAsControl,
-            tryClaimSlot,
-            resetPrepToken,
-            startPump,
-            onTooLarge: null,
-            releaseSlot: null,
-            cancellationToken).ConfigureAwait(false);
-
     public async Task<PlayEnqueueKind> EnqueueManyOrStartAsync(
         ClanPlaybackSession state,
         IReadOnlyList<QueuedPlay> plays,

@@ -7,8 +7,6 @@ public interface ITrackLibraryService
 {
     Task<TrackEntity?> TryGetAsync(string source, string externalId, CancellationToken cancellationToken = default);
 
-    Task<TrackEntity?> TryGetByIdAsync(long trackId, CancellationToken cancellationToken = default);
-
     Task<TrackEntity?> TryGetByAliasAsync(string aliasKey, CancellationToken cancellationToken = default);
 
     Task<long> UpsertMetadataAsync(TrackEntity track, CancellationToken cancellationToken = default);
@@ -54,9 +52,6 @@ public sealed class TrackLibraryService : ITrackLibraryService
 
     public Task<TrackEntity?> TryGetAsync(string source, string externalId, CancellationToken cancellationToken = default)
         => _tracks.TryGetAsync(source, externalId, cancellationToken);
-
-    public Task<TrackEntity?> TryGetByIdAsync(long trackId, CancellationToken cancellationToken = default)
-        => _tracks.TryGetByIdAsync(trackId, cancellationToken);
 
     public Task<TrackEntity?> TryGetByAliasAsync(string aliasKey, CancellationToken cancellationToken = default)
         => _tracks.TryGetByAliasAsync(aliasKey, cancellationToken);

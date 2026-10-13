@@ -239,9 +239,6 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
         return string.IsNullOrWhiteSpace(raw) ? null : RedisJson.Deserialize<QueuedTrackPayload>(raw);
     }
 
-    public async Task<long> QueueLengthAsync(long clanId, long channelId, CancellationToken cancellationToken = default)
-        => await _redis.Db.ListLengthAsync(RedisKeyNames.Queue(clanId, channelId)).ConfigureAwait(false);
-
     public async Task<IReadOnlyList<QueuedTrackPayload>> SnapshotQueueAsync(
         long clanId,
         long channelId,
@@ -423,46 +420,6 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
                 new HashEntry("updated_at", now.ToString()),
             ]).ConfigureAwait(false);
         await TouchTtlAsync(clanId, channelId, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task<(long PositionMs, long DurationMs, bool Paused)> GetPositionAsync(
-        long clanId,
-        long channelId,
-        CancellationToken cancellationToken = default)
-    {
-        var fields = await _redis.Db.HashGetAsync(
-            RedisKeyNames.Player(clanId, channelId),
-            ["position_ms", "duration_ms", "paused"]).ConfigureAwait(false);
-        long.TryParse((string?)fields[0], out var pos);
-        long.TryParse((string?)fields[1], out var dur);
-        var paused = (string?)fields[2] is "1" or "true";
-        return (pos, dur, paused);
-    }
-
-    public async Task<long> EffectivePositionMsAsync(
-        long clanId,
-        long channelId,
-        CancellationToken cancellationToken = default)
-    {
-        var fields = await _redis.Db.HashGetAsync(
-            RedisKeyNames.Player(clanId, channelId),
-            ["position_ms", "position_epoch_ms", "duration_ms", "paused"]).ConfigureAwait(false);
-        long.TryParse((string?)fields[0], out var pos);
-        long.TryParse((string?)fields[1], out var epoch);
-        long.TryParse((string?)fields[2], out var dur);
-        var paused = (string?)fields[3] is "1" or "true";
-        long effective = pos;
-        if (!paused && epoch > 0)
-        {
-            effective = pos + (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - epoch);
-        }
-
-        if (dur > 0)
-        {
-            effective = Math.Clamp(effective, 0, dur);
-        }
-
-        return Math.Max(0, effective);
     }
 
     public async Task<AdvanceResult> TryAdvanceAsync(

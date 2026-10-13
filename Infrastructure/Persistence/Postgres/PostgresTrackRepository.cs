@@ -36,25 +36,6 @@ public sealed class PostgresTrackRepository : ITrackRepository
             : null;
     }
 
-    public async Task<TrackEntity?> TryGetByIdAsync(long trackId, CancellationToken cancellationToken = default)
-    {
-        await using var connection = await _db.DataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText =
-            """
-            SELECT id, source, external_id, title, webpage_url, thumbnail_url, duration_seconds, playable_url,
-                   playable_video_url, source_bytes, is_too_large
-            FROM tracks
-            WHERE id = @id
-            LIMIT 1;
-            """;
-        cmd.Parameters.AddWithValue("id", trackId);
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
-            ? ReadTrack(reader)
-            : null;
-    }
-
     public async Task<TrackEntity?> TryGetByAliasAsync(
         string aliasKey,
         CancellationToken cancellationToken = default)

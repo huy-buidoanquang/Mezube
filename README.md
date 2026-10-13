@@ -59,7 +59,6 @@ dotnet run --project Mezube.csproj
 | `Mezube:CdnBaseUrl` | Public CDN sau upload |
 | `Mezube:BotAvatarUrl` | Avatar bot — embed author + thumbnail fallback |
 | `Mezube:VizImageUrl` / `Mezube:VizPositionUrl` | Equalizer sprite + JSON cho `!np` |
-| `Mezube:TracksDbPath` | SQLite track library (mặc định `data/tracks.db`) |
 
 ### Preset gợi ý
 
