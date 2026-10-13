@@ -9,6 +9,8 @@ namespace Mezube.Media;
 
 public sealed class YtDlpProcessor
 {
+    internal const string AudioFormat = "bestaudio[acodec=opus]/bestaudio/best";
+
     private readonly BotOptions _options;
     private readonly ILogger<YtDlpProcessor> _logger;
     private readonly SemaphoreSlim _lookupGate = new(4);
@@ -21,18 +23,20 @@ public sealed class YtDlpProcessor
         _logger = logger;
     }
 
+    internal static string[] ResolveTrackArgs(string query) =>
+    [
+        "--no-playlist",
+        "--no-warnings",
+        "-J",
+        "--flat-playlist",
+        "-f",
+        AudioFormat,
+        LooksLikeUrl(query) ? query : $"ytsearch1:{query}",
+    ];
+
     public async Task<TrackInfoEntity?> ResolveTrackAsync(string query, string? requestedBy, CancellationToken cancellationToken = default)
     {
-        var input = LooksLikeUrl(query) ? query : $"ytsearch1:{query}";
-        var json = await RunAsync(
-            [
-                "--no-playlist",
-                "--no-warnings",
-                "-J",
-                "--flat-playlist",
-                input,
-            ],
-            cancellationToken).ConfigureAwait(false);
+        var json = await RunAsync(ResolveTrackArgs(query), cancellationToken).ConfigureAwait(false);
 
         if (string.IsNullOrWhiteSpace(json))
         {
@@ -185,7 +189,7 @@ public sealed class YtDlpProcessor
         return TrackIdentityHelper.SourceYoutube;
     }
 
-    private static TrackInfoEntity? ParseTrackElement(
+    internal static TrackInfoEntity? ParseTrackElement(
         JsonElement root,
         string fallbackQuery,
         string? requestedBy,
@@ -334,7 +338,7 @@ public sealed class YtDlpProcessor
         => DownloadAsync(
             source,
             outputPathWithoutExt,
-            "bestaudio[acodec=opus]/bestaudio/best",
+            AudioFormat,
             _options.MaxAudioBytes,
             mergeOutputFormat: null,
             cancellationToken);
