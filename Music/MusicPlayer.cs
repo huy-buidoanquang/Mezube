@@ -146,6 +146,11 @@ public sealed partial class MusicPlayer
                 return (null, PlayerMessageBuilder.Awkward());
             }
 
+            if (OtherClanChannelError(channel.ClanId, clanId) is { } otherClan)
+            {
+                return (null, otherClan);
+            }
+
             if (channel.Type == (int)ChannelType.Streaming)
             {
                 return (ToStreaming(clanId, id, channel.Name), null);
@@ -189,6 +194,11 @@ public sealed partial class MusicPlayer
                 return (null, PlayerMessageBuilder.Awkward());
             }
 
+            if (OtherClanChannelError(channel.ClanId, clanId) is { } otherClan)
+            {
+                return (null, otherClan);
+            }
+
             if (channel.Type != (int)ChannelType.Streaming)
             {
                 return (null, PlayerMessageBuilder.Error(
@@ -208,6 +218,13 @@ public sealed partial class MusicPlayer
     }
 
     private readonly record struct ResolvedPlayDestination(PlaybackTarget Target, PlaybackMode Mode);
+
+    internal static Mezon.Net.Client.MessageContent? OtherClanChannelError(long channelClanId, long clanId)
+        => channelClanId == clanId
+            ? null
+            : PlayerMessageBuilder.Error(
+                "Wrong clan",
+                "That channel belongs to another clan. Tag a #stream channel in this clan.");
 
     public async Task PlayStreamingAsync(
         ICommandContext ctx,
@@ -253,6 +270,12 @@ public sealed partial class MusicPlayer
         {
             _logger.LogWarning(ex, "GetChannelAsync failed for stream {ChannelId}", channelId);
             await ctx.ReplyAsync(PlayerMessageBuilder.Awkward()).ConfigureAwait(false);
+            return;
+        }
+
+        if (OtherClanChannelError(channel.ClanId, clanId) is { } otherClan)
+        {
+            await ctx.ReplyAsync(otherClan).ConfigureAwait(false);
             return;
         }
 
