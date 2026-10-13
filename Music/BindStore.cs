@@ -54,10 +54,14 @@ public sealed class BindStore
         return null;
     }
 
-    public void SetDefaultStreamChannel(long clanId, long streamChannelId)
+    public async Task SetDefaultStreamChannelAsync(
+        long clanId,
+        long streamChannelId,
+        CancellationToken cancellationToken = default)
     {
+        await _settings.UpsertDefaultStreamChannelAsync(clanId, streamChannelId, cancellationToken)
+            .ConfigureAwait(false);
         _defaultStreamByClan[clanId] = streamChannelId;
-        _ = _settings.UpsertDefaultStreamChannelAsync(clanId, streamChannelId);
     }
 
     public void SetUserVoiceChannel(long clanId, long userId, long voiceChannelId)
