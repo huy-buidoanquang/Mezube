@@ -68,11 +68,8 @@ internal static class Program
         }
 
         var redisMux = await RedisConnection.ConnectAsync(
-                options.Persistence.RedisConnectionString)
+                options.RedisConnectionString)
             .ConfigureAwait(false);
-        builder.Services.AddSingleton(options.Mezon);
-        builder.Services.AddSingleton(options.Media);
-        builder.Services.AddSingleton(options.Persistence);
         builder.Services.AddSingleton<IConnectionMultiplexer>(redisMux);
         builder.Services.AddSingleton<RedisConnection>(sp =>
             new RedisConnection(

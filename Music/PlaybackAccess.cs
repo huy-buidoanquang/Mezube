@@ -33,8 +33,6 @@ public sealed class PlaybackAccess
         _logger = logger;
     }
 
-    public bool CanQueue() => true;
-
     public Task<bool> IsCommandChannelAllowedAsync(
         long clanId,
         long channelId,

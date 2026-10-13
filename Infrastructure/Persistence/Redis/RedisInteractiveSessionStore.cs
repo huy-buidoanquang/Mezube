@@ -6,10 +6,8 @@ namespace Mezube.Infrastructure.Persistence.Redis;
 public interface IInteractiveSessionStore
 {
     Task SaveSearchPickAsync(long messageId, SearchPickSession session, CancellationToken cancellationToken = default);
-    Task<SearchPickSession?> TryGetSearchPickAsync(long messageId, CancellationToken cancellationToken = default);
     /// <summary>Atomically read+delete so only one click can claim the picker.</summary>
     Task<SearchPickSession?> TakeSearchPickAsync(long messageId, CancellationToken cancellationToken = default);
-    Task DeleteSearchPickAsync(long messageId, CancellationToken cancellationToken = default);
 
     Task SavePlaylistImportAsync(long messageId, PlaylistImportSession session, CancellationToken cancellationToken = default);
     Task<PlaylistImportSession?> TryGetPlaylistImportAsync(long messageId, CancellationToken cancellationToken = default);
@@ -29,14 +27,8 @@ public sealed class RedisInteractiveSessionStore : IInteractiveSessionStore
     public Task SaveSearchPickAsync(long messageId, SearchPickSession session, CancellationToken cancellationToken = default)
         => SetAsync(RedisKeyNames.SearchPick(messageId), session, RedisKeyNames.InteractiveSessionTtl);
 
-    public Task<SearchPickSession?> TryGetSearchPickAsync(long messageId, CancellationToken cancellationToken = default)
-        => GetAsync<SearchPickSession>(RedisKeyNames.SearchPick(messageId));
-
     public Task<SearchPickSession?> TakeSearchPickAsync(long messageId, CancellationToken cancellationToken = default)
         => TakeAsync<SearchPickSession>(RedisKeyNames.SearchPick(messageId));
-
-    public Task DeleteSearchPickAsync(long messageId, CancellationToken cancellationToken = default)
-        => _redis.Db.KeyDeleteAsync(RedisKeyNames.SearchPick(messageId));
 
     public Task SavePlaylistImportAsync(long messageId, PlaylistImportSession session, CancellationToken cancellationToken = default)
         => SetAsync(RedisKeyNames.PlaylistImport(messageId), session, RedisKeyNames.InteractiveSessionTtl);

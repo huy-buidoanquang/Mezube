@@ -127,12 +127,4 @@ public sealed class MusicQueue
             }
         }
     }
-
-    public void ClearCurrent()
-    {
-        lock (_gate)
-        {
-            CurrentItem = null;
-        }
-    }
 }

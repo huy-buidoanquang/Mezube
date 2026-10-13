@@ -48,8 +48,6 @@ public interface IClanPlayerStore
     /// <summary>LPOP pending into current_json when current is empty (pending-only queue).</summary>
     Task<QueuedTrackPayload?> EnsureCurrentAsync(long clanId, long channelId, CancellationToken cancellationToken = default);
 
-    Task<long> QueueLengthAsync(long clanId, long channelId, CancellationToken cancellationToken = default);
-
     Task<IReadOnlyList<QueuedTrackPayload>> SnapshotQueueAsync(long clanId, long channelId, CancellationToken cancellationToken = default);
 
     Task<QueuedTrackPayload?> GetCurrentAsync(long clanId, long channelId, CancellationToken cancellationToken = default);
@@ -69,10 +67,6 @@ public interface IClanPlayerStore
     Task<long?> GetPlayHistoryIdAsync(long clanId, long channelId, CancellationToken cancellationToken = default);
 
     Task SetPositionAsync(long clanId, long channelId, long positionMs, long durationMs, bool paused, CancellationToken cancellationToken = default);
-
-    Task<(long PositionMs, long DurationMs, bool Paused)> GetPositionAsync(long clanId, long channelId, CancellationToken cancellationToken = default);
-
-    Task<long> EffectivePositionMsAsync(long clanId, long channelId, CancellationToken cancellationToken = default);
 
     Task<AdvanceResult> TryAdvanceAsync(
         long clanId,

@@ -227,28 +227,6 @@ public sealed partial class MusicPlayer
         public static ControlOutcome Denied(Mezon.Net.Client.MessageContent content) => new(false, content);
     }
 
-    public Task<bool> SkipInternalAsync(long clanId, CancellationToken cancellationToken = default)
-    {
-        var kind = TryResolveControlSession(clanId, preferredChannelId: null, out var state);
-        if (kind != ControlSessionResolve.Found || state is null || (!state.IsPlaying && state.Queue.Count == 0))
-        {
-            return Task.FromResult(false);
-        }
-
-        return SkipStateAsync(state, state.Queue.CurrentItem, cancellationToken);
-    }
-
-    public async Task StopInternalAsync(long clanId, CancellationToken cancellationToken = default)
-    {
-        var kind = TryResolveControlSession(clanId, preferredChannelId: null, out var state);
-        if (kind != ControlSessionResolve.Found || state is null)
-        {
-            return;
-        }
-
-        await StopSessionAsync(state, cancellationToken).ConfigureAwait(false);
-    }
-
     private async Task StopSessionAsync(ClanPlaybackSession state, CancellationToken cancellationToken)
     {
         var clanId = state.ClanId ?? 0;
