@@ -213,6 +213,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
             throw new ArgumentException("An SFU track id is required.", nameof(trackId));
         }
 
+        DirectSfuConnection? connection;
         lock (_gate)
         {
             if (_stopped)
@@ -224,7 +225,14 @@ public sealed class SfuPublisherSession : IAsyncDisposable
             _trackCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token);
             _trackId = trackId;
             _trackEnded = NewSignal();
+            _paused = false;
+            connection = _connection;
             _ = StreamAudioAsync(trackId, media, _trackCts.Token);
+        }
+
+        if (connection is { IsConnected: true })
+        {
+            _ = SendMuteAfterConnectAsync(connection, CancellationToken.None);
         }
     }
 
@@ -259,6 +267,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
         {
             await SendJsonAsync(connection, new { type = "mute", is_mute = paused }, cancellationToken)
                 .ConfigureAwait(false);
+            connection.DeclaredMute = paused;
         }
     }
 
