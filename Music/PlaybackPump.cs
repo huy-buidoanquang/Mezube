@@ -404,7 +404,7 @@ public sealed partial class MusicPlayer
                     if (ShouldAdvanceAfterTrack(state.LastDestroyReason, _lifetime.ApplicationStopping.IsCancellationRequested)
                         && historyId is long hid)
                     {
-                        var skipLoop = endReason is PlayEndReason.Skip or PlayEndReason.VoteSkip
+                        var skipLoop = endReason is PlayEndReason.Skip
                             or PlayEndReason.Stop or PlayEndReason.Error or PlayEndReason.TooLarge;
                         var advanced = await TryAdvancePersistedAsync(
                                 clanId,

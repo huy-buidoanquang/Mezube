@@ -9,7 +9,6 @@ public static class RedisKeyNames
     public static string Player(long clanId, long channelId) => $"{Prefix}player:{clanId}:{channelId}";
     public static string Queue(long clanId, long channelId) => $"{Prefix}queue:{clanId}:{channelId}";
     public static string Voice(long clanId) => $"{Prefix}voice:{clanId}";
-    public static string VoteSkip(long clanId, long playHistoryId) => $"{Prefix}voteskip:{clanId}:{playHistoryId}";
     /// <summary>SET of <c>clanId:channelId</c> with an active player/queue (avoids KEYS scans on restore).</summary>
     public static string ActiveSessions => $"{Prefix}active_sessions";
 

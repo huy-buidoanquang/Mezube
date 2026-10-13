@@ -75,9 +75,6 @@ public sealed class SetDefaultStreamChannelTests
 
         public Task UpsertDjRoleIdAsync(long clanId, long? roleId, CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
-
-        public Task UpsertVoteSkipAsync(long clanId, bool enabled, float? ratio = null, CancellationToken cancellationToken = default)
-            => throw new NotSupportedException();
     }
 
     private sealed class NoVoiceBinds : IVoiceBindStore
@@ -89,9 +86,6 @@ public sealed class SetDefaultStreamChannelTests
             => throw new NotSupportedException();
 
         public Task<long?> TryGetUserVoiceChannelAsync(long clanId, long userId, CancellationToken cancellationToken = default)
-            => throw new NotSupportedException();
-
-        public Task<long> CountAsync(long clanId, CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
 
         public Task<IReadOnlyList<(long ClanId, long UserId, long ChannelId)>> SnapshotAllAsync(CancellationToken cancellationToken = default)

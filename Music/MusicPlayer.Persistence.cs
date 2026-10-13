@@ -157,7 +157,7 @@ public sealed partial class MusicPlayer
         }
     }
 
-    /// <summary>CAS advance used by skip / natural end / vote-skip. Returns false if stale.</summary>
+    /// <summary>CAS advance used by skip / natural end. Returns false if stale.</summary>
     private async Task<bool> TryAdvancePersistedAsync(
         long clanId,
         long channelId,

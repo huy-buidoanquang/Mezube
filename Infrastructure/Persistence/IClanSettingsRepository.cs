@@ -13,10 +13,4 @@ public interface IClanSettingsRepository
     Task UpsertDjRoleIdAsync(long clanId, long? roleId, CancellationToken cancellationToken = default);
 
     Task UpsertDefaultStreamChannelAsync(long clanId, long? channelId, CancellationToken cancellationToken = default);
-
-    Task UpsertVoteSkipAsync(
-        long clanId,
-        bool enabled,
-        float? ratio = null,
-        CancellationToken cancellationToken = default);
 }

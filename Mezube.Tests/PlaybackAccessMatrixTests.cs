@@ -66,8 +66,6 @@ public sealed class PlaybackAccessMatrixTests
         => new(
             new FakeClanSettings(djRoleId),
             null!,
-            null!,
-            null!,
             new FakeSnapshotStore(new RoleSnapshotDto { Id = DjRoleId, ClanId = ClanId, MemberIds = [DjId] }),
             new MezonSnapshotKeyFactory(new BotOptions { BotId = 42 }),
             NullLogger<PlaybackAccess>.Instance);
@@ -90,9 +88,6 @@ public sealed class PlaybackAccessMatrixTests
             => throw new NotSupportedException();
 
         public Task SetDefaultStreamChannelAsync(long clanId, long? channelId, CancellationToken cancellationToken = default)
-            => throw new NotSupportedException();
-
-        public Task SetVoteSkipAsync(long clanId, bool enabled, float? ratio = null, CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
     }
 

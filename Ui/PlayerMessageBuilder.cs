@@ -575,10 +575,10 @@ public static class PlayerMessageBuilder
                 isDjOrOwner
                     ? $"""
                       · {p}skip · {p}pause · {p}resume · {p}stop
-                      · {p}voteskip · {p}queue · {p}np · {p}loop
+                      · {p}queue · {p}np · {p}loop
                       """
                     : $"""
-                      · {p}voteskip · {p}queue · {p}np · {p}loop
+                      · {p}queue · {p}np · {p}loop
                       · {p}skip · {p}pause · {p}resume — your track only
                       """),
             (

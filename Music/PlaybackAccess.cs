@@ -4,20 +4,17 @@ using Mezube.Application;
 using Mezube.Infrastructure.Caching;
 using Mezube.Infrastructure.Caching.Snapshots;
 using Mezube.Infrastructure.Persistence;
-using Mezube.Infrastructure.Persistence.Redis;
 using Microsoft.Extensions.Logging;
 
 namespace Mezube.Music;
 
 /// <summary>
-/// JMusicBot-style DJ gate + vote-skip (evaluate on each new vote with live voice count).
+/// JMusicBot-style DJ gate.
 /// </summary>
 public sealed class PlaybackAccess
 {
     private readonly IClanSettingsService _settings;
     private readonly ICommandChannelRepository _commandChannels;
-    private readonly IVoteSkipStore _votes;
-    private readonly BindStore _binds;
     private readonly IEntitySnapshotStore _snapshots;
     private readonly MezonSnapshotKeyFactory _snapshotKeys;
     private readonly ILogger<PlaybackAccess> _logger;
@@ -25,16 +22,12 @@ public sealed class PlaybackAccess
     public PlaybackAccess(
         IClanSettingsService settings,
         ICommandChannelRepository commandChannels,
-        IVoteSkipStore votes,
-        BindStore binds,
         IEntitySnapshotStore snapshots,
         MezonSnapshotKeyFactory snapshotKeys,
         ILogger<PlaybackAccess> logger)
     {
         _settings = settings;
         _commandChannels = commandChannels;
-        _votes = votes;
-        _binds = binds;
         _snapshots = snapshots;
         _snapshotKeys = snapshotKeys;
         _logger = logger;
@@ -189,35 +182,6 @@ public sealed class PlaybackAccess
         {
             _logger.LogDebug(ex, "DJ role warm failed clan={ClanId} role={RoleId}", clanId, roleId);
         }
-    }
-
-    /// <summary>
-    /// Records a vote and returns whether the threshold is met (caller should Advance CAS).
-    /// </summary>
-    public async Task<(bool ThresholdMet, long Votes, long Needed, string? Error)> TryVoteSkipAsync(
-        long clanId,
-        long playHistoryId,
-        long userId,
-        long? playbackChannelId = null,
-        CancellationToken cancellationToken = default)
-    {
-        var settings = await _settings.TryGetAsync(clanId, cancellationToken).ConfigureAwait(false);
-        if (settings is null || !settings.VoteSkipEnabled)
-        {
-            return (false, 0, 0, "Vote-skip is disabled for this clan.");
-        }
-
-        var (votes, _) = await _votes.AddVoteAsync(clanId, playHistoryId, userId, cancellationToken)
-            .ConfigureAwait(false);
-        var liveCount = await _binds.CountVoiceUsersAsync(clanId, playbackChannelId, cancellationToken)
-            .ConfigureAwait(false);
-        if (liveCount < 1)
-        {
-            liveCount = 1;
-        }
-
-        var needed = Math.Max(1, (long)Math.Ceiling(liveCount * settings.VoteSkipRatio));
-        return (votes >= needed, votes, needed, null);
     }
 
     private async Task<bool> IsDjOrCreatorAsync(

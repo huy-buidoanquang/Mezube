@@ -17,8 +17,7 @@ public sealed class PostgresClanSettingsRepository : IClanSettingsRepository
         await using var cmd = connection.CreateCommand();
         cmd.CommandText =
             """
-            SELECT clan_id, owner_id, dj_role_id, default_stream_channel_id,
-                   vote_skip_enabled, vote_skip_ratio, updated_at
+            SELECT clan_id, owner_id, dj_role_id, default_stream_channel_id, updated_at
             FROM clan_settings
             WHERE clan_id = @clan_id
             LIMIT 1;
@@ -36,9 +35,7 @@ public sealed class PostgresClanSettingsRepository : IClanSettingsRepository
             OwnerId = reader.IsDBNull(1) ? null : reader.GetInt64(1),
             DjRoleId = reader.IsDBNull(2) ? null : NullIfZero(reader.GetInt64(2)),
             DefaultStreamChannelId = reader.IsDBNull(3) ? null : NullIfZero(reader.GetInt64(3)),
-            VoteSkipEnabled = reader.GetBoolean(4),
-            VoteSkipRatio = reader.GetFloat(5),
-            UpdatedAt = reader.GetFieldValue<DateTimeOffset>(6),
+            UpdatedAt = reader.GetFieldValue<DateTimeOffset>(4),
         };
     }
 
@@ -102,29 +99,6 @@ public sealed class PostgresClanSettingsRepository : IClanSettingsRepository
             """;
         cmd.Parameters.AddWithValue("clan_id", clanId);
         cmd.Parameters.AddWithValue("channel_id", (object?)channelId ?? DBNull.Value);
-        await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task UpsertVoteSkipAsync(
-        long clanId,
-        bool enabled,
-        float? ratio = null,
-        CancellationToken cancellationToken = default)
-    {
-        await using var connection = await _db.DataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText =
-            """
-            INSERT INTO clan_settings (clan_id, vote_skip_enabled, vote_skip_ratio, updated_at)
-            VALUES (@clan_id, @enabled, COALESCE(@ratio, 0.5), now())
-            ON CONFLICT (clan_id) DO UPDATE SET
-                vote_skip_enabled = EXCLUDED.vote_skip_enabled,
-                vote_skip_ratio = COALESCE(@ratio, clan_settings.vote_skip_ratio),
-                updated_at = now();
-            """;
-        cmd.Parameters.AddWithValue("clan_id", clanId);
-        cmd.Parameters.AddWithValue("enabled", enabled);
-        cmd.Parameters.AddWithValue("ratio", (object?)ratio ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
