@@ -149,7 +149,11 @@ public sealed partial class MusicPlayer
     /// Command CTs often cancel when the handler returns; pumps must outlive that.
     /// </summary>
     private void StartPump(ClanPlaybackSession state, long clanId)
-        => _ = PumpAsync(state, clanId, state.SessionToken);
+        => _ = PumpAsync(state, clanId, state.SessionToken).ContinueWith(
+            task => _logger.LogError(task.Exception, "Playback pump crashed clan={ClanId}", clanId),
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
 
     public void CancelAllSessions()
     {
@@ -194,8 +198,19 @@ public sealed partial class MusicPlayer
 
                     if (state.PlayingDefaultPlaylist)
                     {
-                        if (await TryEnqueueNextDefaultTrackAsync(state, clanId, CancellationToken.None)
-                                .ConfigureAwait(false))
+                        bool enqueued;
+                        try
+                        {
+                            enqueued = await TryEnqueueNextDefaultTrackAsync(state, clanId, CancellationToken.None)
+                                .ConfigureAwait(false);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "Default playlist refill failed clan={ClanId}", clanId);
+                            enqueued = false;
+                        }
+
+                        if (enqueued)
                         {
                             continue;
                         }
@@ -402,7 +417,8 @@ public sealed partial class MusicPlayer
                             && !skipLoop
                             && !item.IsFromDefault)
                         {
-                            var loop = await _playerStore.GetLoopModeAsync(clanId, SessionChannelId(state)).ConfigureAwait(false);
+                            var loop = await GetLoopModeOrOffAsync(_playerStore, _logger, clanId, SessionChannelId(state))
+                                .ConfigureAwait(false);
                             if (loop == LoopMode.Track)
                             {
                                 state.Queue.EnqueueFront(item);
@@ -1072,6 +1088,23 @@ public sealed partial class MusicPlayer
         bool trackEndedNaturally,
         PlayerDestroyReason destroyReason)
         => !trackEndedNaturally && destroyReason == PlayerDestroyReason.UserStop;
+
+    internal static async Task<LoopMode> GetLoopModeOrOffAsync(
+        IClanPlayerStore store,
+        ILogger logger,
+        long clanId,
+        long channelId)
+    {
+        try
+        {
+            return await store.GetLoopModeAsync(clanId, channelId).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Redis loop mode read failed clan={ClanId} channel={ChannelId}; treating as off", clanId, channelId);
+            return LoopMode.Off;
+        }
+    }
 
     private async Task NotifyStreamingUpNextAsync(
         ClanPlaybackSession state,
