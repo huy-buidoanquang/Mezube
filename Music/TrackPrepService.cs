@@ -9,13 +9,12 @@ using Microsoft.Extensions.Logging;
 namespace Mezube.Music;
 
 /// <summary>
-/// Background/cache-aware track preparation with a global concurrency gate and in-flight dedupe.
+/// Background/cache-aware track preparation with in-flight dedupe.
 /// </summary>
 public sealed class TrackPrepService
 {
     private readonly PlayableMediaProcessor _processor;
     private readonly ILogger<TrackPrepService> _logger;
-    private readonly MediaConcurrencyGate _gate;
     /// <summary>
     /// Lazy wraps the prep Task so ConcurrentDictionary.GetOrAdd cannot start ProcessTrackAsync
     /// twice under race (valueFactory may run more than once; Lazy.Value runs once).
@@ -25,12 +24,10 @@ public sealed class TrackPrepService
 
     public TrackPrepService(
         PlayableMediaProcessor processor,
-        MediaConcurrencyGate gate,
         ILogger<TrackPrepService> logger)
     {
         _processor = processor;
         _logger = logger;
-        _gate = gate;
     }
 
     public Task<TrackInfoEntity> EnsurePreparedAsync(
@@ -48,13 +45,13 @@ public sealed class TrackPrepService
         var key = BuildKey(kind, track);
         if (key is null)
         {
-            return RunGatedUngatedKeyAsync(client, track, kind, cancellationToken);
+            return RunUnkeyedAsync(client, track, kind, cancellationToken);
         }
 
         var lazy = _inflight.GetOrAdd(
             key,
             static (k, state) => new Lazy<Task<TrackInfoEntity>>(
-                () => state.self.RunGatedAsync(state.client, state.track, state.kind, k),
+                () => state.self.RunSharedAsync(state.client, state.track, state.kind, k),
                 LazyThreadSafetyMode.ExecutionAndPublication),
             (self: this, client, track, kind));
 
@@ -92,7 +89,7 @@ public sealed class TrackPrepService
         }, CancellationToken.None);
     }
 
-    private async Task<TrackInfoEntity> RunGatedAsync(
+    private async Task<TrackInfoEntity> RunSharedAsync(
         MezonClient client,
         TrackInfoEntity track,
         PreparedAssetKind kind,
@@ -100,7 +97,6 @@ public sealed class TrackPrepService
     {
         // Shared work must not use a per-caller CT: CancelTrack / PrepCts cancel would abort
         // shared work for every waiter. Callers still observe cancel via AwaitSharedAsync.
-        await _gate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         TrackInfoEntity prepared;
         try
         {
@@ -109,7 +105,6 @@ public sealed class TrackPrepService
         }
         finally
         {
-            _gate.Release();
             _inflight.TryRemove(key, out _);
         }
 
@@ -117,24 +112,14 @@ public sealed class TrackPrepService
         return prepared;
     }
 
-    private async Task<TrackInfoEntity> RunGatedUngatedKeyAsync(
+    private async Task<TrackInfoEntity> RunUnkeyedAsync(
         MezonClient client,
         TrackInfoEntity track,
         PreparedAssetKind kind,
         CancellationToken cancellationToken)
     {
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        TrackInfoEntity prepared;
-        try
-        {
-            prepared = await _processor.ProcessTrackAsync(client, track, kind, cancellationToken)
-                .ConfigureAwait(false);
-        }
-        finally
-        {
-            _gate.Release();
-        }
-
+        var prepared = await _processor.ProcessTrackAsync(client, track, kind, cancellationToken)
+            .ConfigureAwait(false);
         _processor.ScheduleCdnPersist(client, prepared, kind);
         return prepared;
     }
