@@ -369,6 +369,9 @@ public static class PlayerMessageBuilder
     public static MessageContent NothingPlaying()
         => Status("Nothing playing", [new("Queue", "Empty — drop something in with !play.")]);
 
+    public static MessageContent TrackAlreadyEnded()
+        => Status("Already ended", [new("Skip", "That track already finished, so nothing was skipped.")]);
+
     public static MessageContent TrackNotFound(string? hint = null)
         => Error(
             "No match",

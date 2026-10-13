@@ -209,6 +209,7 @@ public sealed partial class MusicPlayer
                     return;
                 }
 
+                state.LastDestroyReason = ClearStaleSkip(state.LastDestroyReason);
                 var track = item.Track;
                 var target = ClanSessionBinder.BoundTarget(state) ?? item.Target;
                 state.Target = target;

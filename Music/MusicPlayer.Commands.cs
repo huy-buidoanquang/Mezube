@@ -82,6 +82,7 @@ public sealed partial class MusicPlayer
             return;
         }
 
+        var voted = state.Queue.CurrentItem;
         var historyId = state.PlayHistoryId
             ?? await _playerStore.GetPlayHistoryIdAsync(clanId, SessionChannelId(state), cancellationToken)
                 .ConfigureAwait(false);
@@ -118,8 +119,12 @@ public sealed partial class MusicPlayer
             return;
         }
 
-        state.LastDestroyReason = PlayerDestroyReason.Skip;
-        await SkipStateAsync(state, cancellationToken).ConfigureAwait(false);
+        if (!await SkipStateAsync(state, voted, cancellationToken).ConfigureAwait(false))
+        {
+            await ctx.ReplyAsync(PlayerMessageBuilder.TrackAlreadyEnded()).ConfigureAwait(false);
+            return;
+        }
+
         await ctx.ReplyAsync(PlayerMessageBuilder.Ok(
                 "Skipping!",
                 [
