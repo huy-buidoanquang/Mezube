@@ -59,7 +59,6 @@ internal static class Program
         builder.Services.AddSingleton<ICommandChannelRepository, PostgresCommandChannelRepository>();
         builder.Services.AddSingleton<IPlayHistoryRepository, PostgresPlayHistoryRepository>();
         builder.Services.AddSingleton<IPlaylistRepository, PostgresPlaylistRepository>();
-        builder.Services.AddSingleton<ITrackLibraryService, TrackLibraryService>();
         builder.Services.AddSingleton<IClanSettingsService, ClanSettingsService>();
 
         if (string.IsNullOrWhiteSpace(options.RedisConnectionString))
