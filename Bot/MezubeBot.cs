@@ -420,6 +420,7 @@ public sealed class MezubeBot : BackgroundService
             if (!await client.LoginAsync(stoppingToken).ConfigureAwait(false))
             {
                 _logger.LogError("Login failed for bot {BotId}.", _options.BotId);
+                Environment.ExitCode = 1;
                 _lifetime.StopApplication();
                 return;
             }
@@ -427,6 +428,7 @@ public sealed class MezubeBot : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Login/initialize failed for bot {BotId}.", _options.BotId);
+            Environment.ExitCode = 1;
             _lifetime.StopApplication();
             return;
         }
