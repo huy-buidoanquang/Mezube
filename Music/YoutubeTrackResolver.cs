@@ -162,7 +162,7 @@ public sealed class YoutubeTrackResolver : ITrackResolver
                         IsTooLarge = resolved.IsTooLarge
                             || (existing?.IsTooLarge ?? false)
                             || (resolved.SourceBytes is long bytes
-                                && bytes > _options.MaxVideoBytes),
+                                && bytes > _options.MaxAudioBytes),
                     },
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -177,7 +177,7 @@ public sealed class YoutubeTrackResolver : ITrackResolver
                     .ConfigureAwait(false);
             }
 
-            if (resolved.SourceBytes is long overBytes && overBytes > _options.MaxVideoBytes)
+            if (resolved.SourceBytes is long overBytes && overBytes > _options.MaxAudioBytes)
             {
                 await _store.MarkTooLargeAsync(
                         TrackIdentityHelper.SourceYoutube,
@@ -231,7 +231,7 @@ public sealed class YoutubeTrackResolver : ITrackResolver
             try
             {
                 if (resolved.IsTooLarge
-                    || (resolved.SourceBytes is long b && b > _options.MaxVideoBytes))
+                    || (resolved.SourceBytes is long b && b > _options.MaxAudioBytes))
                 {
                     continue;
                 }
