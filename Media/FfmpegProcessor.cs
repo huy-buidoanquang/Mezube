@@ -168,6 +168,7 @@ public sealed class FfmpegProcessor
         if (result.ExitCode != 0 || !File.Exists(outputPath))
         {
             _logger.LogWarning("ffmpeg convert failed: {Stderr}", result.Stderr);
+            DownloadedMediaFiles.TryDelete(outputPath);
             return null;
         }
 
