@@ -108,7 +108,13 @@ public sealed class PipelineProcessor
             var convertStopwatch = Stopwatch.StartNew();
             var preparedPath = PreparedAudioCache.TryGetPath(_options.TempDir, track)
                                ?? PreparedAudioCache.NewFallbackPath(_options.TempDir);
-            var uploadPath = await EnsureOggAsync(downloaded, preparedPath, cancellationToken).ConfigureAwait(false);
+            var uploadPath = await EnsureOggAsync(
+                    _ffmpeg,
+                    downloaded,
+                    rawPath + ".normalized.ogg",
+                    preparedPath,
+                    cancellationToken)
+                .ConfigureAwait(false);
             var oggBytes = new FileInfo(uploadPath).Length;
             if (oggBytes > _options.MaxAudioBytes)
             {
@@ -235,16 +241,18 @@ public sealed class PipelineProcessor
         }
     }
 
-    private async Task<string> EnsureOggAsync(
+    internal static async Task<string> EnsureOggAsync(
+        FfmpegProcessor ffmpeg,
         string inputPath,
+        string workPath,
         string outputPath,
         CancellationToken cancellationToken)
     {
-        var oggPath = await _ffmpeg.PrepareSfuOggAsync(inputPath, outputPath, cancellationToken)
+        var oggPath = await ffmpeg.PrepareSfuOggAsync(inputPath, workPath, cancellationToken)
             .ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(oggPath) || !File.Exists(oggPath))
         {
-            if (!_ffmpeg.IsAvailable)
+            if (!ffmpeg.IsAvailable)
             {
                 throw new MediaPrepException(
                     "ffmpeg chưa có trên PATH — audio preparation needs an Ogg output. " +
@@ -254,7 +262,9 @@ public sealed class PipelineProcessor
             throw new MediaPrepException("ffmpeg convert → ogg thất bại; không upload a source container directly.");
         }
 
-        return oggPath;
+        Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+        File.Move(oggPath, outputPath, overwrite: true);
+        return outputPath;
     }
 
     internal static bool IsAudioOnlySource(TrackInfoEntity track)
