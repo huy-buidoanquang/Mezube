@@ -148,9 +148,41 @@ public sealed partial class MusicPlayer
                 "Something went wrong changing playback — try again."));
         }
 
+        if (paused)
+        {
+            var pausedChannelId = state.Target.ChannelId;
+            state.ScheduleIdleDestroy(ClanSessionBinder.IdleDisconnect, state.Generation, gen =>
+            {
+                if (ShouldStopPausedSession(gen, state.Generation, _streamingSink.IsPaused(pausedChannelId)))
+                {
+                    _ = StopPausedSessionAsync(state);
+                }
+            });
+        }
+        else
+        {
+            state.CancelIdleDestroy();
+        }
+
         return ControlOutcome.Ok(PlayerMessageBuilder.Ok(
             paused ? "Paused" : "Resumed",
             paused ? "Stream paused. Use !resume when you’re ready." : "Stream is playing again."));
+    }
+
+    internal static bool ShouldStopPausedSession(int scheduledGeneration, int currentGeneration, bool stillPaused)
+        => scheduledGeneration == currentGeneration && stillPaused;
+
+    private async Task StopPausedSessionAsync(ClanPlaybackSession state)
+    {
+        _logger.LogInformation("Stopping playback paused past the idle window clan={ClanId}", state.ClanId);
+        try
+        {
+            await StopSessionAsync(state, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Stop after pause timeout failed clan={ClanId}", state.ClanId);
+        }
     }
 
     private bool TryPickControlSession(
