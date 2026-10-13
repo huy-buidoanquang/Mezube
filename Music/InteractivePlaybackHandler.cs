@@ -456,6 +456,11 @@ public sealed partial class MusicPlayer
         PlaylistImportSession session,
         long messageId)
     {
+        if (await _sessions.TakePlaylistImportAsync(messageId, ctx.CancellationToken).ConfigureAwait(false) is null)
+        {
+            return;
+        }
+
         var selected = session.SelectedTokens
             .Select(t => session.Candidates.FirstOrDefault(c => c.Token == t))
             .Where(c => c is not null)
@@ -523,7 +528,6 @@ public sealed partial class MusicPlayer
             }
         }
 
-        await _sessions.DeletePlaylistImportAsync(messageId, ctx.CancellationToken).ConfigureAwait(false);
         await ctx.UpdateMessageAsync(PlayerMessageBuilder.PlaylistImportDone(session.PlaylistName, added))
             .ConfigureAwait(false);
 
