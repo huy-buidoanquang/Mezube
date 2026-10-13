@@ -109,16 +109,16 @@ public static class PlayerMessageBuilder
     {
         var fields = new List<MessageEmbedField>
         {
-            new("Channel", Escape(destination), inline: true),
+            new("Channel", destination, inline: true),
             new("Duration", track.DisplayDuration, inline: true),
             new("Source", FriendlySource(track.Source), inline: true),
             new("In queue", queueCount.ToString(), inline: true),
-            new("Next up", Escape(TruncateTitle(nextTitle)), inline: true),
+            new("Next up", TruncateTitle(nextTitle), inline: true),
         };
 
         if (!string.IsNullOrWhiteSpace(track.RequestedBy))
         {
-            fields.Add(new("Requested by", Escape(track.RequestedBy), inline: true));
+            fields.Add(new("Requested by", track.RequestedBy, inline: true));
         }
 
         if (includeMusicViz)
@@ -140,7 +140,7 @@ public static class PlayerMessageBuilder
 
         return Build(
             "Now playing",
-            Escape(track.Title),
+            track.Title,
             ColorPlaying,
             track.ThumbnailUrl,
             track.WebpageUrl,
@@ -177,12 +177,12 @@ public static class PlayerMessageBuilder
         };
         if (!string.IsNullOrWhiteSpace(channelLabel))
         {
-            fields.Add(new("Channel", Escape(FormatChannelMention(channelLabel)), inline: true));
+            fields.Add(new("Channel", FormatChannelMention(channelLabel), inline: true));
         }
 
         return Build(
             "Added to queue",
-            Escape(track.Title),
+            track.Title,
             ColorOk,
             track.ThumbnailUrl,
             track.WebpageUrl,
@@ -200,17 +200,17 @@ public static class PlayerMessageBuilder
         };
         if (!string.IsNullOrWhiteSpace(channelLabel))
         {
-            fields.Add(new("Channel", Escape(FormatChannelMention(channelLabel)), inline: true));
+            fields.Add(new("Channel", FormatChannelMention(channelLabel), inline: true));
         }
 
         if (!string.IsNullOrWhiteSpace(track.RequestedBy))
         {
-            fields.Add(new("Requested by", Escape(track.RequestedBy), inline: true));
+            fields.Add(new("Requested by", track.RequestedBy, inline: true));
         }
 
         return Build(
             "Up next",
-            Escape(track.Title),
+            track.Title,
             ColorInfo,
             track.ThumbnailUrl,
             track.WebpageUrl,
@@ -235,17 +235,17 @@ public static class PlayerMessageBuilder
         };
         if (current is not null)
         {
-            fields.Add(new("Now", Escape(current.Track.Title), inline: true));
+            fields.Add(new("Now", current.Track.Title, inline: true));
             fields.Add(new("Duration", current.Track.DisplayDuration, inline: true));
-            fields.Add(new("Channel", Escape(FormatChannelLabel(current.Target)), inline: true));
+            fields.Add(new("Channel", FormatChannelLabel(current.Target), inline: true));
         }
 
         for (var i = 0; i < upcoming.Count; i++)
         {
             var item = upcoming[i];
-            fields.Add(new($"#{i + 1}", Escape(item.Track.Title), inline: true));
+            fields.Add(new($"#{i + 1}", item.Track.Title, inline: true));
             fields.Add(new("Duration", item.Track.DisplayDuration, inline: true));
-            fields.Add(new("Channel", Escape(FormatChannelLabel(item.Target)), inline: true));
+            fields.Add(new("Channel", FormatChannelLabel(item.Target), inline: true));
         }
 
         return Build(
@@ -262,7 +262,7 @@ public static class PlayerMessageBuilder
     {
         var fields = new List<MessageEmbedField>
         {
-            new("Destination", Escape(destination), inline: true),
+            new("Destination", destination, inline: true),
         };
 
         return Build(
@@ -411,7 +411,7 @@ public static class PlayerMessageBuilder
         if (tracks.Count == 0)
         {
             return Status(
-                $"Playlist · {Escape(playlistName)}",
+                $"Playlist · {playlistName}",
                 [
                     new("Empty", "Add tracks with !playlist add, or import with !playlist create <name> <url>."),
                 ]);
@@ -422,15 +422,15 @@ public static class PlayerMessageBuilder
             new(
                 "About",
                 isDefault
-                    ? $"{Escape(playlistName)} · default · {totalCount} track(s)"
-                    : $"{Escape(playlistName)} · {totalCount} track(s)"),
+                    ? $"{playlistName} · default · {totalCount} track(s)"
+                    : $"{playlistName} · {totalCount} track(s)"),
         };
 
         for (var i = 0; i < tracks.Count; i++)
         {
             var t = tracks[i];
             var suffix = t.TooLarge ? " · skipped (too large)" : string.Empty;
-            fields.Add(new($"#{i + 1}", $"{Escape(t.Title)} ({t.Duration}){suffix}"));
+            fields.Add(new($"#{i + 1}", $"{t.Title} ({t.Duration}){suffix}"));
         }
 
         if (totalCount > previewCap)
@@ -470,7 +470,7 @@ public static class PlayerMessageBuilder
         => Ok(
             "Playing next",
             [
-                new("Track", Escape(trackTitle)),
+                new("Track", trackTitle),
                 new("Why", reason),
             ]);
 
@@ -491,7 +491,7 @@ public static class PlayerMessageBuilder
         => Ok(
             "Playlist updated",
             [
-                new("Playlist", Escape(playlistName)),
+                new("Playlist", playlistName),
                 new("Added", $"{added} track(s)"),
                 new("Next", "I’m preparing audio in the background — you’ll get a quiet ping when it’s ready."),
             ]);
@@ -505,7 +505,7 @@ public static class PlayerMessageBuilder
     {
         var fields = new List<MessageEmbedField>
         {
-            new("Playlist", Escape(playlistName)),
+            new("Playlist", playlistName),
             new("Ready", $"{ready}/{total}"),
         };
         if (failed > 0)
@@ -667,7 +667,7 @@ public static class PlayerMessageBuilder
         {
             CreateRadioEmbedField(
                 "Results",
-                $"Looking for “{Escape(query)}” — pick one, then tap Play selected.",
+                $"Looking for “{query}” — pick one, then tap Play selected.",
                 MezubeButtonId.RadioSearch,
                 options,
                 // Omit max_options: presence enables multi-select in Mezon client.
@@ -698,7 +698,7 @@ public static class PlayerMessageBuilder
             : string.Join(", ", session.SelectedTokens.Take(10).Select(t =>
             {
                 var c = session.Candidates.FirstOrDefault(x => x.Token == t);
-                return c is null ? t : Escape(c.Title);
+                return c is null ? t : c.Title;
             }));
 
         var fields = new List<MessageEmbedField>
@@ -739,7 +739,7 @@ public static class PlayerMessageBuilder
             style: (int)MessageButtonStyle.Danger);
 
         return Build(
-            $"Import · {Escape(session.PlaylistName)}",
+            $"Import · {session.PlaylistName}",
             string.Empty,
             ColorInfo,
             thumbnailUrl: pageItems.FirstOrDefault()?.ThumbnailUrl,
@@ -921,10 +921,6 @@ public static class PlayerMessageBuilder
         var json = System.Text.Encoding.UTF8.GetString(buffer.WrittenSpan);
         return MessageContent.Parse(json);
     }
-
-    private static string Escape(string value)
-        => value.Replace("\\", "\\\\", StringComparison.Ordinal)
-            .Replace("\"", "\\\"", StringComparison.Ordinal);
 
     private static MessageEmbedField? TryCreateMusicVizField()
     {
