@@ -60,17 +60,18 @@ public sealed partial class MusicPlayer
             return ControlOutcome.Denied(resolveError!);
         }
 
-        var requesterId = state.Queue.CurrentItem?.Track.RequestedByUserId;
+        var seen = state.Queue.CurrentItem;
+        var requesterId = seen?.Track.RequestedByUserId;
         if (!await _access.CanSkipAsync(client, clanId, userId, requesterId, cancellationToken).ConfigureAwait(false))
         {
             return ControlOutcome.Denied(PlayerMessageBuilder.NotAllowed(
                 "Only the person who queued this track, a DJ, or the clan owner can skip."));
         }
 
-        var skipped = await SkipStateAsync(state, cancellationToken).ConfigureAwait(false);
-        return ControlOutcome.Ok(skipped
-            ? PlayerMessageBuilder.Ok("Skipped", "On to the next track.")
-            : PlayerMessageBuilder.NothingPlaying());
+        var skipped = await SkipStateAsync(state, seen, cancellationToken).ConfigureAwait(false);
+        return skipped
+            ? ControlOutcome.Ok(PlayerMessageBuilder.Ok("Skipped", "On to the next track."))
+            : ControlOutcome.Denied(PlayerMessageBuilder.TrackAlreadyEnded());
     }
 
     public async Task<ControlOutcome> TryStopAsync(
@@ -202,7 +203,7 @@ public sealed partial class MusicPlayer
             return Task.FromResult(false);
         }
 
-        return SkipStateAsync(state, cancellationToken);
+        return SkipStateAsync(state, state.Queue.CurrentItem, cancellationToken);
     }
 
     public async Task StopInternalAsync(long clanId, CancellationToken cancellationToken = default)

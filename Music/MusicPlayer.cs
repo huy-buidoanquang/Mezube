@@ -546,8 +546,13 @@ public sealed partial class MusicPlayer
         }
     }
 
-    private Task<bool> SkipStateAsync(ClanPlaybackSession state, CancellationToken cancellationToken)
+    private Task<bool> SkipStateAsync(ClanPlaybackSession state, QueuedPlay? seen, CancellationToken cancellationToken)
     {
+        if (!IsSkipTarget(state.Queue, seen))
+        {
+            return Task.FromResult(false);
+        }
+
         // CancelTrack wakes the active pump (if any); it owns Stop + advance.
         // Only start a pump when nothing is driving the queue (idle with pending items).
         state.LastDestroyReason = PlayerDestroyReason.Skip;
@@ -560,6 +565,12 @@ public sealed partial class MusicPlayer
 
         return Task.FromResult(true);
     }
+
+    internal static bool IsSkipTarget(MusicQueue queue, QueuedPlay? seen)
+        => ReferenceEquals(queue.CurrentItem, seen);
+
+    internal static PlayerDestroyReason ClearStaleSkip(PlayerDestroyReason reason)
+        => reason == PlayerDestroyReason.Skip ? PlayerDestroyReason.None : reason;
 
     public async Task SetDjRoleAsync(ICommandContext ctx, CancellationToken cancellationToken = default)
     {
