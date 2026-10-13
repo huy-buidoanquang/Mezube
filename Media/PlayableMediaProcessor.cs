@@ -24,6 +24,7 @@ public sealed class PlayableMediaProcessor
     private readonly MezonCdnUploader _uploader;
     private readonly ITrackLibraryService _store;
     private readonly IMemoryCache _cache;
+    private readonly MediaConcurrencyGate _gate;
     private readonly ILogger<PlayableMediaProcessor> _logger;
     private readonly ConcurrentDictionary<string, byte> _cdnPersistInFlight = new(StringComparer.Ordinal);
 
@@ -33,6 +34,7 @@ public sealed class PlayableMediaProcessor
         MezonCdnUploader uploader,
         ITrackLibraryService store,
         IMemoryCache cache,
+        MediaConcurrencyGate gate,
         ILogger<PlayableMediaProcessor> logger)
     {
         _options = options;
@@ -40,6 +42,7 @@ public sealed class PlayableMediaProcessor
         _uploader = uploader;
         _store = store;
         _cache = cache;
+        _gate = gate;
         _logger = logger;
     }
 
@@ -183,7 +186,9 @@ public sealed class PlayableMediaProcessor
         PipelineResult prepared;
         try
         {
-            prepared = await _pipeline.RunPipelineAsync(client, track, kind, cancellationToken)
+            prepared = await _gate.RunAsync(
+                    () => _pipeline.RunPipelineAsync(client, track, kind, cancellationToken),
+                    cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (AudioTooLargeException ex)

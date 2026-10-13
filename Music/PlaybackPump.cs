@@ -257,6 +257,11 @@ public sealed partial class MusicPlayer
                         track.Title,
                         target.ChannelId,
                         playStopwatch.ElapsedMilliseconds);
+                    if (state.NotifyClient is { } prefetchClient && state.Queue.PeekNext() is { } upNext)
+                    {
+                        StartBackgroundPrep(prefetchClient, state, upNext);
+                    }
+
                     if (item.ReplyMessageId is long replyId)
                     {
                         state.ControlMessageId = replyId;
@@ -864,10 +869,9 @@ public sealed partial class MusicPlayer
                     StartBackgroundPrep(state.NotifyClient, state, currentPlay);
                 }
 
-                var snapshot = state.Queue.Snapshot();
-                for (var i = 0; i < snapshot.Count; i++)
+                if (state.Queue.PeekNext() is { } nextPlay)
                 {
-                    StartBackgroundPrep(state.NotifyClient, state, snapshot[i]);
+                    StartBackgroundPrep(state.NotifyClient, state, nextPlay);
                 }
             }
 

@@ -11,16 +11,14 @@ public sealed class YtDlpProcessor
 {
     private readonly BotOptions _options;
     private readonly ILogger<YtDlpProcessor> _logger;
-    private readonly MediaConcurrencyGate? _gate;
+    private readonly SemaphoreSlim _lookupGate = new(4);
 
     public YtDlpProcessor(
         BotOptions options,
-        ILogger<YtDlpProcessor> logger,
-        MediaConcurrencyGate? gate = null)
+        ILogger<YtDlpProcessor> logger)
     {
         _options = options;
         _logger = logger;
-        _gate = gate;
     }
 
     public async Task<TrackInfoEntity?> ResolveTrackAsync(string query, string? requestedBy, CancellationToken cancellationToken = default)
@@ -482,9 +480,9 @@ public sealed class YtDlpProcessor
             ? ChildProcessRunner.DefaultDownloadTimeout
             : ChildProcessRunner.DefaultMetadataTimeout;
 
-        if (occupyGate && _gate is not null)
+        if (occupyGate)
         {
-            await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            await _lookupGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
 
         try
@@ -537,7 +535,7 @@ public sealed class YtDlpProcessor
         {
             if (occupyGate)
             {
-                _gate?.Release();
+                _lookupGate.Release();
             }
         }
 

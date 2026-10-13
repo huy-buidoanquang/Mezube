@@ -121,7 +121,11 @@ public sealed class PlayEnqueueService
                             .ConfigureAwait(false);
                     }
 
-                    StartBackgroundPrep(client, state, play, OnPrepError(state, play, onTooLarge));
+                    if (IsNextUp(state.Queue, play))
+                    {
+                        StartBackgroundPrep(client, state, play, OnPrepError(state, play, onTooLarge));
+                    }
+
                     added++;
                 }
 
@@ -173,7 +177,11 @@ public sealed class PlayEnqueueService
                 state.Queue.Enqueue(play);
                 await PersistEnqueueAsync(play, modeKey, front: false, cancellationToken)
                     .ConfigureAwait(false);
-                StartBackgroundPrep(client, state, play, OnPrepError(state, play, onTooLarge));
+                if (IsNextUp(state.Queue, play))
+                {
+                    StartBackgroundPrep(client, state, play, OnPrepError(state, play, onTooLarge));
+                }
+
                 startedAdded++;
             }
 
@@ -254,6 +262,9 @@ public sealed class PlayEnqueueService
         // item that can reach the playback pump.
         _prep.StartBackgroundPrep(client, play.Track, PreparedAssetKind.Audio, ct, onError);
     }
+
+    internal static bool IsNextUp(MusicQueue queue, QueuedPlay play)
+        => ReferenceEquals(queue.PeekNext(), play);
 
     private static Action<Exception>? OnPrepError(
         ClanPlaybackSession state,
