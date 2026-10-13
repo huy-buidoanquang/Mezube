@@ -1,3 +1,4 @@
+using Mezube.Bot;
 using Mezube.Media;
 using Mezube.Music;
 using Mezube.Sfu;
@@ -11,8 +12,11 @@ namespace Mezube;
 /// <summary>Async media teardown on host stop (replaces sync GetAwaiter().GetResult() on ApplicationStopping).</summary>
 public sealed class MediaCleanupHostedService : IHostedService
 {
+    private static readonly TimeSpan PreparedMaxAge = TimeSpan.FromDays(7);
+
     private readonly IServiceProvider _services;
     private readonly ILogger<MediaCleanupHostedService> _logger;
+    private readonly CancellationTokenSource _stopping = new();
 
     public MediaCleanupHostedService(IServiceProvider services, ILogger<MediaCleanupHostedService> logger)
     {
@@ -20,10 +24,16 @@ public sealed class MediaCleanupHostedService : IHostedService
         _logger = logger;
     }
 
-    public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task StartAsync(CancellationToken cancellationToken)
+    {
+        _ = SweepTempDirAsync(_services.GetRequiredService<BotOptions>().TempDir, _stopping.Token);
+        return Task.CompletedTask;
+    }
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
+        _stopping.Cancel();
+
         try
         {
             _logger.LogDebug("Cancelling playback pumps during host shutdown");
@@ -51,6 +61,50 @@ public sealed class MediaCleanupHostedService : IHostedService
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Redis multiplexer dispose ignored");
+        }
+    }
+
+    private static void DeleteFilesWrittenBefore(string dir, string pattern, DateTime cutoffUtc)
+    {
+        if (!Directory.Exists(dir))
+        {
+            return;
+        }
+
+        foreach (var file in Directory.EnumerateFiles(dir, pattern))
+        {
+            if (File.GetLastWriteTimeUtc(file) < cutoffUtc)
+            {
+                DownloadedMediaFiles.TryDelete(file);
+            }
+        }
+    }
+
+    private async Task SweepTempDirAsync(string tempDir, CancellationToken cancellationToken)
+    {
+        var startedUtc = DateTime.UtcNow;
+        using var timer = new PeriodicTimer(TimeSpan.FromHours(1));
+        try
+        {
+            do
+            {
+                try
+                {
+                    DeleteFilesWrittenBefore(tempDir, "mezube_*", startedUtc);
+                    DeleteFilesWrittenBefore(
+                        Path.Combine(tempDir, PreparedAudioCache.FolderName),
+                        "*",
+                        DateTime.UtcNow - PreparedMaxAge);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    _logger.LogWarning(ex, "Temp dir sweep failed");
+                }
+            }
+            while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false));
+        }
+        catch (OperationCanceledException)
+        {
         }
     }
 }
