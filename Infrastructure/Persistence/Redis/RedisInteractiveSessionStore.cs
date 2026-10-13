@@ -13,6 +13,7 @@ public interface IInteractiveSessionStore
 
     Task SavePlaylistImportAsync(long messageId, PlaylistImportSession session, CancellationToken cancellationToken = default);
     Task<PlaylistImportSession?> TryGetPlaylistImportAsync(long messageId, CancellationToken cancellationToken = default);
+    Task<PlaylistImportSession?> TakePlaylistImportAsync(long messageId, CancellationToken cancellationToken = default);
     Task DeletePlaylistImportAsync(long messageId, CancellationToken cancellationToken = default);
 }
 
@@ -42,6 +43,9 @@ public sealed class RedisInteractiveSessionStore : IInteractiveSessionStore
 
     public Task<PlaylistImportSession?> TryGetPlaylistImportAsync(long messageId, CancellationToken cancellationToken = default)
         => GetAsync<PlaylistImportSession>(RedisKeyNames.PlaylistImport(messageId));
+
+    public Task<PlaylistImportSession?> TakePlaylistImportAsync(long messageId, CancellationToken cancellationToken = default)
+        => TakeAsync<PlaylistImportSession>(RedisKeyNames.PlaylistImport(messageId));
 
     public Task DeletePlaylistImportAsync(long messageId, CancellationToken cancellationToken = default)
         => _redis.Db.KeyDeleteAsync(RedisKeyNames.PlaylistImport(messageId));
