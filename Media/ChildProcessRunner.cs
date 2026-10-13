@@ -14,7 +14,6 @@ public static class ChildProcessRunner
     public static readonly TimeSpan DefaultDownloadTimeout = TimeSpan.FromMinutes(15);
     public static readonly TimeSpan DefaultTranscodeTimeout = TimeSpan.FromMinutes(10);
     public static readonly TimeSpan DefaultVideoTranscodeTimeout = TimeSpan.FromMinutes(20);
-    public static readonly TimeSpan DefaultProbeTimeout = TimeSpan.FromSeconds(3);
 
     public static async Task<ChildProcessResult> RunAsync(
         ProcessStartInfo psi,

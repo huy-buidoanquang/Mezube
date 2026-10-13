@@ -51,7 +51,7 @@ public sealed class BotOptions
     /// </summary>
     public string YtDlpPlayerClients { get; set; } = "android,web,mweb";
     /// <summary>
-    /// JS runtime name for n-sig (<c>deno</c>, <c>node</c>, <c>bun</c>, <c>quickjs</c>). Empty = auto (deno, then node).
+    /// JS runtime name for n-sig (<c>deno</c>, <c>node</c>, <c>bun</c>, <c>quickjs</c>). Empty or <c>none</c> = yt-dlp default.
     /// </summary>
     public string YtDlpJsRuntime { get; set; } = "deno";
     /// <summary>Optional absolute path to the JS runtime binary (appended as <c>runtime:path</c>).</summary>
