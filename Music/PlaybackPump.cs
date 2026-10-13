@@ -400,7 +400,8 @@ public sealed partial class MusicPlayer
                         PlayerDestroyReason.Seek => PlayEndReason.Completed,
                         _ => PlayEndReason.Completed,
                     };
-                    if (!wasSeek && historyId is long hid)
+                    if (ShouldAdvanceAfterTrack(state.LastDestroyReason, _lifetime.ApplicationStopping.IsCancellationRequested)
+                        && historyId is long hid)
                     {
                         var skipLoop = endReason is PlayEndReason.Skip or PlayEndReason.VoteSkip
                             or PlayEndReason.Stop or PlayEndReason.Error or PlayEndReason.TooLarge;
@@ -1083,6 +1084,9 @@ public sealed partial class MusicPlayer
             track.Title,
             target.ChannelId);
     }
+
+    internal static bool ShouldAdvanceAfterTrack(PlayerDestroyReason destroyReason, bool shuttingDown)
+        => destroyReason != PlayerDestroyReason.Seek && !shuttingDown;
 
     internal static bool ShouldStopSfuAfterTrack(
         bool trackEndedNaturally,
