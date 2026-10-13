@@ -202,8 +202,10 @@ public sealed partial class MusicPlayer
                         return;
                     }
 
-                    var name = ctx.Args[1];
-                    var query = ChannelTargetParser.BuildQuery(ctx.Args.Skip(2));
+                    var rest = ctx.Args.Skip(1).ToList();
+                    var lists = await _playlists.ListAsync(clanId, cancellationToken).ConfigureAwait(false);
+                    var (pl, nameArgCount) = MatchLeadingPlaylistName(rest, lists);
+                    var query = ChannelTargetParser.BuildQuery(rest.Skip(nameArgCount));
                     if (string.IsNullOrWhiteSpace(query))
                     {
                         await ctx.ReplyAsync(PlayerMessageBuilder.Error(
@@ -212,12 +214,11 @@ public sealed partial class MusicPlayer
                             .ConfigureAwait(false);
                         return;
                     }
-                    var pl = await _playlists.TryGetByNameAsync(clanId, name, cancellationToken).ConfigureAwait(false);
                     if (pl is null)
                     {
                         await ctx.ReplyAsync(PlayerMessageBuilder.Error(
                                 "Playlist not found",
-                                $"I couldn’t find “{name}”."))
+                                $"I couldn’t find a playlist at the start of “{string.Join(' ', rest)}”."))
                             .ConfigureAwait(false);
                         return;
                     }
@@ -392,6 +393,23 @@ public sealed partial class MusicPlayer
 
     internal static bool CanDeletePlaylist(long? createdBy, long userId, bool isDjOrOwner)
         => isDjOrOwner || createdBy == userId;
+
+    internal static (PlaylistEntity? Playlist, int NameArgCount) MatchLeadingPlaylistName(
+        IReadOnlyList<string> args,
+        IReadOnlyList<PlaylistEntity> playlists)
+    {
+        for (var count = args.Count - 1; count >= 1; count--)
+        {
+            var name = string.Join(' ', args.Take(count)).Trim().ToLowerInvariant();
+            var match = playlists.FirstOrDefault(p => p.Name.ToLowerInvariant() == name);
+            if (match is not null)
+            {
+                return (match, count);
+            }
+        }
+
+        return (null, 0);
+    }
 
     private async Task PlaylistDefaultAsync(ICommandContext ctx, long clanId, CancellationToken cancellationToken)
     {
