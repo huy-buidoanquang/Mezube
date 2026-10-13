@@ -1144,7 +1144,7 @@ public sealed partial class MusicPlayer
         }
     }
 
-    private static bool IsMediaPrepFailure(Exception ex)
+    internal static bool IsMediaPrepFailure(Exception ex)
     {
         for (var cur = ex; cur is not null; cur = cur.InnerException)
         {
@@ -1158,9 +1158,7 @@ public sealed partial class MusicPlayer
                 || msg.Contains("yt-dlp", StringComparison.OrdinalIgnoreCase)
                 || msg.Contains("download returned no file", StringComparison.OrdinalIgnoreCase)
                 || msg.Contains("HTTP Error 403", StringComparison.OrdinalIgnoreCase)
-                || msg.Contains("HTTP Error 404", StringComparison.OrdinalIgnoreCase)
-                || msg.Contains("requires .ogg/.opus", StringComparison.OrdinalIgnoreCase)
-                || msg.Contains("Playable CDN", StringComparison.OrdinalIgnoreCase))
+                || msg.Contains("HTTP Error 404", StringComparison.OrdinalIgnoreCase))
             {
                 return true;
             }
@@ -1169,7 +1167,7 @@ public sealed partial class MusicPlayer
         return false;
     }
 
-    private static bool IsSfuInfrastructureFailure(Exception ex)
+    internal static bool IsSfuInfrastructureFailure(Exception ex)
     {
         var msg = ex.Message;
         return msg.Contains("SFU", StringComparison.OrdinalIgnoreCase)
