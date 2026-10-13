@@ -16,7 +16,7 @@ public sealed class BotOptions
 
     public long BotId { get; set; }
     public string Token { get; set; } = string.Empty;
-    /// <summary>Gateway Basic-Auth server key (dev: defaultkey, prod: HTTP3m3zonPr0dkey).</summary>
+    /// <summary>Gateway Basic-Auth server key.</summary>
     public string ServerKey { get; set; } = string.Empty;
     public string Host { get; set; } = string.Empty;
     public string Port { get; set; } = string.Empty;

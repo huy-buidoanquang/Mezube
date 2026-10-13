@@ -44,7 +44,7 @@ dotnet run --project Mezube.csproj
 | Key | Mô tả |
 |-----|--------|
 | `Mezon:BotId` / `Mezon:Token` | Bot credentials |
-| `Mezon:ServerKey` | Gateway Basic-Auth — Dev `defaultkey`, Prod `HTTP3m3zonPr0dkey` |
+| `Mezon:ServerKey` | Gateway Basic-Auth key |
 | `Mezon:Host` / `Mezon:Port` | Dev `dev-mezon.nccsoft.vn:8088`, Prod `gw.mezon.ai:443` |
 | `Mezube:SfuWebSocketUrl` | SFU signaling endpoint `ws://` hoặc `wss://`; bắt buộc cấu hình khi deploy |
 | `Mezube:SfuConnectTimeoutMs` | Timeout kết nối WebSocket/WebRTC publisher |
