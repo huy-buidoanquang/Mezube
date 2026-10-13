@@ -1,4 +1,5 @@
 using Mezon.Net.Client;
+using Mezon.Net.Core;
 using Mezon.Net.Sdk.Commands;
 using Mezube.Domain.Entities;
 using Mezube.Helpers;
@@ -370,6 +371,9 @@ public sealed partial class MusicPlayer
         }
     }
 
+    internal static bool IsClanStreamChannel(int channelType, long channelClanId, long clanId)
+        => channelType == (int)ChannelType.Streaming && channelClanId == clanId;
+
     private async Task PlaylistDefaultAsync(ICommandContext ctx, long clanId, CancellationToken cancellationToken)
     {
         if (ctx.Args.Count < 2)
@@ -391,7 +395,7 @@ public sealed partial class MusicPlayer
             return;
         }
 
-        var nameOrNone = string.Join(' ', ctx.Args.Skip(1)).Trim();
+        var nameOrNone = ChannelTargetParser.BuildQuery(ctx.Args.Skip(1));
         if (nameOrNone.Equals("none", StringComparison.OrdinalIgnoreCase)
             || nameOrNone.Equals("clear", StringComparison.OrdinalIgnoreCase)
             || nameOrNone.Equals("off", StringComparison.OrdinalIgnoreCase))
@@ -447,13 +451,41 @@ public sealed partial class MusicPlayer
             return;
         }
 
+        var pickedStreamId = ChannelTargetParser.TryGetHashtagChannelId(ctx)
+            ?? (ctx.Channel.Type == (int)ChannelType.Streaming ? ctx.Channel.Id : null);
+        if (pickedStreamId is long picked)
+        {
+            Mezon.Net.Sdk.Entities.Channel channel;
+            try
+            {
+                channel = await ctx.Client.GetChannelAsync(picked, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "GetChannelAsync failed for default stream {ChannelId}", picked);
+                await ctx.ReplyAsync(PlayerMessageBuilder.Awkward()).ConfigureAwait(false);
+                return;
+            }
+
+            if (!IsClanStreamChannel(channel.Type, channel.ClanId, clanId))
+            {
+                await ctx.ReplyAsync(PlayerMessageBuilder.Error(
+                        "Not a stream channel",
+                        $"{PlayerMessageBuilder.FormatChannelMention(channel.Name, picked)} isn’t a streaming channel in this clan."))
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            await _binds.SetDefaultStreamChannelAsync(clanId, picked, cancellationToken).ConfigureAwait(false);
+        }
+
         var streamId = await _binds.TryGetDefaultStreamChannelAsync(clanId, cancellationToken)
             .ConfigureAwait(false);
         if (streamId is null)
         {
             await ctx.ReplyAsync(PlayerMessageBuilder.Error(
                     "Need a stream channel",
-                    "Pick a default stream channel first, then enable default playlist autoplay."))
+                    $"Run this in a #stream channel or tag one: {_options.CommandPrefix}playlist default #stream <name>"))
                 .ConfigureAwait(false);
             return;
         }
