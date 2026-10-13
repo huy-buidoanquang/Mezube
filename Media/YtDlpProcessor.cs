@@ -340,34 +340,13 @@ public sealed class YtDlpProcessor
             outputPathWithoutExt,
             AudioFormat,
             _options.MaxAudioBytes,
-            mergeOutputFormat: null,
             cancellationToken);
-
-    public Task<string?> DownloadTrackVideoAsync(
-        string source,
-        string outputPathWithoutExt,
-        CancellationToken cancellationToken = default)
-    {
-        var height = Math.Clamp(_options.PreparedVideoHeight, 360, 1080);
-        var format =
-            $"bestvideo[height<={height}][vcodec!=none]+bestaudio[acodec!=none]/"
-            + $"bestvideo[height<={height}]+bestaudio/"
-            + $"best[height<={height}]/best";
-        return DownloadAsync(
-            source,
-            outputPathWithoutExt,
-            format,
-            _options.MaxVideoBytes,
-            mergeOutputFormat: "mkv",
-            cancellationToken);
-    }
 
     private async Task<string?> DownloadAsync(
         string source,
         string outputPathWithoutExt,
         string format,
         long maxBytes,
-        string? mergeOutputFormat,
         CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(outputPathWithoutExt) ?? _options.TempDir);
@@ -411,11 +390,6 @@ public sealed class YtDlpProcessor
                 "-o",
                 template,
             };
-            if (!string.IsNullOrWhiteSpace(mergeOutputFormat))
-            {
-                downloadArgs.Add("--merge-output-format");
-                downloadArgs.Add(mergeOutputFormat);
-            }
 
             downloadArgs.Add(source);
             if (!string.IsNullOrWhiteSpace(_options.FfmpegPath))

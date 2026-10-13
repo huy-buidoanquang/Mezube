@@ -131,34 +131,6 @@ public sealed class PostgresTrackRepository : ITrackRepository
         await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task SetPlayableVideoUrlAsync(
-        string source,
-        string externalId,
-        string playableVideoUrl,
-        CancellationToken cancellationToken = default)
-    {
-        var prepared = PlayableUrlHelper.NullIfNotVideo(playableVideoUrl)
-            ?? throw new ArgumentException(
-                "playable_video_url must be a prepared CDN .webm URL.",
-                nameof(playableVideoUrl));
-
-        await using var connection = await _db.DataSource.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText =
-            """
-            INSERT INTO tracks (source, external_id, title, playable_video_url, is_too_large, created_at, updated_at)
-            VALUES (@source, @external_id, @title, @playable_video_url, FALSE, now(), now())
-            ON CONFLICT (source, external_id) DO UPDATE SET
-                playable_video_url = EXCLUDED.playable_video_url,
-                updated_at = now();
-            """;
-        cmd.Parameters.AddWithValue("source", source);
-        cmd.Parameters.AddWithValue("external_id", externalId);
-        cmd.Parameters.AddWithValue("title", externalId);
-        cmd.Parameters.AddWithValue("playable_video_url", prepared);
-        await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-    }
-
     public async Task SetAliasAsync(
         string aliasKey,
         string source,
