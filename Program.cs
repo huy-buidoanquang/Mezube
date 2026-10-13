@@ -96,7 +96,6 @@ internal static class Program
 
         builder.Services.AddSingleton<IClanPlayerStore, RedisClanPlayerStore>();
         builder.Services.AddSingleton<IVoiceBindStore, RedisVoiceBindStore>();
-        builder.Services.AddSingleton<IVoteSkipStore, RedisVoteSkipStore>();
         builder.Services.AddSingleton<IInteractiveSessionStore, RedisInteractiveSessionStore>();
 
         builder.Services.AddSingleton<PlayableMediaProcessor>();

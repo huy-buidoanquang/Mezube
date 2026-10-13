@@ -102,36 +102,4 @@ public sealed class BindStore
             _voiceByClanUser[(clanId, userId)] = (channelId, DateTime.UtcNow.Ticks);
         }
     }
-
-    public Task<long> CountVoiceUsersAsync(long clanId, CancellationToken cancellationToken = default)
-        => CountVoiceUsersAsync(clanId, playbackChannelId: null, cancellationToken);
-
-    public Task<long> CountVoiceUsersAsync(
-        long clanId,
-        long? playbackChannelId,
-        CancellationToken cancellationToken = default)
-    {
-        PruneExpiredVoice();
-        var local = _voiceByClanUser.Count(k =>
-            k.Key.ClanId == clanId
-            && (playbackChannelId is null || k.Value.ChannelId == playbackChannelId.Value));
-        if (local > 0)
-        {
-            return Task.FromResult((long)local);
-        }
-
-        return _voice.CountAsync(clanId, cancellationToken);
-    }
-
-    private void PruneExpiredVoice()
-    {
-        var cutoff = DateTime.UtcNow.Ticks - VoiceL1Ttl.Ticks;
-        foreach (var (key, value) in _voiceByClanUser)
-        {
-            if (value.Ticks < cutoff)
-            {
-                _voiceByClanUser.TryRemove(key, out _);
-            }
-        }
-    }
 }

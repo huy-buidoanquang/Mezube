@@ -22,7 +22,6 @@ public sealed class MusicCommandModule
     {
         commands.AddCommand("play", HandlePlayAsync).WithAlias("p");
         commands.AddCommand("skip", ctx => _player.SkipAsync(ctx, ctx.CancellationToken)).WithAlias("sk");
-        commands.AddCommand("voteskip", ctx => _player.VoteSkipAsync(ctx, ctx.CancellationToken)).WithAlias("vskip");
         commands.AddCommand("stop", ctx => _player.StopAsync(ctx, ctx.CancellationToken)).WithAlias("st");
         commands.AddCommand("pause", ctx => _player.PauseAsync(ctx, ctx.CancellationToken));
         commands.AddCommand("resume", ctx => _player.ResumeAsync(ctx, ctx.CancellationToken)).WithAlias("unpause");

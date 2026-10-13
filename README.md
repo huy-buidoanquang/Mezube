@@ -94,7 +94,7 @@ Khi bot đang chạy và được invite vào clan mới, SDK `ClanJoined` kích
 
 ### DJ permissions
 
-Mô hình kiểu JMusicBot (chưa có vote-skip):
+Mô hình kiểu JMusicBot:
 
 | | Everyone | Track requester | DJ role / clan owner |
 |--|--|--|--|

@@ -4,24 +4,19 @@ namespace Mezube.Infrastructure.Persistence.Redis;
 
 public sealed class RedisClanPlayerStore : IClanPlayerStore
 {
-    // KEYS[1]=player KEYS[2]=queue KEYS[3]=voteskip pattern base not used — vote key passed as ARGV
-    // ARGV[1]=expected_play_history_id ARGV[2]=skip_loop (0/1) ARGV[3]=vote_key ARGV[4]=ttl_seconds
+    // KEYS[1]=player KEYS[2]=queue
+    // ARGV[1]=expected_play_history_id ARGV[2]=skip_loop (0/1) ARGV[3]=ttl_seconds
     private const string AdvanceLua =
         """
         local player = KEYS[1]
         local queue = KEYS[2]
         local expected = ARGV[1]
         local skip_loop = ARGV[2]
-        local vote_key = ARGV[3]
-        local ttl = tonumber(ARGV[4])
+        local ttl = tonumber(ARGV[3])
 
         local current_id = redis.call('HGET', player, 'play_history_id')
         if (not current_id) or (current_id ~= expected) then
           return cjson.encode({ok=false, reason='stale'})
-        end
-
-        if vote_key and vote_key ~= '' then
-          redis.call('DEL', vote_key)
         end
 
         local loop_mode = redis.call('HGET', player, 'loop_mode') or 'off'
@@ -477,7 +472,6 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
         bool skipLoop,
         CancellationToken cancellationToken = default)
     {
-        var voteKey = RedisKeyNames.VoteSkip(clanId, expectedPlayHistoryId);
         var raw = (string?)await _redis.Db.ScriptEvaluateAsync(
             AdvanceLua,
             [
@@ -487,7 +481,6 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
             [
                 expectedPlayHistoryId.ToString(),
                 skipLoop ? "1" : "0",
-                voteKey,
                 ((int)RedisKeyNames.PlayerTtl.TotalSeconds).ToString(),
             ]).ConfigureAwait(false);
 
@@ -528,18 +521,12 @@ public sealed class RedisClanPlayerStore : IClanPlayerStore
 
     public async Task ClearSessionAsync(long clanId, long channelId, CancellationToken cancellationToken = default)
     {
-        var historyId = await GetPlayHistoryIdAsync(clanId, channelId, cancellationToken).ConfigureAwait(false);
         var db = _redis.Db;
         var keys = new List<RedisKey>
         {
             RedisKeyNames.Player(clanId, channelId),
             RedisKeyNames.Queue(clanId, channelId),
         };
-        if (historyId is long hid)
-        {
-            keys.Add(RedisKeyNames.VoteSkip(clanId, hid));
-        }
-
         await db.KeyDeleteAsync(keys.ToArray()).ConfigureAwait(false);
         await db.SetRemoveAsync(RedisKeyNames.ActiveSessions, new PlayerSessionKey(clanId, channelId).IndexValue)
             .ConfigureAwait(false);

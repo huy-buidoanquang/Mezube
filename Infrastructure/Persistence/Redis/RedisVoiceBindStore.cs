@@ -8,8 +8,6 @@ public interface IVoiceBindStore
 
     Task<long?> TryGetUserVoiceChannelAsync(long clanId, long userId, CancellationToken cancellationToken = default);
 
-    Task<long> CountAsync(long clanId, CancellationToken cancellationToken = default);
-
     /// <summary>All voice binds across clans for L1 rehydrate on startup.</summary>
     Task<IReadOnlyList<(long ClanId, long UserId, long ChannelId)>> SnapshotAllAsync(
         CancellationToken cancellationToken = default);
@@ -56,9 +54,6 @@ public sealed class RedisVoiceBindStore : IVoiceBindStore
 
         return channelId;
     }
-
-    public async Task<long> CountAsync(long clanId, CancellationToken cancellationToken = default)
-        => await _redis.Db.HashLengthAsync(RedisKeyNames.Voice(clanId)).ConfigureAwait(false);
 
     public async Task<IReadOnlyList<(long ClanId, long UserId, long ChannelId)>> SnapshotAllAsync(
         CancellationToken cancellationToken = default)

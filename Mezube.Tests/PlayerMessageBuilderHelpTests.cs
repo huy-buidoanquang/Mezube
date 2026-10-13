@@ -18,7 +18,7 @@ public sealed class PlayerMessageBuilderHelpTests
         Assert.Contains("-v", play);
 
         var controls = fields.Single(f => f.Name == "Controls").Value;
-        Assert.Contains("voteskip", controls);
+        Assert.DoesNotContain("voteskip", controls);
         Assert.Contains("your track only", controls);
         Assert.DoesNotContain("stop", controls);
         Assert.DoesNotContain("seek", controls);

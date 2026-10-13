@@ -17,7 +17,6 @@ public static class PlayEndReason
 {
     public const string Completed = "completed";
     public const string Skip = "skip";
-    public const string VoteSkip = "vote_skip";
     public const string Stop = "stop";
     public const string Error = "error";
     public const string TooLarge = "too_large";

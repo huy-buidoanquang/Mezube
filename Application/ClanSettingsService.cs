@@ -17,8 +17,6 @@ public interface IClanSettingsService
     Task SetDjRoleIdAsync(long clanId, long? roleId, CancellationToken cancellationToken = default);
 
     Task SetDefaultStreamChannelAsync(long clanId, long? channelId, CancellationToken cancellationToken = default);
-
-    Task SetVoteSkipAsync(long clanId, bool enabled, float? ratio = null, CancellationToken cancellationToken = default);
 }
 
 public sealed class ClanSettingsService : IClanSettingsService
@@ -73,16 +71,6 @@ public sealed class ClanSettingsService : IClanSettingsService
     public async Task SetDefaultStreamChannelAsync(long clanId, long? channelId, CancellationToken cancellationToken = default)
     {
         await _settings.UpsertDefaultStreamChannelAsync(clanId, channelId, cancellationToken).ConfigureAwait(false);
-        Invalidate(clanId);
-    }
-
-    public async Task SetVoteSkipAsync(
-        long clanId,
-        bool enabled,
-        float? ratio = null,
-        CancellationToken cancellationToken = default)
-    {
-        await _settings.UpsertVoteSkipAsync(clanId, enabled, ratio, cancellationToken).ConfigureAwait(false);
         Invalidate(clanId);
     }
 
