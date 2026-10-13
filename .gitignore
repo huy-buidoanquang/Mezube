@@ -12,3 +12,4 @@ temp/
 data/
 *.log
 WsProbe/
+dump-*
