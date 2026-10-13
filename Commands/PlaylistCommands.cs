@@ -168,7 +168,23 @@ public sealed partial class MusicPlayer
                     }
 
                     var name = string.Join(' ', ctx.Args.Skip(1)).Trim();
-                    var ok = await _playlists.DeleteAsync(clanId, name, cancellationToken).ConfigureAwait(false);
+                    var existing = await _playlists.TryGetByNameAsync(clanId, name, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (existing is not null
+                        && !CanDeletePlaylist(
+                            existing.CreatedBy,
+                            ctx.Author.Id,
+                            await _access.IsDjOrOwnerAsync(ctx.Client, clanId, ctx.Author.Id, cancellationToken)
+                                .ConfigureAwait(false)))
+                    {
+                        await ctx.ReplyAsync(PlayerMessageBuilder.NotAllowed(
+                                "Only the playlist’s creator, a DJ or the clan owner can delete it."))
+                            .ConfigureAwait(false);
+                        return;
+                    }
+
+                    var ok = existing is not null
+                        && await _playlists.DeleteAsync(clanId, name, cancellationToken).ConfigureAwait(false);
                     await ctx.ReplyAsync(ok
                             ? PlayerMessageBuilder.Ok("Playlist deleted", [new("Name", name)])
                             : PlayerMessageBuilder.Error("Playlist not found", $"I couldn’t find “{name}”."))
@@ -373,6 +389,9 @@ public sealed partial class MusicPlayer
 
     internal static bool IsClanStreamChannel(int channelType, long channelClanId, long clanId)
         => channelType == (int)ChannelType.Streaming && channelClanId == clanId;
+
+    internal static bool CanDeletePlaylist(long? createdBy, long userId, bool isDjOrOwner)
+        => isDjOrOwner || createdBy == userId;
 
     private async Task PlaylistDefaultAsync(ICommandContext ctx, long clanId, CancellationToken cancellationToken)
     {
