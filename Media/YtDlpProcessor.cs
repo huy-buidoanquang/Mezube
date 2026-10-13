@@ -545,22 +545,17 @@ public sealed class YtDlpProcessor
         return new YtDlpRun(-1, string.Empty, lastStartError?.Message ?? "yt-dlp not launched");
     }
 
-    private List<string> PrependCommonArgs(IReadOnlyList<string> userArgs, string? playerClients)
+    internal List<string> PrependCommonArgs(IReadOnlyList<string> userArgs, string? playerClients)
     {
         var args = new List<string>();
-        var js = ResolveJsRuntimeSpec();
-        if (!string.IsNullOrWhiteSpace(js))
+        var js = _options.YtDlpJsRuntime?.Trim();
+        if (!string.IsNullOrEmpty(js)
+            && !string.Equals(js, "none", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(js, "off", StringComparison.OrdinalIgnoreCase))
         {
-            if (SupportsJsRuntimesOption())
-            {
-                args.Add("--js-runtimes");
-                args.Add(js);
-            }
-            else
-            {
-                _logger.LogWarning(
-                    "yt-dlp does not support --js-runtimes (need >= 2025.11.12); YouTube n-sig may fail until upgraded.");
-            }
+            var path = _options.YtDlpJsRuntimePath?.Trim();
+            args.Add("--js-runtimes");
+            args.Add(string.IsNullOrEmpty(path) ? js : $"{js}:{path}");
         }
 
         var cookies = _options.YtDlpCookiesPath?.Trim();
@@ -585,149 +580,6 @@ public sealed class YtDlpProcessor
 
         args.AddRange(userArgs);
         return args;
-    }
-
-    private string? _jsRuntimeSpec;
-    private bool _jsRuntimeProbed;
-    private bool? _jsRuntimesSupported;
-
-    private bool SupportsJsRuntimesOption()
-    {
-        if (_jsRuntimesSupported is bool cached)
-        {
-            return cached;
-        }
-
-        foreach (var (fileName, prefixArgs) in BuildLaunchAttempts())
-        {
-            try
-            {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = fileName,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                };
-                foreach (var prefix in prefixArgs)
-                {
-                    psi.ArgumentList.Add(prefix);
-                }
-
-                psi.ArgumentList.Add("--help");
-                var result = ChildProcessRunner.RunAsync(
-                        psi,
-                        ChildProcessRunner.DefaultProbeTimeout,
-                        CancellationToken.None)
-                    .GetAwaiter()
-                    .GetResult();
-                var help = result.Stdout + result.Stderr;
-                if (help.Contains("--js-runtimes", StringComparison.Ordinal))
-                {
-                    _jsRuntimesSupported = true;
-                    return true;
-                }
-
-                if (result.ExitCode == 0)
-                {
-                    _jsRuntimesSupported = false;
-                    return false;
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogDebug(ex, "yt-dlp --help probe failed via {File}", fileName);
-            }
-        }
-
-        _jsRuntimesSupported = false;
-        return false;
-    }
-
-    private string? ResolveJsRuntimeSpec()
-    {
-        if (_jsRuntimeProbed)
-        {
-            return _jsRuntimeSpec;
-        }
-
-        _jsRuntimeProbed = true;
-        var configured = _options.YtDlpJsRuntime?.Trim();
-        if (string.Equals(configured, "none", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(configured, "off", StringComparison.OrdinalIgnoreCase))
-        {
-            return null;
-        }
-
-        var path = _options.YtDlpJsRuntimePath?.Trim();
-        var names = new List<string>();
-        if (!string.IsNullOrWhiteSpace(configured))
-        {
-            names.Add(configured);
-        }
-
-        foreach (var fallback in new[] { "deno", "node", "bun" })
-        {
-            if (!names.Exists(n => string.Equals(n, fallback, StringComparison.OrdinalIgnoreCase)))
-            {
-                names.Add(fallback);
-            }
-        }
-
-        if (!string.IsNullOrWhiteSpace(path))
-        {
-            var name = names[0];
-            _jsRuntimeSpec = $"{name}:{path}";
-            _logger.LogInformation("yt-dlp JS runtime configured spec={Spec}", _jsRuntimeSpec);
-            return _jsRuntimeSpec;
-        }
-
-        foreach (var name in names)
-        {
-            if (TryProbeCommand(name, "--version"))
-            {
-                _jsRuntimeSpec = name;
-                _logger.LogInformation("yt-dlp JS runtime detected spec={Spec}", name);
-                return _jsRuntimeSpec;
-            }
-        }
-
-        _logger.LogWarning(
-            "No JS runtime found for yt-dlp n-sig (tried {Runtimes}). Install deno or node, or set Mezube:YtDlpJsRuntimePath.",
-            string.Join(", ", names));
-        return null;
-    }
-
-    private static bool TryProbeCommand(string fileName, string arguments)
-    {
-        try
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = fileName,
-                Arguments = arguments,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-            using var process = Process.Start(psi);
-            if (process is null)
-            {
-                return false;
-            }
-
-            if (!process.WaitForExit(3000))
-            {
-                ChildProcessRunner.TryKill(process);
-                return false;
-            }
-
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
     }
 
     private List<(string FileName, string[] PrefixArgs)> BuildLaunchAttempts()
