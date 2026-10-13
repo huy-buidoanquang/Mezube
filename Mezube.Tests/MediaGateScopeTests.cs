@@ -49,7 +49,6 @@ public sealed class MediaGateScopeTests
             options,
             new YtDlpProcessor(options, NullLogger<YtDlpProcessor>.Instance),
             new FfmpegProcessor(options, NullLogger<FfmpegProcessor>.Instance),
-            uploader,
             NullLogger<PipelineProcessor>.Instance);
         using var cache = new MemoryCache(new MemoryCacheOptions());
         var processor = new PlayableMediaProcessor(

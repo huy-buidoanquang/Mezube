@@ -54,8 +54,6 @@ dotnet run --project Mezube.csproj
 | `Mezube:SfuMaxSessions` | Giới hạn stream session đồng thời |
 
 | `Mezube:PreparedAudioBitrateKbps` | Bitrate cho file CDN audio (Ogg Opus) |
-| `Mezube:PreparedAudioChannels` / `Mezube:PreparedAudioSampleRate` | Cấu hình media preparation; audio wire của SFU luôn cố định 2 kênh / 48 kHz |
-| `Mezube:PreparedVideoBitrateKbps` / `PreparedVideoHeight` / `PreparedVideoFps` | Legacy video preparation; Mezube music không publish video vào SFU |
 | `Mezube:CdnBaseUrl` | Public CDN sau upload |
 | `Mezube:BotAvatarUrl` | Avatar bot — embed author + thumbnail fallback |
 | `Mezube:VizImageUrl` / `Mezube:VizPositionUrl` | Equalizer sprite + JSON cho `!np` |
@@ -63,7 +61,6 @@ dotnet run --project Mezube.csproj
 ### Preset gợi ý
 
 - Audio SFU: `PreparedAudioBitrateKbps=128`, wire format cố định Ogg Opus 48 kHz stereo
-- Video: `PreparedVideoBitrateKbps=1000`, `PreparedVideoHeight=720`, `PreparedVideoFps=30` (GOP 2s)
 
 Shutdown bot cancel pump + dispose mọi SFU publisher session.
 

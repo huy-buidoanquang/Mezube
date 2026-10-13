@@ -77,7 +77,7 @@ public sealed class DirectUrlSsrfTests
     [InlineData("http://127.0.0.1/x.ogg")]
     public void NeedsRepackage_is_true_for_hosts_other_than_cdn(string url)
     {
-        Assert.True(PlayableMediaProcessor.NeedsRepackage(url, PreparedAssetKind.Audio, CdnBaseUrl));
+        Assert.True(PlayableMediaProcessor.NeedsRepackage(url, CdnBaseUrl));
     }
 
     [Theory]
@@ -85,7 +85,7 @@ public sealed class DirectUrlSsrfTests
     [InlineData("https://CDN.KOMU.VN/mezube/x.opus")]
     public void NeedsRepackage_is_false_for_prepared_audio_on_cdn(string url)
     {
-        Assert.False(PlayableMediaProcessor.NeedsRepackage(url, PreparedAssetKind.Audio, CdnBaseUrl));
+        Assert.False(PlayableMediaProcessor.NeedsRepackage(url, CdnBaseUrl));
     }
 
     [Fact]
@@ -93,7 +93,6 @@ public sealed class DirectUrlSsrfTests
     {
         Assert.True(PlayableMediaProcessor.NeedsRepackage(
             "https://cdn.komu.vn/mezube/x.mp3",
-            PreparedAssetKind.Audio,
             CdnBaseUrl));
     }
 }

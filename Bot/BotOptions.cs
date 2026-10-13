@@ -7,8 +7,6 @@ namespace Mezube.Bot;
 public sealed class BotOptions
 {
     private const int DefaultAudioBitrateKbps = 128;
-    private const int DefaultAudioChannels = 2;
-    private const int DefaultAudioSampleRate = 48000;
 
     public long BotId { get; set; }
     public string Token { get; set; } = string.Empty;
@@ -65,11 +63,6 @@ public sealed class BotOptions
     /// <summary>StackExchange.Redis configuration string, e.g. localhost:6379</summary>
     public string RedisConnectionString { get; set; } = "localhost:6379";
     public int PreparedAudioBitrateKbps { get; set; } = DefaultAudioBitrateKbps;
-    public int PreparedAudioChannels { get; set; } = DefaultAudioChannels;
-    public int PreparedAudioSampleRate { get; set; } = DefaultAudioSampleRate;
-    public int PreparedVideoBitrateKbps { get; set; } = 1000;
-    public int PreparedVideoHeight { get; set; } = 720;
-    public int PreparedVideoFps { get; set; } = 30;
     public string BotDisplayName { get; set; } = "Mezube";
     /// <summary>Bot avatar used for embed author icon and as thumbnail fallback.</summary>
     public string BotAvatarUrl { get; set; } = string.Empty;
@@ -178,22 +171,6 @@ public sealed class BotOptions
     private void ValidateAudioSettings()
     {
         ValidateBitrate(nameof(PreparedAudioBitrateKbps), PreparedAudioBitrateKbps);
-        if (PreparedVideoBitrateKbps is < 200 or > 4000)
-        {
-            throw new InvalidOperationException("Mezube:PreparedVideoBitrateKbps must be between 200 and 4000 kb/s.");
-        }
-
-        if (PreparedVideoHeight is < 360 or > 1080)
-        {
-            throw new InvalidOperationException("Mezube:PreparedVideoHeight must be between 360 and 1080.");
-        }
-
-        if (PreparedVideoFps is < 15 or > 30)
-        {
-            throw new InvalidOperationException("Mezube:PreparedVideoFps must be between 15 and 30.");
-        }
-        ValidateChannels(nameof(PreparedAudioChannels), PreparedAudioChannels);
-        ValidateSampleRate(nameof(PreparedAudioSampleRate), PreparedAudioSampleRate);
 
         if (MaxPrepConcurrency < 1)
         {
@@ -251,22 +228,6 @@ public sealed class BotOptions
         if (value is < 32 or > 512)
         {
             throw new InvalidOperationException($"Mezube:{name} must be between 32 and 512 kb/s.");
-        }
-    }
-
-    private static void ValidateChannels(string name, int value)
-    {
-        if (value is < 1 or > 2)
-        {
-            throw new InvalidOperationException($"Mezube:{name} must be 1 or 2.");
-        }
-    }
-
-    private static void ValidateSampleRate(string name, int value)
-    {
-        if (value is < 8000 or > 48000)
-        {
-            throw new InvalidOperationException($"Mezube:{name} must be between 8000 and 48000.");
         }
     }
 }
