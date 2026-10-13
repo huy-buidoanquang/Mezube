@@ -836,8 +836,21 @@ public sealed class SfuPublisherSession : IAsyncDisposable
                 ChannelId,
                 trackId,
                 ex.GetType().Name);
-            FailTrack(trackId, new InvalidOperationException("SFU audio playback failed.", ex));
+            FailTrack(trackId, ToTrackFailure(ex));
         }
+    }
+
+    internal static Exception ToTrackFailure(Exception ex)
+    {
+        for (var cur = ex; cur is not null; cur = cur.InnerException)
+        {
+            if (cur is InvalidDataException or HttpRequestException or IOException)
+            {
+                return new MediaPrepException("Audio source could not be read.", ex);
+            }
+        }
+
+        return new InvalidOperationException("SFU audio playback failed.", ex);
     }
 
     private async Task PumpOpusAsync(string trackId, Stream body, CancellationToken cancellationToken)

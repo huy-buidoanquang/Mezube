@@ -68,7 +68,7 @@ public sealed class SfuStreamingChannelSink : IPlaybackSink, ISfuPublisherSink
             .ConfigureAwait(false);
         if (!SfuMediaSource.TryParse(playable, out var media))
         {
-            throw new InvalidOperationException("SFU stream playback requires a local .ogg/.opus file or an absolute .ogg/.opus URL.");
+            throw new MediaPrepException("SFU stream playback requires a local .ogg/.opus file or an absolute .ogg/.opus URL.");
         }
 
         var session = _sessions.GetOrCreate(target.ChannelId);
