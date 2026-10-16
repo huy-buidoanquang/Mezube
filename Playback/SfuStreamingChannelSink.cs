@@ -5,7 +5,6 @@ using Mezube.Sfu;
 using Mezon.Net.Sdk;
 using Mezon.Net.Models;
 using Microsoft.Extensions.Logging;
-using System.Text.RegularExpressions;
 
 namespace Mezube.Playback;
 
@@ -19,10 +18,6 @@ public interface ISfuPublisherSink
 /// <summary>Publishes prepared Ogg/Opus audio to one SFU room per stream channel.</summary>
 public sealed class SfuStreamingChannelSink : IPlaybackSink, ISfuPublisherSink
 {
-    private static readonly Regex MeetJwtRegex = new(
-        @"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
-        RegexOptions.CultureInvariant | RegexOptions.Compiled);
-
     private readonly SfuPublisherSessionManager _sessions;
     private readonly SfuClientHolder _holder;
     private readonly TrackPrepService _prep;
@@ -156,22 +151,6 @@ public sealed class SfuStreamingChannelSink : IPlaybackSink, ISfuPublisherSink
             throw new InvalidOperationException("Mezon returned an empty SFU meet token.");
         }
 
-        return ExtractMeetJwt(response.Token);
-    }
-
-    /// <summary>
-    /// Mezon.Net.Sdk (through 1.6.2) decodes the GenerateMeetToken reply as a raw UTF-8 JWT,
-    /// but mezon-proto-server now returns a packed GenerateMeetTokenResponse. The
-    /// protobuf framing ends up around the JWT and fails the SFU's HMAC check.
-    /// </summary>
-    internal static string ExtractMeetJwt(string token)
-    {
-        var match = MeetJwtRegex.Match(token);
-        if (!match.Success)
-        {
-            throw new InvalidOperationException("Mezon returned an SFU meet token that is not a JWT.");
-        }
-
-        return match.Value;
+        return response.Token;
     }
 }
