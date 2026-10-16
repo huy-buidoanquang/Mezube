@@ -9,6 +9,8 @@ namespace Mezube.Music;
 
 public sealed class DirectUrlTrackResolver : ITrackResolver
 {
+    private static readonly string[] MezonCdnHosts = ["cdn.mezon.ai", "cdn.komu.vn"];
+
     private readonly ITrackRepository _store;
     private readonly ILogger<DirectUrlTrackResolver> _logger;
 
@@ -57,18 +59,14 @@ public sealed class DirectUrlTrackResolver : ITrackResolver
             return null;
         }
 
-        if (!await IsPublicHostAsync(uri.IdnHost, cancellationToken).ConfigureAwait(false))
+        if (!IsMezonCdnHost(uri.Host)
+            && !await IsPublicHostAsync(uri.IdnHost, cancellationToken).ConfigureAwait(false))
         {
             _logger.LogWarning("Rejected direct URL with non-public host {Host}", uri.Host);
             return null;
         }
 
-        // Prefer .ogg for SFU audio when caller passes .mp3 (Komu convention).
-        var mediaUrl = url.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase)
-            ? url[..^4] + ".ogg"
-            : url;
-
-        var externalId = TrackIdentityHelper.ForDirectUrl(mediaUrl);
+        var externalId = TrackIdentityHelper.ForDirectUrl(url);
         var cached = await _store.TryGetAsync(TrackIdentityHelper.SourceUrl, externalId, cancellationToken)
             .ConfigureAwait(false);
         if (cached is not null)
@@ -80,13 +78,13 @@ public sealed class DirectUrlTrackResolver : ITrackResolver
         var title = Uri.UnescapeDataString(Path.GetFileNameWithoutExtension(uri.AbsolutePath));
         if (string.IsNullOrWhiteSpace(title))
         {
-            title = mediaUrl;
+            title = url;
         }
 
         var track = new TrackInfoEntity
         {
             Title = title,
-            MediaUrl = mediaUrl,
+            MediaUrl = url,
             WebpageUrl = url,
             RequestedBy = requestedBy,
             Source = TrackIdentityHelper.SourceUrl,
@@ -107,6 +105,9 @@ public sealed class DirectUrlTrackResolver : ITrackResolver
 
         return track;
     }
+
+    internal static bool IsMezonCdnHost(string host)
+        => MezonCdnHosts.Contains(host, StringComparer.OrdinalIgnoreCase);
 
     internal static async Task<bool> IsPublicHostAsync(string host, CancellationToken cancellationToken)
     {
