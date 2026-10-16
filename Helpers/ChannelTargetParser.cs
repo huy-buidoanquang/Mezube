@@ -1,4 +1,5 @@
 using Mezon.Net.Sdk.Commands;
+using System.Text.Json;
 
 namespace Mezube.Helpers;
 
@@ -9,21 +10,38 @@ namespace Mezube.Helpers;
 public static class ChannelTargetParser
 {
     public static long? TryGetHashtagChannelId(ICommandContext ctx)
+        => TryReadHashtagChannelId(ctx.Message.Content.RawJson);
+
+    internal static long? TryReadHashtagChannelId(string? rawJson)
     {
-        var hashtags = ctx.Message.Content.Hashtags;
-        if (hashtags is null || hashtags.Count == 0)
+        if (string.IsNullOrWhiteSpace(rawJson))
         {
             return null;
         }
 
-        foreach (var tag in hashtags)
+        try
         {
-            if (!string.IsNullOrWhiteSpace(tag.ChannelId)
-                && long.TryParse(tag.ChannelId, out var id)
-                && id != 0)
+            using var document = JsonDocument.Parse(rawJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty("hg", out var hashtags)
+                || hashtags.ValueKind != JsonValueKind.Array)
             {
-                return id;
+                return null;
             }
+
+            foreach (var tag in hashtags.EnumerateArray())
+            {
+                if (tag.ValueKind == JsonValueKind.Object
+                    && tag.TryGetProperty("channelId", out var value)
+                    && long.TryParse(value.ValueKind == JsonValueKind.String ? value.GetString() : value.GetRawText(), out var id)
+                    && id != 0)
+                {
+                    return id;
+                }
+            }
+        }
+        catch (JsonException)
+        {
         }
 
         return null;
