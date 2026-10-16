@@ -30,7 +30,6 @@ public sealed class SkipTargetsCurrentTrackTests
     [InlineData(PlayerDestroyReason.Skip, PlayerDestroyReason.None)]
     [InlineData(PlayerDestroyReason.None, PlayerDestroyReason.None)]
     [InlineData(PlayerDestroyReason.UserStop, PlayerDestroyReason.UserStop)]
-    [InlineData(PlayerDestroyReason.Seek, PlayerDestroyReason.Seek)]
     public void ClearStaleSkip_drops_only_a_skip_left_from_the_previous_track(
         PlayerDestroyReason reason,
         PlayerDestroyReason expected)

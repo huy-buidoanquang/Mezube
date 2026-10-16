@@ -99,7 +99,6 @@ public sealed class ClanPlaybackSessionTests
     [Theory]
     [InlineData(PlayerDestroyReason.None)]
     [InlineData(PlayerDestroyReason.Skip)]
-    [InlineData(PlayerDestroyReason.Seek)]
     public void Reset_terminal_destroy_reason_preserves_active_control_reason(PlayerDestroyReason reason)
     {
         using var state = new ClanPlaybackSession { LastDestroyReason = reason };

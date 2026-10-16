@@ -41,8 +41,6 @@ public sealed class ClanPlaybackSession : IDisposable
     public int DefaultPlaylistCursor { get; set; }
     public long? CachedDefaultPlaylistId { get; set; }
     public IReadOnlyList<Domain.Entities.PlaylistItemEntity>? CachedDefaultPlaylistItems { get; set; }
-    public long PendingSeekMs { get; set; }
-    public bool ReplayCurrent { get; set; }
     public CancellationToken SessionToken => _sessionCts.Token;
     public int Generation => Volatile.Read(ref _generation);
 
@@ -50,8 +48,8 @@ public sealed class ClanPlaybackSession : IDisposable
 
     /// <summary>
     /// Clears a teardown result when a new playback request takes ownership of
-    /// the session. Skip and seek are intentionally preserved because they are
-    /// active-pump control signals for the current track.
+    /// the session. Skip is intentionally preserved because it is an
+    /// active-pump control signal for the current track.
     /// </summary>
     public void ResetTerminalDestroyReason()
     {
