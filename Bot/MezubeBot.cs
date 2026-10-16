@@ -94,6 +94,7 @@ public sealed class MezubeBot : BackgroundService
         await _entityCache.AttachAsync(client, stoppingToken).ConfigureAwait(false);
 
         var commands = new CommandService(_options.CommandPrefix);
+        commands.Use((ctx, next) => IgnoreOutsideClanAsync(ctx, next, _logger));
         commands.Use(async (ctx, next) =>
         {
             RateLimitNotifyTarget.Value = (ctx.Channel.ClanId, ctx.Channel.Id);
@@ -447,6 +448,17 @@ public sealed class MezubeBot : BackgroundService
         {
             await _entityCache.DisposeAsync().ConfigureAwait(false);
         }
+    }
+
+    internal static Task IgnoreOutsideClanAsync(ICommandContext ctx, CommandMiddlewareDelegate next, ILogger logger)
+    {
+        if (ctx.Channel.ClanId != 0)
+        {
+            return next(ctx);
+        }
+
+        logger.LogInformation("Ignored command {Command} sent outside a clan; commands work in clan channels", ctx.Name);
+        return Task.CompletedTask;
     }
 
     private static Task UpdateControlMessageAsync(IInteractionContext ctx, Mezon.Net.Client.MessageContent content)
