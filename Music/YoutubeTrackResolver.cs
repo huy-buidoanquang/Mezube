@@ -1,7 +1,7 @@
-using Mezube.Application;
 using Mezube.Bot;
 using Mezube.Domain.Entities;
 using Mezube.Helpers;
+using Mezube.Infrastructure.Persistence;
 using Mezube.Media;
 using Mezube.Music.Interactive;
 using Microsoft.Extensions.Logging;
@@ -11,13 +11,13 @@ namespace Mezube.Music;
 public sealed class YoutubeTrackResolver : ITrackResolver
 {
     private readonly YtDlpProcessor _ytDlp;
-    private readonly ITrackLibraryService _store;
+    private readonly ITrackRepository _store;
     private readonly BotOptions _options;
     private readonly ILogger<YoutubeTrackResolver> _logger;
 
     public YoutubeTrackResolver(
         YtDlpProcessor ytDlp,
-        ITrackLibraryService store,
+        ITrackRepository store,
         BotOptions options,
         ILogger<YoutubeTrackResolver> logger)
     {

@@ -1,7 +1,6 @@
 ﻿using Mezon.Net.Core;
 using Mezon.Net.Sdk;
 using Mezon.Net.Sdk.Commands;
-using Mezube.Application;
 using Mezube.Bot;
 using Mezube.Domain.Entities;
 using Mezube.Helpers;
@@ -33,7 +32,7 @@ public sealed partial class MusicPlayer
     private readonly SemaphoreSlim _playSlots;
     private readonly IClanPlayerStore _playerStore;
     private readonly IPlayHistoryRepository _history;
-    private readonly ITrackLibraryService _tracks;
+    private readonly ITrackRepository _tracks;
     private readonly IPlaylistRepository _playlists;
     private readonly ICommandChannelRepository _commandChannels;
     private readonly SoundCloudSetImporter _soundCloudSets;
@@ -53,7 +52,7 @@ public sealed partial class MusicPlayer
         BotOptions options,
         IClanPlayerStore playerStore,
         IPlayHistoryRepository history,
-        ITrackLibraryService tracks,
+        ITrackRepository tracks,
         IPlaylistRepository playlists,
         ICommandChannelRepository commandChannels,
         SoundCloudSetImporter soundCloudSets,

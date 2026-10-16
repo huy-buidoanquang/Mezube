@@ -1,8 +1,8 @@
 using Mezon.Net.Sdk;
-using Mezube.Application;
 using Mezube.Bot;
 using Mezube.Domain.Entities;
 using Mezube.Helpers;
+using Mezube.Infrastructure.Persistence;
 using Mezube.Sfu;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
@@ -22,7 +22,7 @@ public sealed class PlayableMediaProcessor
     private readonly BotOptions _options;
     private readonly PipelineProcessor _pipeline;
     private readonly MezonCdnUploader _uploader;
-    private readonly ITrackLibraryService _store;
+    private readonly ITrackRepository _store;
     private readonly IMemoryCache _cache;
     private readonly MediaConcurrencyGate _gate;
     private readonly ILogger<PlayableMediaProcessor> _logger;
@@ -32,7 +32,7 @@ public sealed class PlayableMediaProcessor
         BotOptions options,
         PipelineProcessor pipeline,
         MezonCdnUploader uploader,
-        ITrackLibraryService store,
+        ITrackRepository store,
         IMemoryCache cache,
         MediaConcurrencyGate gate,
         ILogger<PlayableMediaProcessor> logger)
