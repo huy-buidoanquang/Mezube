@@ -3,7 +3,6 @@ using Mezube.Media;
 using Mezube.Music;
 using Mezube.Streaming;
 using Mezon.Net.Sdk;
-using Mezon.Net.Models;
 using Microsoft.Extensions.Logging;
 
 namespace Mezube.Playback;
@@ -15,7 +14,7 @@ public interface IStreamPublisherSink
     Task WaitUntilTrackEndedAsync(long streamChannelId, CancellationToken cancellationToken = default);
 }
 
-/// <summary>Publishes prepared Ogg/Opus audio to one SFU room per stream channel.</summary>
+/// <summary>Publishes prepared Ogg/Opus audio over WHIP, one session per stream channel.</summary>
 public sealed class StreamingChannelSink : IPlaybackSink, IStreamPublisherSink
 {
     private readonly StreamPublisherSessionManager _sessions;
@@ -35,7 +34,7 @@ public sealed class StreamingChannelSink : IPlaybackSink, IStreamPublisherSink
         _logger = logger;
     }
 
-    public string Name => "streaming-sfu";
+    public string Name => "streaming";
 
     public Task PlayAsync(PlaybackTarget target, TrackInfoEntity track, CancellationToken cancellationToken = default)
         => PlayAsync(target, track, PreparedAssetKind.Audio, cancellationToken);
@@ -48,13 +47,10 @@ public sealed class StreamingChannelSink : IPlaybackSink, IStreamPublisherSink
     {
         if (kind != PreparedAssetKind.Audio)
         {
-            throw new InvalidOperationException("SFU stream playback accepts audio assets only.");
+            throw new InvalidOperationException("Stream playback accepts audio assets only.");
         }
 
         var client = _holder.GetClient();
-        // First join must not enter the SFU room until the Ogg file exists on disk
-        // (or a prepared CDN URL is ready). Overlapping StartAsync with ffmpeg left
-        // the bot sitting in-channel as a silent speaker.
         var playable = await _prep.EnsurePreparedAsync(
                 client,
                 track,
@@ -63,47 +59,43 @@ public sealed class StreamingChannelSink : IPlaybackSink, IStreamPublisherSink
             .ConfigureAwait(false);
         if (!StreamMediaSource.TryParse(playable, out var media))
         {
-            throw new MediaPrepException("SFU stream playback requires a local .ogg/.opus file or an absolute .ogg/.opus URL.");
+            throw new MediaPrepException("Stream playback requires a local .ogg/.opus file or an absolute .ogg/.opus URL.");
         }
 
         var session = _sessions.GetOrCreate(target.ChannelId);
-        var token = await GenerateMeetTokenAsync(client, target.ChannelId, cancellationToken).ConfigureAwait(false);
         await session.StartAsync(
-                token,
-                ct => GenerateMeetTokenAsync(client, target.ChannelId, ct),
+                ct => GetPublishGrantAsync(client, target.ChannelId, ct),
                 cancellationToken)
             .ConfigureAwait(false);
-
-        var trackId = BuildTrackId(track);
-        session.BeginStream(trackId, media);
+        session.BeginStream(media);
 
         _logger.LogDebug(
-            "SFU stream audio published title={Title} clan={ClanId} channel={ChannelId} track={TrackId} source={Source}",
+            "Stream audio published title={Title} clan={ClanId} channel={ChannelId} source={Source}",
             track.Title,
             target.ClanId,
             target.ChannelId,
-            trackId,
             media.IsLocal ? "local" : "cdn");
     }
 
-    public async Task EndTrackAsync(PlaybackTarget target, CancellationToken cancellationToken = default)
+    public Task EndTrackAsync(PlaybackTarget target, CancellationToken cancellationToken = default)
     {
-        if (!_sessions.TryGet(target.ChannelId, out var session))
+        if (_sessions.TryGet(target.ChannelId, out var session))
         {
-            return;
+            session.EndTrack();
         }
 
-        await session.EndTrackAsync(null, cancellationToken).ConfigureAwait(false);
+        return Task.CompletedTask;
     }
 
-    public async Task SetPausedAsync(PlaybackTarget target, bool paused, CancellationToken cancellationToken = default)
+    public Task SetPausedAsync(PlaybackTarget target, bool paused, CancellationToken cancellationToken = default)
     {
         if (!_sessions.TryGet(target.ChannelId, out var session))
         {
-            throw new InvalidOperationException("No active SFU publisher session to pause.");
+            return Task.FromException(new InvalidOperationException("No active stream publisher session to pause."));
         }
 
-        await session.PauseAsync(paused, cancellationToken).ConfigureAwait(false);
+        session.SetPaused(paused);
+        return Task.CompletedTask;
     }
 
     public bool IsPaused(long streamChannelId)
@@ -130,27 +122,17 @@ public sealed class StreamingChannelSink : IPlaybackSink, IStreamPublisherSink
     {
         if (!_sessions.TryGet(streamChannelId, out var session))
         {
-            return Task.FromException(new InvalidOperationException("No active SFU publisher session."));
+            return Task.FromException(new InvalidOperationException("No active stream publisher session."));
         }
 
         return session.WaitUntilTrackEndedAsync(cancellationToken);
     }
 
-    private static string BuildTrackId(TrackInfoEntity track)
-        => (track.TrackId?.ToString() ?? track.ExternalId ?? track.Title).Trim();
-
-    private static async Task<string> GenerateMeetTokenAsync(MezonClient client, long channelId, CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        var response = await client.GenerateMeetTokenAsync(
-                new GenerateMeetTokenParams(channelId, string.Empty))
-            .ConfigureAwait(false);
-        cancellationToken.ThrowIfCancellationRequested();
-        if (string.IsNullOrWhiteSpace(response.Token))
-        {
-            throw new InvalidOperationException("Mezon returned an empty SFU meet token.");
-        }
-
-        return response.Token;
-    }
+    private static Task<StreamPublishGrant> GetPublishGrantAsync(
+        MezonClient client,
+        long channelId,
+        CancellationToken cancellationToken)
+        => Task.FromException<StreamPublishGrant>(new StreamPublishException(
+            StreamFailureKind.Unavailable,
+            "Stream publishing needs a Mezon.Net.Sdk release with GetStreamPlayback."));
 }

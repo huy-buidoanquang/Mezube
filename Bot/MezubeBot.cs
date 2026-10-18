@@ -412,7 +412,7 @@ public sealed class MezubeBot : BackgroundService
         };
 
         _logger.LogInformation(
-            "Logging in bot {BotId} to {Host}:{Port} with SFU audio publisher",
+            "Logging in bot {BotId} to {Host}:{Port} with stream audio publisher",
             _options.BotId,
             _options.Host,
             _options.Port);

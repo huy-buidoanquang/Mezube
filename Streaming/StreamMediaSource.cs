@@ -3,7 +3,7 @@ using Mezube.Domain.Entities;
 namespace Mezube.Streaming;
 
 /// <summary>
-/// Prepared SFU audio: a local Ogg/Opus file (first play / in-process cache) or an HTTP CDN URL.
+/// Prepared stream audio: a local Ogg/Opus file (first play / in-process cache) or an HTTP CDN URL.
 /// </summary>
 internal readonly record struct StreamMediaSource(Uri? HttpUri, string? LocalPath)
 {

@@ -8,7 +8,7 @@ namespace Mezube.Media;
 public sealed record PipelineResult(long? SourceBytes, string LocalPath);
 
 /// <summary>
-/// Prepare stages: download to temp → convert to SFU Ogg.
+/// Prepare stages: download to temp → convert to stream Ogg.
 /// CDN upload is owned by <see cref="PlayableMediaProcessor"/> so playback is not blocked on it.
 /// </summary>
 public sealed class PipelineProcessor

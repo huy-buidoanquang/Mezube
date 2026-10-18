@@ -287,7 +287,7 @@ public sealed partial class MusicPlayer
             return;
         }
 
-        // The bot is an SFU audio-only speaker. The old video flag remains in
+        // The bot publishes audio only. The old video flag remains in
         // the command surface for compatibility, but must not select a video
         // preparation or playback path.
         wantVideo = false;

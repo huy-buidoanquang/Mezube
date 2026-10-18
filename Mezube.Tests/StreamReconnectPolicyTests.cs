@@ -48,7 +48,6 @@ public sealed class StreamReconnectPolicyTests
         {
             BotId = 1,
             Token = "test-token",
-            SfuWebSocketUrl = "wss://sfu.example.test/ws",
             CdnBaseUrl = "https://cdn.example.test",
             PostgresConnectionString = "Host=localhost;Database=test",
             RedisConnectionString = "localhost:6379"

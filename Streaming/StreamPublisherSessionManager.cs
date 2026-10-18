@@ -6,10 +6,9 @@ using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Net.WebSockets;
-using System.Runtime.ExceptionServices;
+using System.Net;
+using System.Net.Http.Headers;
 using System.Text;
-using System.Text.Json;
 using System.Threading.Channels;
 
 namespace Mezube.Streaming;
@@ -23,9 +22,11 @@ public sealed class StreamClientHolder
     public MezonClient GetClient() => _client ?? throw new InvalidOperationException("Mezon client is not ready.");
 }
 
+public sealed record StreamPublishGrant(Uri WhipUrl, string Token);
+
 /// <summary>
-/// In-process SFU publisher. It owns the signaling WebSocket, the WebRTC
-/// peer connection and the Ogg/Opus playback loop for one stream channel.
+/// In-process WHIP publisher. It owns the WebRTC peer connection and the
+/// Ogg/Opus playback loop for one stream channel.
 /// </summary>
 public sealed class StreamPublisherSessionManager : IAsyncDisposable
 {
@@ -61,7 +62,9 @@ public sealed class StreamPublisherSessionManager : IAsyncDisposable
 
             if (_sessions.Count >= _options.StreamMaxSessions)
             {
-                throw new InvalidOperationException("SFU publisher session capacity is exhausted.");
+                throw new StreamPublishException(
+                    StreamFailureKind.Unavailable,
+                    "Stream publisher session capacity is exhausted.");
             }
 
             var session = new StreamPublisherSession(
@@ -89,10 +92,7 @@ public sealed class StreamPublisherSessionManager : IAsyncDisposable
     {
         var sessions = _sessions.Values.ToArray();
         _sessions.Clear();
-        foreach (var session in sessions)
-        {
-            await session.DisposeAsync().ConfigureAwait(false);
-        }
+        await Task.WhenAll(sessions.Select(session => session.DisposeAsync().AsTask())).ConfigureAwait(false);
     }
 
     public ValueTask DisposeAsync() => new(DisposeAllAsync());
@@ -100,26 +100,26 @@ public sealed class StreamPublisherSessionManager : IAsyncDisposable
 
 public sealed class StreamPublisherSession : IAsyncDisposable
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-    private static readonly TimeSpan SendTimeout = TimeSpan.FromSeconds(10);
-    private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(5);
+    internal static readonly byte[] SilenceFrame = [0xF8, 0xFF, 0xFE];
+    private static readonly (byte[] Packet, uint Samples) Silence = (SilenceFrame, 960);
+    private static readonly TimeSpan DeleteTimeout = TimeSpan.FromSeconds(3);
 
     private readonly BotOptions _options;
     private readonly HttpClient _httpClient;
     private readonly ILogger _logger;
     private readonly object _gate = new();
-    private readonly SemaphoreSlim _writeGate = new(1, 1);
     private readonly CancellationTokenSource _lifetimeCts = new();
 
     private TaskCompletionSource _connected = NewSignal();
     private Task? _runTask;
+    private Task? _senderTask;
     private CancellationTokenSource? _runCts;
     private StreamConnection? _connection;
-    private TaskCompletionSource? _trackEnded;
-    private CancellationTokenSource? _trackCts;
-    private string? _trackId;
-    private Func<CancellationToken, Task<string>>? _tokenProvider;
+    private TrackPlayback? _track;
+    private Func<CancellationToken, Task<StreamPublishGrant>>? _grantProvider;
     private Exception? _terminalFailure;
+    private Exception? _lastFailure;
+    private Uri? _resource;
     private bool _started;
     private bool _stopped;
     private bool _paused;
@@ -148,8 +148,7 @@ public sealed class StreamPublisherSession : IAsyncDisposable
     }
 
     internal async Task StartAsync(
-        string token,
-        Func<CancellationToken, Task<string>> tokenProvider,
+        Func<CancellationToken, Task<StreamPublishGrant>> grantProvider,
         CancellationToken cancellationToken)
     {
         Task connectedTask;
@@ -161,15 +160,22 @@ public sealed class StreamPublisherSession : IAsyncDisposable
                 throw new ObjectDisposedException(nameof(StreamPublisherSession));
             }
 
-            _tokenProvider = tokenProvider;
-            connectedTask = _connected.Task;
+            _grantProvider = grantProvider;
             if (!_started)
             {
                 _started = true;
                 _runCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token);
-                _runTask = RunReconnectLoopAsync(token, _runCts.Token);
+                var runToken = _runCts.Token;
+                _runTask = Task.Run(() => RunReconnectLoopAsync(runToken), CancellationToken.None);
+                _senderTask = Task.Factory.StartNew(
+                    () => SendLoop(runToken),
+                    CancellationToken.None,
+                    TaskCreationOptions.LongRunning | TaskCreationOptions.DenyChildAttach,
+                    TaskScheduler.Default);
                 startedHere = true;
             }
+
+            connectedTask = _connected.Task;
         }
 
         try
@@ -179,41 +185,39 @@ public sealed class StreamPublisherSession : IAsyncDisposable
                     cancellationToken)
                 .ConfigureAwait(false);
         }
-        catch
+        catch (Exception ex)
         {
+            var failure = ex is TimeoutException
+                ? new StreamPublishException(
+                    StreamFailureKind.Unavailable,
+                    "Timed out connecting to the streaming server.",
+                    GetLastFailure())
+                : ex;
             if (startedHere)
             {
                 await StopConnectionLoopAsync().ConfigureAwait(false);
             }
 
-            throw;
+            if (ReferenceEquals(failure, ex))
+            {
+                throw;
+            }
+
+            throw failure;
         }
     }
 
-    public async Task PlayAsync(
-        string trackId,
-        string mediaUrl,
-        string token,
-        Func<CancellationToken, Task<string>> tokenProvider,
-        CancellationToken cancellationToken)
+    internal void BeginStream(StreamMediaSource media)
     {
-        if (!StreamMediaSource.TryParse(mediaUrl, out var media))
+        var packets = Channel.CreateBounded<(byte[] Packet, uint Samples)>(new BoundedChannelOptions(4)
         {
-            throw new ArgumentException("SFU playback requires a local .ogg/.opus file or an absolute HTTP(S) media URL.", nameof(mediaUrl));
-        }
-
-        await StartAsync(token, tokenProvider, cancellationToken).ConfigureAwait(false);
-        BeginStream(trackId, media);
-    }
-
-    internal void BeginStream(string trackId, StreamMediaSource media)
-    {
-        if (string.IsNullOrWhiteSpace(trackId))
-        {
-            throw new ArgumentException("An SFU track id is required.", nameof(trackId));
-        }
-
-        StreamConnection? connection;
+            SingleReader = true,
+            SingleWriter = true,
+            FullMode = BoundedChannelFullMode.Wait,
+        });
+        var cancellation = new CancellationTokenSource();
+        TrackPlayback track;
+        TrackPlayback? previous;
         lock (_gate)
         {
             if (_stopped)
@@ -221,77 +225,65 @@ public sealed class StreamPublisherSession : IAsyncDisposable
                 throw new ObjectDisposedException(nameof(StreamPublisherSession));
             }
 
-            _trackCts?.Cancel();
-            _trackCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token);
-            _trackId = trackId;
-            _trackEnded = NewSignal();
+            track = new TrackPlayback(
+                packets.Reader,
+                cancellation,
+                NewSignal(),
+                Task.Run(() => ProduceAsync(media, packets.Writer, cancellation.Token)));
+            previous = _track;
+            _track = track;
             _paused = false;
-            connection = _connection;
-            _ = StreamAudioAsync(trackId, media, _trackCts.Token);
+            if (_terminalFailure is { } failure)
+            {
+                track.Ended.TrySetException(failure);
+            }
         }
 
-        if (connection is { IsConnected: true })
-        {
-            _ = SendMuteAfterConnectAsync(connection, CancellationToken.None);
-        }
+        End(previous);
     }
 
     public Task WaitUntilTrackEndedAsync(CancellationToken cancellationToken)
     {
         lock (_gate)
         {
-            if (_trackEnded is null)
+            if (_track is null)
             {
-                return Task.FromException(new InvalidOperationException("No active SFU track."));
+                return Task.FromException(new InvalidOperationException("No active stream track."));
             }
 
-            return _trackEnded.Task.WaitAsync(cancellationToken);
+            return _track.Ended.Task.WaitAsync(cancellationToken);
         }
     }
 
-    public async Task PauseAsync(bool paused, CancellationToken cancellationToken)
+    public void SetPaused(bool paused)
     {
-        StreamConnection? connection;
         lock (_gate)
         {
-            if (_stopped)
+            if (!_stopped)
             {
-                return;
+                _paused = paused;
             }
-
-            _paused = paused;
-            connection = _connection;
-        }
-
-        if (connection is { IsConnected: true })
-        {
-            await SendJsonAsync(connection, new { type = "mute", is_mute = paused }, cancellationToken)
-                .ConfigureAwait(false);
-            connection.DeclaredMute = paused;
         }
     }
 
-    public Task EndTrackAsync(string? trackId, CancellationToken cancellationToken)
+    public void EndTrack()
     {
+        TrackPlayback? track;
         lock (_gate)
         {
-            if (trackId is not null && _trackId is not null
-                && !string.Equals(trackId, _trackId, StringComparison.Ordinal))
-            {
-                return Task.CompletedTask;
-            }
-
-            _trackCts?.Cancel();
-            _trackEnded?.TrySetResult();
+            track = _track;
         }
 
-        cancellationToken.ThrowIfCancellationRequested();
-        return Task.CompletedTask;
+        End(track);
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
         Task? runTask;
+        Task? senderTask;
+        CancellationTokenSource? runCts;
+        TaskCompletionSource connected;
+        TrackPlayback? track;
         lock (_gate)
         {
             if (_stopped)
@@ -300,545 +292,66 @@ public sealed class StreamPublisherSession : IAsyncDisposable
             }
 
             _stopped = true;
-            _trackCts?.Cancel();
-            _trackEnded?.TrySetCanceled();
-            _runCts?.Cancel();
-            _connection?.Close();
+            track = _track;
+            runCts = _runCts;
             runTask = _runTask;
+            senderTask = _senderTask;
+            connected = _connected;
         }
 
-        // Stop is a resource teardown operation. Once the connection has been
-        // closed, wait for the run loop to finish before disposing the shared
-        // write gate; otherwise a late heartbeat/mute callback can race the
-        // semaphore disposal when the caller token is already cancelled.
-        await AwaitQuietlyAsync(runTask, CancellationToken.None).ConfigureAwait(false);
+        runCts?.Cancel();
+        connected.TrySetCanceled();
+        track?.Cancellation.Cancel();
+        track?.Ended.TrySetCanceled();
+        await AwaitQuietlyAsync(senderTask).ConfigureAwait(false);
+        await AwaitQuietlyAsync(track?.Producer).ConfigureAwait(false);
+        await AwaitQuietlyAsync(runTask).ConfigureAwait(false);
+        if (GetResource() is { } resource)
+        {
+            await DeleteResourceAsync(resource).ConfigureAwait(false);
+        }
+
         _lifetimeCts.Cancel();
-        _runCts?.Dispose();
-        _trackCts?.Dispose();
-        _writeGate.Dispose();
+        runCts?.Dispose();
         _lifetimeCts.Dispose();
     }
 
     public ValueTask DisposeAsync() => new(StopAsync(CancellationToken.None));
 
-    private async Task RunReconnectLoopAsync(string initialToken, CancellationToken cancellationToken)
+    internal (byte[] Packet, uint Samples) NextPacket()
     {
-        var token = initialToken;
-        var reconnectAttempts = 0;
-
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            var result = await ConnectAndRunAsync(token, cancellationToken).ConfigureAwait(false);
-            if (result.WasStable)
-            {
-                reconnectAttempts = 0;
-            }
-
-            if (result.Failure is not null)
-            {
-                _logger.LogWarning(
-                    "SFU publisher connection failed channel={ChannelId}; reconnecting error_type={ErrorType} error={Error}",
-                    ChannelId,
-                    result.Failure.GetType().Name,
-                    result.Failure.Message);
-            }
-
-            if (cancellationToken.IsCancellationRequested)
-            {
-                return;
-            }
-
-            string? refreshedToken = null;
-            while (refreshedToken is null && !cancellationToken.IsCancellationRequested)
-            {
-                if (reconnectAttempts >= _options.StreamReconnectMaxAttempts)
-                {
-                    FailSession(new InvalidOperationException(
-                        $"SFU publisher reconnect limit reached after {_options.StreamReconnectMaxAttempts} attempts."));
-                    return;
-                }
-
-                reconnectAttempts++;
-                ResetConnectionSignal();
-                var delay = StreamReconnectPolicy.GetDelay(
-                    reconnectAttempts,
-                    _options.StreamReconnectBackoffMs,
-                    _options.StreamReconnectMaxBackoffMs,
-                    _options.StreamReconnectJitterMs);
-                _logger.LogWarning(
-                    "SFU publisher reconnect scheduled channel={ChannelId} attempt={Attempt}/{MaxAttempts} delay_ms={DelayMs}",
-                    ChannelId,
-                    reconnectAttempts,
-                    _options.StreamReconnectMaxAttempts,
-                    (int)delay.TotalMilliseconds);
-
-                try
-                {
-                    await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                {
-                    return;
-                }
-
-                var provider = GetTokenProvider();
-                if (provider is null)
-                {
-                    FailSession(new InvalidOperationException("SFU publisher token provider is unavailable."));
-                    return;
-                }
-
-                try
-                {
-                    // Never reuse the previous JWT after a WebSocket/PeerConnection failure.
-                    refreshedToken = await provider(cancellationToken).ConfigureAwait(false);
-                    if (string.IsNullOrWhiteSpace(refreshedToken))
-                    {
-                        throw new InvalidOperationException("Mezon returned an empty SFU meet token.");
-                    }
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                {
-                    return;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(
-                        "SFU publisher token refresh failed channel={ChannelId} error_type={ErrorType} error={Error}",
-                        ChannelId,
-                        ex.GetType().Name,
-                        ex.Message);
-                }
-            }
-
-            if (refreshedToken is not null)
-            {
-                token = refreshedToken;
-            }
-        }
-    }
-
-    private readonly record struct ConnectionRunResult(bool WasStable, Exception? Failure);
-
-    private async Task<ConnectionRunResult> ConnectAndRunAsync(
-        string token,
-        CancellationToken cancellationToken)
-    {
-        RTCPeerConnection? peerConnection = null;
-        StreamConnection? connection = null;
-        Exception? failure = null;
-        var wasStable = false;
-        try
-        {
-            using var websocket = new ClientWebSocket();
-            websocket.Options.SetRequestHeader("User-Agent", "mezube/1.0");
-            await websocket.ConnectAsync(new Uri(_options.SfuWebSocketUrl), cancellationToken).ConfigureAwait(false);
-
-            await SendJsonAsync(
-                    websocket,
-                    new
-                    {
-                        type = "join",
-                        room = ChannelId.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                        token,
-                        role = "speaker",
-                        media_pool_version = 1
-                    },
-                    cancellationToken)
-                .ConfigureAwait(false);
-
-            using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            var heartbeatTask = HeartbeatLoopAsync(websocket, heartbeatCts.Token);
-            try
-            {
-                while (true)
-                {
-                    var message = await ReceiveTextAsync(websocket, cancellationToken).ConfigureAwait(false);
-                    if (message is null)
-                    {
-                        // mezon-sfu reports why it dropped us in the close code
-                        // (4012 duplicate_session, 4011 alone_timeout, 4014 dtls_handshake_timeout).
-                        throw connection?.Failure ?? new InvalidOperationException(
-                            $"SFU signaling connection closed status={(int?)websocket.CloseStatus} reason={websocket.CloseStatusDescription}.");
-                    }
-
-                    if (connection is null)
-                    {
-                        connection = TryAttachAfterJoined(websocket, message, cancellationToken, out peerConnection);
-                        if (connection is not null)
-                        {
-                            // mezon-sfu creates every session muted and no longer
-                            // auto-unmutes on audio RTP. Declare the state before
-                            // answering the first offer; the SFU applies it with the answer.
-                            var isMute = IsPaused;
-                            await SendJsonAsync(connection, new { type = "mute", is_mute = isMute }, cancellationToken)
-                                .ConfigureAwait(false);
-                            connection.DeclaredMute = isMute;
-                            continue;
-                        }
-
-                        await HandlePreJoinMessageAsync(websocket, message, cancellationToken).ConfigureAwait(false);
-                        continue;
-                    }
-
-                    await HandleSignalingMessageAsync(connection, message, cancellationToken).ConfigureAwait(false);
-                }
-            }
-            finally
-            {
-                heartbeatCts.Cancel();
-                await AwaitQuietlyAsync(heartbeatTask, CancellationToken.None).ConfigureAwait(false);
-            }
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            failure = ex;
-        }
-        finally
-        {
-            wasStable = connection is not null
-                && connection.HasBeenConnected
-                && connection.ConnectedDuration >= TimeSpan.FromMilliseconds(_options.StreamReconnectStableResetMs);
-            connection?.Close();
-            peerConnection?.Dispose();
-            lock (_gate)
-            {
-                if (ReferenceEquals(_connection, connection))
-                {
-                    _connection = null;
-                }
-            }
-        }
-
-        return new ConnectionRunResult(wasStable, failure);
-    }
-
-    internal static RTCPeerConnection CreateAudioPublisherPeerConnection(
-        IReadOnlyList<RTCIceServer>? iceServers = null)
-    {
-        RTCConfiguration? config = null;
-        if (iceServers is { Count: > 0 })
-        {
-            config = new RTCConfiguration { iceServers = [.. iceServers] };
-        }
-
-        var peerConnection = new RTCPeerConnection(config);
-        var audioTrack = new MediaStreamTrack(
-            new List<AudioFormat> { new(AudioCodecsEnum.OPUS, 111, 48000, 2) },
-            MediaStreamStatusEnum.SendOnly)
-        {
-            NoDtmfSupport = true
-        };
-        peerConnection.addTrack(audioTrack);
-        return peerConnection;
-    }
-
-    internal static IReadOnlyList<RTCIceServer> ParseIceServers(JsonElement message)
-    {
-        if (!message.TryGetProperty("iceServers", out var servers)
-            || servers.ValueKind != JsonValueKind.Array)
-        {
-            return [];
-        }
-
-        var parsed = new List<RTCIceServer>();
-        foreach (var server in servers.EnumerateArray())
-        {
-            var urls = ReadIceUrls(server);
-            if (string.IsNullOrWhiteSpace(urls))
-            {
-                continue;
-            }
-
-            parsed.Add(new RTCIceServer
-            {
-                urls = urls,
-                username = server.TryGetProperty("username", out var user) ? user.GetString() : null,
-                credential = server.TryGetProperty("credential", out var credential) ? credential.GetString() : null,
-            });
-        }
-
-        return parsed;
-    }
-
-    private static string? ReadIceUrls(JsonElement server)
-    {
-        if (!server.TryGetProperty("urls", out var urls))
-        {
-            return null;
-        }
-
-        if (urls.ValueKind == JsonValueKind.String)
-        {
-            return urls.GetString();
-        }
-
-        if (urls.ValueKind == JsonValueKind.Array && urls.GetArrayLength() > 0)
-        {
-            return urls[0].GetString();
-        }
-
-        return null;
-    }
-
-    private StreamConnection? TryAttachAfterJoined(
-        ClientWebSocket websocket,
-        string payload,
-        CancellationToken cancellationToken,
-        out RTCPeerConnection? peerConnection)
-    {
-        peerConnection = null;
-        using var document = JsonDocument.Parse(payload);
-        if (!document.RootElement.TryGetProperty("type", out var typeElement)
-            || !string.Equals(typeElement.GetString(), "joined", StringComparison.Ordinal))
-        {
-            return null;
-        }
-
-        var iceServers = ParseIceServers(document.RootElement);
-        peerConnection = CreateAudioPublisherPeerConnection(iceServers);
-        var connection = new StreamConnection(websocket, peerConnection);
+        TrackPlayback? track;
+        bool paused;
         lock (_gate)
         {
-            if (_stopped)
+            track = _track;
+            paused = _paused;
+        }
+
+        if (track is null || paused || track.Ended.Task.IsCompleted)
+        {
+            return Silence;
+        }
+
+        if (track.Packets.TryRead(out var frame))
+        {
+            return frame;
+        }
+
+        var completion = track.Packets.Completion;
+        if (completion.IsCompleted)
+        {
+            if (completion.Exception?.InnerException is { } error)
             {
-                connection.Close();
-                peerConnection.Dispose();
-                peerConnection = null;
-                return null;
+                track.Ended.TrySetException(ToTrackFailure(error));
             }
-
-            _connection = connection;
-        }
-
-        _logger.LogDebug(
-            "SFU publisher joined channel={ChannelId} iceServers={IceServerCount}",
-            ChannelId,
-            iceServers.Count);
-        AttachConnectionStateHandler(connection, cancellationToken);
-        return connection;
-    }
-
-    private void AttachConnectionStateHandler(StreamConnection connection, CancellationToken cancellationToken)
-    {
-        connection.PeerConnection.onconnectionstatechange += state =>
-        {
-            if (state == RTCPeerConnectionState.connected)
+            else
             {
-                connection.MarkConnected();
-                lock (_gate)
-                {
-                    _connected.TrySetResult();
-                }
-
-                _ = SendMuteAfterConnectAsync(connection, cancellationToken);
-                return;
-            }
-
-            // SIPSorcery fires `closed` after Close()/Dispose. Treating that as a
-            // transport failure Abort()s the signaling WS, which emits speaker
-            // leave and steals the web-client's singleton user_id presence slot.
-            if (state != RTCPeerConnectionState.failed)
-            {
-                return;
-            }
-
-            _logger.LogWarning(
-                "SFU WebRTC ICE failed channel={ChannelId} ice={IceState}",
-                ChannelId,
-                connection.PeerConnection.iceConnectionState);
-            connection.SetFailure(new InvalidOperationException("SFU WebRTC connection failed."));
-            connection.Close();
-        };
-    }
-
-    private async Task HandlePreJoinMessageAsync(
-        ClientWebSocket websocket,
-        string payload,
-        CancellationToken cancellationToken)
-    {
-        using var document = JsonDocument.Parse(payload);
-        if (!document.RootElement.TryGetProperty("type", out var typeElement))
-        {
-            return;
-        }
-
-        switch (typeElement.GetString())
-        {
-            case "ping":
-                await SendJsonAsync(websocket, new { type = "pong" }, cancellationToken).ConfigureAwait(false);
-                break;
-            case "pong":
-                break;
-            case "offer":
-                throw new InvalidOperationException("SFU sent an offer before joined.");
-            case "error":
-                throw CreateSfuSignalingException(document.RootElement);
-        }
-    }
-
-    private async Task HandleSignalingMessageAsync(
-        StreamConnection connection,
-        string payload,
-        CancellationToken cancellationToken)
-    {
-        using var document = JsonDocument.Parse(payload);
-        if (!document.RootElement.TryGetProperty("type", out var typeElement))
-        {
-            return;
-        }
-
-        switch (typeElement.GetString())
-        {
-            case "ping":
-                await SendJsonAsync(connection, new { type = "pong" }, cancellationToken).ConfigureAwait(false);
-                break;
-            case "pong":
-            case "joined":
-            case "peer_joined":
-            case "peer_left":
-            case "peer_updated":
-            case "mute_changed":
-                break;
-            case "offer":
-                await AnswerOfferAsync(connection, document.RootElement, cancellationToken).ConfigureAwait(false);
-                break;
-            case "error":
-                throw CreateSfuSignalingException(document.RootElement);
-        }
-    }
-
-    private static InvalidOperationException CreateSfuSignalingException(JsonElement message)
-    {
-        var detail = message.TryGetProperty("message", out var detailElement)
-            ? detailElement.GetString()
-            : null;
-        return new InvalidOperationException(
-            string.IsNullOrWhiteSpace(detail)
-                ? "SFU rejected publisher signaling."
-                : $"SFU rejected publisher signaling: {detail}");
-    }
-
-    private async Task AnswerOfferAsync(
-        StreamConnection connection,
-        JsonElement message,
-        CancellationToken cancellationToken)
-    {
-        var sdp = message.TryGetProperty("sdp", out var sdpElement) ? sdpElement.GetString() : null;
-        if (string.IsNullOrWhiteSpace(sdp))
-        {
-            throw new InvalidOperationException("SFU sent an empty offer.");
-        }
-
-        var answer = CreateAudioOnlyAnswer(connection.PeerConnection, sdp);
-        await connection.PeerConnection.setLocalDescription(answer).ConfigureAwait(false);
-
-        var generation = message.TryGetProperty("offer_generation", out var generationElement)
-            && generationElement.TryGetUInt64(out var parsedGeneration)
-            ? parsedGeneration
-            : 0UL;
-        await SendJsonAsync(
-                connection,
-                new { type = "answer", sdp = answer.sdp, offer_generation = generation },
-                cancellationToken)
-            .ConfigureAwait(false);
-        // Renegotiation offers (peer join/leave) must not call Start() again.
-        // SIPSorcery treats a second Start() as a new ICE gathering cycle and
-        // can close the live pair, which Mezube then Abort()s as a reconnect.
-        if (!connection.PeerConnection.IsAudioStarted)
-        {
-            await connection.PeerConnection.Start().ConfigureAwait(false);
-        }
-    }
-
-    internal static RTCSessionDescriptionInit CreateAudioOnlyAnswer(RTCPeerConnection peerConnection, string offerSdp)
-    {
-        var result = peerConnection.setRemoteDescription(new RTCSessionDescriptionInit
-        {
-            type = RTCSdpType.offer,
-            sdp = offerSdp
-        });
-        if (result != SetDescriptionResultEnum.OK)
-        {
-            throw new InvalidOperationException($"SFU offer was rejected: {result}.");
-        }
-
-        var answer = peerConnection.createAnswer();
-        var answerSdp = SDP.ParseSDPDescription(answer.sdp);
-        ValidateAndDisableVideo(answerSdp, offerSdp);
-        answer.sdp = answerSdp.ToString();
-        return answer;
-    }
-
-    internal static void ValidateAndDisableVideo(SDP answer, string offerSdp)
-    {
-        var offer = SDP.ParseSDPDescription(offerSdp);
-        if (answer.Media.Count != offer.Media.Count)
-        {
-            throw new InvalidOperationException("SFU answer changed the number of media sections.");
-        }
-
-        for (var index = 0; index < answer.Media.Count; index++)
-        {
-            var offerMedia = offer.Media[index];
-            var answerMedia = answer.Media[index];
-            if (offerMedia.Media != answerMedia.Media
-                || !string.Equals(offerMedia.MediaID, answerMedia.MediaID, StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException("SFU answer changed media section order or mid.");
-            }
-
-            if (answerMedia.Media == SDPMediaTypesEnum.video)
-            {
-                answerMedia.MediaStreamStatus = MediaStreamStatusEnum.Inactive;
+                track.Ended.TrySetResult();
             }
         }
-    }
 
-    private async Task StreamAudioAsync(string trackId, StreamMediaSource media, CancellationToken cancellationToken)
-    {
-        try
-        {
-            if (media.LocalPath is string localPath)
-            {
-                await using var file = new FileStream(
-                    localPath,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.Read,
-                    bufferSize: 64 * 1024,
-                    FileOptions.Asynchronous | FileOptions.SequentialScan);
-                await PumpOpusAsync(trackId, file, cancellationToken).ConfigureAwait(false);
-                return;
-            }
-
-            using var response = await _httpClient.GetAsync(
-                    media.HttpUri!,
-                    HttpCompletionOption.ResponseHeadersRead,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            response.EnsureSuccessStatusCode();
-            await using var body = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-            await PumpOpusAsync(trackId, body, cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-        }
-        catch (Exception ex)
-        {
-            // HttpClient/WebSocket exception messages may contain a request URI.
-            // Keep media URLs and authentication material out of operational logs.
-            _logger.LogWarning(
-                "SFU audio track failed channel={ChannelId} track={TrackId} error_type={ErrorType}",
-                ChannelId,
-                trackId,
-                ex.GetType().Name);
-            FailTrack(trackId, ToTrackFailure(ex));
-        }
+        return Silence;
     }
 
     internal static Exception ToTrackFailure(Exception ex)
@@ -851,301 +364,387 @@ public sealed class StreamPublisherSession : IAsyncDisposable
             }
         }
 
-        return new InvalidOperationException("SFU audio playback failed.", ex);
+        return new StreamPublishException(StreamFailureKind.Unavailable, "Stream audio playback failed.", ex);
     }
 
-    private async Task PumpOpusAsync(string trackId, Stream body, CancellationToken cancellationToken)
+    internal static RTCPeerConnection CreateAudioPublisherPeerConnection()
     {
-        var reader = new OggOpusReader(body);
-        // Keep at most ~80 ms of Opus (4 x 20 ms) decoded ahead of the pacer.
-        // A 64-packet buffer could hold 1.28 s; after a GC stall that backlog
-        // would sit ready and then hit the browser jitter buffer as a burst.
-        var packets = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(4)
+        var peerConnection = new RTCPeerConnection(null);
+        var audioTrack = new MediaStreamTrack(
+            new List<AudioFormat> { new(AudioCodecsEnum.OPUS, 111, 48000, 2) },
+            MediaStreamStatusEnum.SendOnly)
         {
-            SingleReader = true,
-            SingleWriter = true,
-            FullMode = BoundedChannelFullMode.Wait,
-        });
-        var fillTask = FillOpusPacketsAsync(reader, packets.Writer, cancellationToken);
-        Exception? pumpError = null;
-
-        try
-        {
-            await WaitForConnectedConnectionAsync(cancellationToken).ConfigureAwait(false);
-            await Task.Factory.StartNew(
-                    () => PumpOpusSendLoop(packets.Reader, cancellationToken),
-                    cancellationToken,
-                    TaskCreationOptions.LongRunning | TaskCreationOptions.DenyChildAttach,
-                    TaskScheduler.Default)
-                .ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            pumpError = ex;
-        }
-        finally
-        {
-            packets.Writer.TryComplete();
-        }
-
-        try
-        {
-            await fillTask.ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            pumpError ??= ex;
-        }
-
-        if (pumpError is not null)
-        {
-            ExceptionDispatchInfo.Throw(pumpError);
-        }
-
-        CompleteTrack(trackId);
+            NoDtmfSupport = true
+        };
+        peerConnection.addTrack(audioTrack);
+        return peerConnection;
     }
 
-    private void PumpOpusSendLoop(ChannelReader<byte[]> packets, CancellationToken cancellationToken)
+    private async Task RunReconnectLoopAsync(CancellationToken cancellationToken)
     {
-        var pacer = new OpusRtpPacer();
-        pacer.Start();
-
-        while (packets.WaitToReadAsync(cancellationToken).AsTask().GetAwaiter().GetResult())
+        var attempts = 0;
+        while (!cancellationToken.IsCancellationRequested)
         {
-            while (IsPaused)
+            var result = await ConnectAndRunAsync(cancellationToken).ConfigureAwait(false);
+            if (cancellationToken.IsCancellationRequested)
             {
-                pacer.Pause();
-                if (cancellationToken.WaitHandle.WaitOne(20))
+                return;
+            }
+
+            if (result.WasStable)
+            {
+                attempts = 0;
+            }
+
+            var failure = result.Failure;
+            SetLastFailure(failure);
+            _logger.LogWarning(
+                "Stream publisher connection failed channel={ChannelId} kind={Kind} error_type={ErrorType} error={Error}",
+                ChannelId,
+                failure.Kind,
+                (failure.InnerException ?? failure).GetType().Name,
+                failure.Message);
+
+            if (failure.Kind != StreamFailureKind.Unavailable)
+            {
+                FailSession(failure);
+                return;
+            }
+
+            if (attempts >= _options.StreamReconnectMaxAttempts)
+            {
+                FailSession(new StreamPublishException(
+                    StreamFailureKind.Unavailable,
+                    $"Stream publisher reconnect limit reached after {_options.StreamReconnectMaxAttempts} attempts.",
+                    failure));
+                return;
+            }
+
+            attempts++;
+            var delay = StreamReconnectPolicy.GetDelay(
+                attempts,
+                _options.StreamReconnectBackoffMs,
+                _options.StreamReconnectMaxBackoffMs,
+                _options.StreamReconnectJitterMs);
+            _logger.LogWarning(
+                "Stream publisher reconnect scheduled channel={ChannelId} attempt={Attempt}/{MaxAttempts} delay_ms={DelayMs}",
+                ChannelId,
+                attempts,
+                _options.StreamReconnectMaxAttempts,
+                (int)delay.TotalMilliseconds);
+
+            try
+            {
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+        }
+    }
+
+    private readonly record struct ConnectionRunResult(bool WasStable, StreamPublishException Failure);
+
+    private async Task<ConnectionRunResult> ConnectAndRunAsync(CancellationToken cancellationToken)
+    {
+        StreamConnection? connection = null;
+        StreamPublishException failure;
+        var wasStable = false;
+        try
+        {
+            using (var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                attemptCts.CancelAfter(_options.StreamConnectTimeoutMs);
+                var grant = await GetGrantAsync(attemptCts.Token).ConfigureAwait(false);
+                connection = new StreamConnection(CreateAudioPublisherPeerConnection());
+                AttachConnectionStateHandler(connection);
+                var offer = connection.PeerConnection.createOffer();
+                await connection.PeerConnection.setLocalDescription(offer).ConfigureAwait(false);
+                var answer = await PostOfferAsync(grant, offer.sdp, attemptCts.Token).ConfigureAwait(false);
+                var applied = connection.PeerConnection.setRemoteDescription(new RTCSessionDescriptionInit
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
+                    type = RTCSdpType.answer,
+                    sdp = answer
+                });
+                if (applied != SetDescriptionResultEnum.OK)
+                {
+                    throw new StreamPublishException(
+                        StreamFailureKind.Denied,
+                        $"The streaming server answer was rejected: {applied}.");
+                }
+
+                lock (_gate)
+                {
+                    attemptCts.Token.ThrowIfCancellationRequested();
+                    _connection = connection;
+                }
+
+                await connection.PeerConnection.Start().ConfigureAwait(false);
+                var first = await Task.WhenAny(connection.Connected.Task, connection.Closed.Task)
+                    .WaitAsync(attemptCts.Token)
+                    .ConfigureAwait(false);
+                if (first != connection.Connected.Task)
+                {
+                    throw connection.Failure ?? new StreamPublishException(
+                        StreamFailureKind.Unavailable,
+                        "Stream WebRTC connection closed before it connected.");
                 }
             }
 
-            pacer.Resume();
-            if (!packets.TryRead(out var packet))
+            lock (_gate)
             {
-                continue;
+                _connected.TrySetResult();
             }
 
-            var duration = OpusPacket.GetDurationSamples(packet);
-            var connection = GetConnection();
-            if (connection is not { IsConnected: true })
+            _logger.LogDebug("Stream publisher connected channel={ChannelId}", ChannelId);
+            await connection.Closed.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            failure = connection.Failure ?? new StreamPublishException(
+                StreamFailureKind.Unavailable,
+                "Stream WebRTC connection closed.");
+        }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            failure = new StreamPublishException(
+                StreamFailureKind.Unavailable,
+                "Timed out connecting to the streaming server.",
+                ex);
+        }
+        catch (OperationCanceledException ex)
+        {
+            failure = new StreamPublishException(StreamFailureKind.Unavailable, "Stream publisher stopped.", ex);
+        }
+        catch (StreamPublishException ex)
+        {
+            failure = ex;
+        }
+        catch (Exception ex)
+        {
+            failure = new StreamPublishException(
+                StreamFailureKind.Unavailable,
+                "Stream publisher connection failed.",
+                ex);
+        }
+        finally
+        {
+            wasStable = connection is not null
+                && connection.ConnectedDuration >= TimeSpan.FromMilliseconds(_options.StreamReconnectStableResetMs);
+            lock (_gate)
             {
-                connection = WaitForConnectedConnectionAsync(cancellationToken)
-                    .GetAwaiter()
-                    .GetResult();
-                pacer.Reset();
+                if (ReferenceEquals(_connection, connection))
+                {
+                    _connection = null;
+                }
             }
 
-            // Wait-then-send: first packet is due at t=0, each later packet at
-            // cumulative samples / 48 kHz. mezon-sfu forwards audio immediately,
-            // so a send-side burst is a receive-side JB overrun.
-            while (true)
+            connection?.Close();
+            connection?.PeerConnection.Dispose();
+        }
+
+        return new ConnectionRunResult(wasStable, failure);
+    }
+
+    private async Task<StreamPublishGrant> GetGrantAsync(CancellationToken cancellationToken)
+    {
+        var provider = GetGrantProvider() ?? throw new StreamPublishException(
+            StreamFailureKind.Unavailable,
+            "Stream publish credentials are unavailable.");
+        try
+        {
+            return await provider(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not StreamPublishException and not OperationCanceledException)
+        {
+            throw new StreamPublishException(
+                StreamFailureKind.Unavailable,
+                "Could not get stream publish credentials.",
+                ex);
+        }
+    }
+
+    private async Task<string> PostOfferAsync(StreamPublishGrant grant, string offerSdp, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, grant.WhipUrl)
+        {
+            Content = new ByteArrayContent(Encoding.UTF8.GetBytes(offerSdp))
+        };
+        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/sdp");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", grant.Token);
+        using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        if (response.StatusCode != HttpStatusCode.Created)
+        {
+            var status = (int)response.StatusCode;
+            throw new StreamPublishException(
+                StreamPublishException.ForWhipStatus(status),
+                $"WHIP publish was refused with HTTP {status}.");
+        }
+
+        if (response.Headers.Location is not { } location)
+        {
+            throw new StreamPublishException(
+                StreamFailureKind.Unavailable,
+                "WHIP publish returned no resource location.");
+        }
+
+        SetResource(new Uri(grant.WhipUrl, location));
+        return await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task DeleteResourceAsync(Uri resource)
+    {
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            try
             {
+                using var timeout = new CancellationTokenSource(DeleteTimeout);
+                using var response = await _httpClient.DeleteAsync(resource, timeout.Token).ConfigureAwait(false);
+                if (response.StatusCode != HttpStatusCode.ServiceUnavailable)
+                {
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(
+                    "Stream publisher resource delete failed channel={ChannelId} error_type={ErrorType}",
+                    ChannelId,
+                    ex.GetType().Name);
+                return;
+            }
+        }
+    }
+
+    private static void AttachConnectionStateHandler(StreamConnection connection)
+    {
+        connection.PeerConnection.onconnectionstatechange += state =>
+        {
+            switch (state)
+            {
+                case RTCPeerConnectionState.connected:
+                    connection.MarkConnected();
+                    break;
+                case RTCPeerConnectionState.failed:
+                    connection.Fail(new StreamPublishException(
+                        StreamFailureKind.Unavailable,
+                        "Stream WebRTC connection failed."));
+                    break;
+                case RTCPeerConnectionState.closed:
+                    connection.Fail(new StreamPublishException(
+                        StreamFailureKind.Unavailable,
+                        "Stream WebRTC connection closed."));
+                    break;
+            }
+        };
+    }
+
+    private void SendLoop(CancellationToken cancellationToken)
+    {
+        var pacer = new OpusRtpPacer();
+        StreamConnection? current = null;
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var connection = GetConnection();
+                if (connection is not { IsConnected: true })
+                {
+                    cancellationToken.WaitHandle.WaitOne(20);
+                    continue;
+                }
+
+                if (!ReferenceEquals(connection, current))
+                {
+                    current = connection;
+                    pacer.Start();
+                }
+
                 pacer.Wait(cancellationToken);
+                var (packet, duration) = NextPacket();
+                var samples = duration + pacer.LagSamples();
                 try
                 {
-                    connection.PeerConnection.SendAudio(duration, packet);
-                    break;
+                    connection.PeerConnection.SendAudio(samples, packet);
                 }
                 catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
                 {
-                    // Do not drop the packet that was already removed from the
-                    // bounded queue. The connection is the failed resource;
-                    // the Ogg reader and RTP pacing timeline remain owned by
-                    // this track and resume with this same packet.
-                    _logger.LogDebug(
-                        "SFU audio send interrupted channel={ChannelId} error_type={ErrorType}",
-                        ChannelId,
-                        ex.GetType().Name);
-                    connection.SetFailure(ex);
-                    connection.Close();
-                    connection = WaitForReplacementConnectionAsync(connection, cancellationToken)
-                        .GetAwaiter()
-                        .GetResult();
-                    pacer.Reset();
-                }
-            }
-
-            pacer.Account(duration);
-            pacer.ReleaseCatchUp();
-        }
-    }
-
-    private static async Task FillOpusPacketsAsync(
-        OggOpusReader reader,
-        ChannelWriter<byte[]> writer,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            while (true)
-            {
-                var packet = await reader.ReadPacketAsync(cancellationToken).ConfigureAwait(false);
-                if (packet is null)
-                {
-                    writer.TryComplete();
-                    return;
+                    connection.Fail(new StreamPublishException(
+                        StreamFailureKind.Unavailable,
+                        "Stream audio send failed.",
+                        ex));
+                    continue;
                 }
 
-                await writer.WriteAsync(packet, cancellationToken).ConfigureAwait(false);
+                pacer.Account(samples);
             }
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            writer.TryComplete();
-            throw;
-        }
-        catch (ChannelClosedException)
-        {
-            return;
         }
         catch (Exception ex)
         {
-            writer.TryComplete(ex);
-            throw;
+            FailSession(new StreamPublishException(StreamFailureKind.Unavailable, "Stream audio sender stopped.", ex));
         }
     }
 
-    private async Task<StreamConnection> WaitForConnectedConnectionAsync(CancellationToken cancellationToken)
-    {
-        while (true)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var terminalFailure = GetTerminalFailure();
-            if (terminalFailure is not null)
-            {
-                throw new InvalidOperationException("SFU publisher reconnect is no longer available.", terminalFailure);
-            }
-
-            if (GetConnection() is { IsConnected: true } connection)
-            {
-                return connection;
-            }
-
-            await Task.Delay(TimeSpan.FromMilliseconds(50), cancellationToken).ConfigureAwait(false);
-        }
-    }
-
-    private async Task<StreamConnection> WaitForReplacementConnectionAsync(
-        StreamConnection previous,
+    private async Task ProduceAsync(
+        StreamMediaSource media,
+        ChannelWriter<(byte[] Packet, uint Samples)> writer,
         CancellationToken cancellationToken)
     {
-        while (true)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var terminalFailure = GetTerminalFailure();
-            if (terminalFailure is not null)
-            {
-                throw new InvalidOperationException("SFU publisher reconnect is no longer available.", terminalFailure);
-            }
-
-            var connection = GetConnection();
-            if (connection is { IsConnected: true } && !ReferenceEquals(connection, previous))
-            {
-                return connection;
-            }
-
-            await Task.Delay(TimeSpan.FromMilliseconds(50), cancellationToken).ConfigureAwait(false);
-        }
-    }
-
-    private async Task HeartbeatLoopAsync(ClientWebSocket websocket, CancellationToken cancellationToken)
-    {
-        using var timer = new PeriodicTimer(HeartbeatInterval);
-        while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
-        {
-            await SendJsonAsync(websocket, new { type = "ping" }, cancellationToken).ConfigureAwait(false);
-        }
-    }
-
-    private async Task SendMuteAfterConnectAsync(StreamConnection connection, CancellationToken cancellationToken)
-    {
-        bool paused;
-        lock (_gate)
-        {
-            paused = _paused;
-        }
-
-        // PauseAsync only signals connected peers, so a toggle during negotiation
-        // is reconciled here against the state declared after `joined`.
-        if (paused == connection.DeclaredMute)
-        {
-            return;
-        }
-
         try
         {
-            await SendJsonAsync(connection, new { type = "mute", is_mute = paused }, cancellationToken)
-                .ConfigureAwait(false);
-            connection.DeclaredMute = paused;
+            if (media.LocalPath is string localPath)
+            {
+                await using var file = new FileStream(
+                    localPath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    bufferSize: 64 * 1024,
+                    FileOptions.Asynchronous | FileOptions.SequentialScan);
+                await ReadPacketsAsync(file, writer, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                using var response = await _httpClient.GetAsync(
+                        media.HttpUri!,
+                        HttpCompletionOption.ResponseHeadersRead,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                response.EnsureSuccessStatusCode();
+                await using var body = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                await ReadPacketsAsync(body, writer, cancellationToken).ConfigureAwait(false);
+            }
+
+            writer.TryComplete();
         }
-        catch (Exception ex) when (ex is InvalidOperationException or WebSocketException or ObjectDisposedException or OperationCanceledException)
+        catch (Exception) when (cancellationToken.IsCancellationRequested)
         {
-            _logger.LogDebug(
-                "SFU mute state could not be restored channel={ChannelId} error_type={ErrorType} error={Error}",
+            writer.TryComplete();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                "Stream audio track failed channel={ChannelId} error_type={ErrorType}",
                 ChannelId,
-                ex.GetType().Name,
-                ex.Message);
+                ex.GetType().Name);
+            writer.TryComplete(ex is OperationCanceledException
+                ? new IOException("Audio source read timed out.", ex)
+                : ex);
         }
     }
 
-    private Task SendJsonAsync(
-        StreamConnection connection,
-        object message,
-        CancellationToken cancellationToken)
-        => SendJsonAsync(connection.WebSocket, message, cancellationToken);
-
-    private async Task SendJsonAsync(
-        ClientWebSocket websocket,
-        object message,
+    private static async Task ReadPacketsAsync(
+        Stream body,
+        ChannelWriter<(byte[] Packet, uint Samples)> writer,
         CancellationToken cancellationToken)
     {
-        var payload = JsonSerializer.SerializeToUtf8Bytes(message, JsonOptions);
-        await _writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        var reader = new OggOpusReader(body);
+        while (await reader.ReadPacketAsync(cancellationToken).ConfigureAwait(false) is { } packet)
         {
-            if (websocket.State != WebSocketState.Open)
-            {
-                throw new InvalidOperationException("SFU signaling WebSocket is not open.");
-            }
-
-            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeoutCts.CancelAfter(SendTimeout);
-            await websocket.SendAsync(
-                    payload,
-                    WebSocketMessageType.Text,
-                    endOfMessage: true,
-                    timeoutCts.Token)
+            await writer.WriteAsync((packet, OpusPacket.GetDurationSamples(packet)), cancellationToken)
                 .ConfigureAwait(false);
         }
-        finally
-        {
-            _writeGate.Release();
-        }
-    }
-
-    private static async Task<string?> ReceiveTextAsync(ClientWebSocket websocket, CancellationToken cancellationToken)
-    {
-        var buffer = new byte[16 * 1024];
-        await using var message = new MemoryStream();
-        WebSocketReceiveResult result;
-        do
-        {
-            result = await websocket.ReceiveAsync(buffer, cancellationToken).ConfigureAwait(false);
-            if (result.MessageType == WebSocketMessageType.Close)
-            {
-                return null;
-            }
-
-            if (result.MessageType == WebSocketMessageType.Text)
-            {
-                await message.WriteAsync(buffer.AsMemory(0, result.Count), cancellationToken).ConfigureAwait(false);
-            }
-        }
-        while (!result.EndOfMessage);
-
-        return Encoding.UTF8.GetString(message.ToArray());
     }
 
     private StreamConnection? GetConnection()
@@ -1156,30 +755,43 @@ public sealed class StreamPublisherSession : IAsyncDisposable
         }
     }
 
-    private Exception? GetTerminalFailure()
+    private Func<CancellationToken, Task<StreamPublishGrant>>? GetGrantProvider()
     {
         lock (_gate)
         {
-            return _terminalFailure;
+            return _grantProvider;
         }
     }
 
-    private Func<CancellationToken, Task<string>>? GetTokenProvider()
+    private Exception? GetLastFailure()
     {
         lock (_gate)
         {
-            return _tokenProvider;
+            return _lastFailure;
         }
     }
 
-    private void ResetConnectionSignal()
+    private void SetLastFailure(Exception failure)
     {
         lock (_gate)
         {
-            if (_connected.Task.IsCompleted)
-            {
-                _connected = NewSignal();
-            }
+            _lastFailure = failure;
+        }
+    }
+
+    private Uri? GetResource()
+    {
+        lock (_gate)
+        {
+            return _resource;
+        }
+    }
+
+    private void SetResource(Uri resource)
+    {
+        lock (_gate)
+        {
+            _resource = resource;
         }
     }
 
@@ -1187,62 +799,58 @@ public sealed class StreamPublisherSession : IAsyncDisposable
     {
         CancellationTokenSource? runCts;
         Task? runTask;
+        Task? senderTask;
         lock (_gate)
         {
             _started = false;
             runCts = _runCts;
             runTask = _runTask;
-            _connection?.Close();
+            senderTask = _senderTask;
             _runCts = null;
             _runTask = null;
+            _senderTask = null;
             _connected = NewSignal();
             _terminalFailure = null;
         }
 
         runCts?.Cancel();
-        await AwaitQuietlyAsync(runTask, CancellationToken.None).ConfigureAwait(false);
+        await AwaitQuietlyAsync(senderTask).ConfigureAwait(false);
+        await AwaitQuietlyAsync(runTask).ConfigureAwait(false);
         runCts?.Dispose();
     }
 
-    private void FailSession(Exception exception)
+    private void FailSession(StreamPublishException exception)
     {
+        Exception failure;
+        TrackPlayback? track;
         lock (_gate)
         {
             _terminalFailure ??= exception;
-            _connected.TrySetException(_terminalFailure);
-            _trackEnded?.TrySetException(_terminalFailure);
+            failure = _terminalFailure;
+            _connected.TrySetException(failure);
+            track = _track;
         }
 
+        track?.Ended.TrySetException(failure);
         _logger.LogError(
-            "SFU publisher reconnect stopped channel={ChannelId} error_type={ErrorType} error={Error}",
+            "Stream publisher stopped channel={ChannelId} kind={Kind} error={Error}",
             ChannelId,
-            exception.GetType().Name,
+            exception.Kind,
             exception.Message);
     }
 
-    private void CompleteTrack(string trackId)
+    private static void End(TrackPlayback? track)
     {
-        lock (_gate)
+        if (track is null)
         {
-            if (string.Equals(_trackId, trackId, StringComparison.Ordinal))
-            {
-                _trackEnded?.TrySetResult();
-            }
+            return;
         }
+
+        track.Cancellation.Cancel();
+        track.Ended.TrySetResult();
     }
 
-    private void FailTrack(string trackId, Exception exception)
-    {
-        lock (_gate)
-        {
-            if (string.Equals(_trackId, trackId, StringComparison.Ordinal))
-            {
-                _trackEnded?.TrySetException(exception);
-            }
-        }
-    }
-
-    private async Task AwaitQuietlyAsync(Task? task, CancellationToken cancellationToken)
+    private async Task AwaitQuietlyAsync(Task? task)
     {
         if (task is null)
         {
@@ -1251,10 +859,7 @@ public sealed class StreamPublisherSession : IAsyncDisposable
 
         try
         {
-            await task.WaitAsync(cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
+            await task.ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (task.IsCanceled)
         {
@@ -1262,7 +867,7 @@ public sealed class StreamPublisherSession : IAsyncDisposable
         catch (Exception ex)
         {
             _logger.LogDebug(
-                "SFU publisher task stopped with an error channel={ChannelId} error_type={ErrorType} error={Error}",
+                "Stream publisher task stopped with an error channel={ChannelId} error_type={ErrorType} error={Error}",
                 ChannelId,
                 ex.GetType().Name,
                 ex.Message);
@@ -1272,41 +877,49 @@ public sealed class StreamPublisherSession : IAsyncDisposable
     private static TaskCompletionSource NewSignal()
         => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    private sealed class StreamConnection : IDisposable
+    private sealed record TrackPlayback(
+        ChannelReader<(byte[] Packet, uint Samples)> Packets,
+        CancellationTokenSource Cancellation,
+        TaskCompletionSource Ended,
+        Task Producer);
+
+    private sealed class StreamConnection
     {
         private int _closed;
-        private int _declaredMute;
         private long _connectedAtTimestamp;
-        private Exception? _failure;
+        private StreamPublishException? _failure;
 
-        public StreamConnection(ClientWebSocket websocket, RTCPeerConnection peerConnection)
+        public StreamConnection(RTCPeerConnection peerConnection)
         {
-            WebSocket = websocket;
             PeerConnection = peerConnection;
         }
 
-        public ClientWebSocket WebSocket { get; }
         public RTCPeerConnection PeerConnection { get; }
+        public TaskCompletionSource Connected { get; } = NewSignal();
+        public TaskCompletionSource Closed { get; } = NewSignal();
         public bool IsConnected => PeerConnection.connectionState == RTCPeerConnectionState.connected;
-        public Exception? Failure => _failure;
+        public StreamPublishException? Failure => Volatile.Read(ref _failure);
 
-        /// <summary>Last mute state sent to the SFU on this signaling connection.</summary>
-        public bool DeclaredMute
+        public TimeSpan ConnectedDuration
         {
-            get => Volatile.Read(ref _declaredMute) != 0;
-            set => Volatile.Write(ref _declaredMute, value ? 1 : 0);
+            get
+            {
+                var connectedAt = Volatile.Read(ref _connectedAtTimestamp);
+                return connectedAt == 0 ? TimeSpan.Zero : Stopwatch.GetElapsedTime(connectedAt);
+            }
         }
 
-        public bool HasBeenConnected => Volatile.Read(ref _connectedAtTimestamp) != 0;
-        public TimeSpan ConnectedDuration
-            => HasBeenConnected
-                ? Stopwatch.GetElapsedTime(Volatile.Read(ref _connectedAtTimestamp))
-                : TimeSpan.Zero;
-
-        public void SetFailure(Exception failure) => Interlocked.CompareExchange(ref _failure, failure, null);
-
         public void MarkConnected()
-            => Interlocked.CompareExchange(ref _connectedAtTimestamp, Stopwatch.GetTimestamp(), 0);
+        {
+            Interlocked.CompareExchange(ref _connectedAtTimestamp, Stopwatch.GetTimestamp(), 0);
+            Connected.TrySetResult();
+        }
+
+        public void Fail(StreamPublishException failure)
+        {
+            Interlocked.CompareExchange(ref _failure, failure, null);
+            Closed.TrySetResult();
+        }
 
         public void Close()
         {
@@ -1317,21 +930,13 @@ public sealed class StreamPublisherSession : IAsyncDisposable
 
             try
             {
-                WebSocket.Abort();
-            }
-            catch (ObjectDisposedException)
-            {
-            }
-
-            try
-            {
                 PeerConnection.close();
             }
             catch (Exception)
             {
             }
-        }
 
-        public void Dispose() => Close();
+            Closed.TrySetResult();
+        }
     }
 }

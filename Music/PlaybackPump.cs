@@ -6,6 +6,7 @@ using Mezube.Domain.Entities;
 using Mezube.Infrastructure.Persistence.Redis;
 using Mezube.Media;
 using Mezube.Playback;
+using Mezube.Streaming;
 using Mezube.Ui;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics;
@@ -292,7 +293,7 @@ public sealed partial class MusicPlayer
 
                     try
                     {
-                        // Keep the WS + listeners across normal EOF; only an
+                        // Keep the publisher session across normal EOF; only an
                         // explicit cancellation marked UserStop tears it down here.
                         if (ShouldStopStreamAfterTrack(trackEndedNaturally, state.LastDestroyReason))
                         {
@@ -334,7 +335,7 @@ public sealed partial class MusicPlayer
                 }
                 catch (Exception ex)
                 {
-                    // Media prep / single-track failures keep the SFU room alive and advance the queue.
+                    // Media prep / single-track failures keep the stream session alive and advance the queue.
                     var mediaFailure = IsMediaPrepFailure(ex);
                     state.LastDestroyReason = mediaFailure
                         ? PlayerDestroyReason.TrackFailed
@@ -1034,7 +1035,7 @@ public sealed partial class MusicPlayer
         PlaybackTarget target,
         CancellationToken cancellationToken)
     {
-        // The in-process SFU publisher EOF is authoritative; duration is only used for up-next UX.
+        // The publisher EOF is authoritative; duration is only used for up-next UX.
         using var endedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var endedWait = _streamingSink.WaitUntilTrackEndedAsync(target.ChannelId, endedCts.Token);
         var upNextTask = track.Duration is { } d && d > UpNextLead
@@ -1052,7 +1053,7 @@ public sealed partial class MusicPlayer
         }
 
         _logger.LogDebug(
-            "Streaming track ended by SFU publisher EOF title={Title} channel={ChannelId}",
+            "Streaming track ended by publisher EOF title={Title} channel={ChannelId}",
             track.Title,
             target.ChannelId);
     }
@@ -1141,12 +1142,7 @@ public sealed partial class MusicPlayer
             {
                 return;
             }
-            var content = ex is AudioTooLargeException
-                ? PlayerMessageBuilder.CopyrightBlocked()
-                : PlayerMessageBuilder.FromMediaFailure(ex)
-                    ?? PlayerMessageBuilder.FromStreamFailure(ex)
-                    ?? PlayerMessageBuilder.Awkward();
-            await channel.SendAsync(content).ConfigureAwait(false);
+            await channel.SendAsync(PlayerMessageBuilder.PlaybackFailure(ex)).ConfigureAwait(false);
         }
         catch (Exception notifyEx)
         {
@@ -1158,6 +1154,11 @@ public sealed partial class MusicPlayer
     {
         for (var cur = ex; cur is not null; cur = cur.InnerException)
         {
+            if (cur is StreamPublishException)
+            {
+                return false;
+            }
+
             if (cur is MediaPrepException or AudioTooLargeException)
             {
                 return true;
@@ -1178,12 +1179,7 @@ public sealed partial class MusicPlayer
     }
 
     internal static bool IsStreamInfrastructureFailure(Exception ex)
-    {
-        var msg = ex.Message;
-        return msg.Contains("SFU", StringComparison.OrdinalIgnoreCase)
-               || msg.Contains("SFU publisher", StringComparison.OrdinalIgnoreCase)
-               || msg.Contains("session capacity", StringComparison.OrdinalIgnoreCase);
-    }
+        => ex is StreamPublishException;
 
     private async Task<long?> TryPreferredStreamChannelIdAsync(
         ICommandContext ctx,

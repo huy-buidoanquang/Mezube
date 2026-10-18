@@ -12,10 +12,10 @@ public sealed class PauseResetAndTimeoutTests
     {
         using var http = new HttpClient();
         var session = new StreamPublisherSession(new BotOptions(), http, NullLogger.Instance, 42);
-        await session.PauseAsync(true, CancellationToken.None);
+        session.SetPaused(true);
         Assert.True(session.IsPaused);
 
-        session.BeginStream("next", new StreamMediaSource(null, Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.ogg")));
+        session.BeginStream(new StreamMediaSource(null, Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.ogg")));
 
         Assert.False(session.IsPaused);
         await session.DisposeAsync();

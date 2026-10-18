@@ -46,12 +46,12 @@ public sealed class MediaCleanupHostedService : IHostedService
 
         try
         {
-            _logger.LogDebug("Disposing all SFU publisher sessions during host shutdown");
+            _logger.LogDebug("Disposing all stream publisher sessions during host shutdown");
             await _services.GetRequiredService<StreamPublisherSessionManager>().DisposeAllAsync().ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to dispose SFU publisher sessions during shutdown");
+            _logger.LogWarning(ex, "Failed to dispose stream publisher sessions during shutdown");
         }
 
         try

@@ -14,8 +14,8 @@ public sealed class MediaFailureClassificationTests
     [InlineData("bad-ogg", true)]
     [InlineData("cdn-404", true)]
     [InlineData("missing-file", true)]
-    [InlineData("sfu-unreachable", false)]
-    [InlineData("sfu-lost-during-track", false)]
+    [InlineData("stream-unreachable", false)]
+    [InlineData("stream-lost-during-track", false)]
     public async Task Playback_failure_is_classified_by_source(string source, bool mediaFailure)
     {
         var failure = await CaptureFailureAsync(source);
@@ -47,10 +47,8 @@ public sealed class MediaFailureClassificationTests
                 FileAccess.Read);
             return Task.CompletedTask;
         })),
-        "sfu-unreachable" => await StartAgainstClosedPortAsync(),
-        "sfu-lost-during-track" => StreamPublisherSession.ToTrackFailure(new InvalidOperationException(
-            "SFU publisher reconnect is no longer available.",
-            await StartAgainstClosedPortAsync())),
+        "stream-unreachable" => await StartAgainstClosedPortAsync(),
+        "stream-lost-during-track" => StreamPublisherSession.ToTrackFailure(new InvalidOperationException("sender stopped")),
         _ => throw new ArgumentOutOfRangeException(nameof(source)),
     };
 
@@ -63,7 +61,6 @@ public sealed class MediaFailureClassificationTests
 
         var options = new BotOptions
         {
-            SfuWebSocketUrl = $"ws://127.0.0.1:{port}/ws",
             StreamConnectTimeoutMs = 15000,
             StreamReconnectMaxAttempts = 0,
         };
@@ -71,7 +68,9 @@ public sealed class MediaFailureClassificationTests
         var session = new StreamPublisherSession(options, http, NullLogger.Instance, 42);
         try
         {
-            return await CaptureAsync(() => session.StartAsync("token", _ => Task.FromResult("token"), CancellationToken.None));
+            return await CaptureAsync(() => session.StartAsync(
+                _ => Task.FromResult(new StreamPublishGrant(new Uri($"http://127.0.0.1:{port}/whip/42"), "token")),
+                CancellationToken.None));
         }
         finally
         {

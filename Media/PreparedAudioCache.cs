@@ -3,7 +3,7 @@ using Mezube.Domain.Entities;
 namespace Mezube.Media;
 
 /// <summary>
-/// In-process cache of SFU-ready Ogg Opus files under <c>{TempDir}/prepared/</c>.
+/// In-process cache of stream-ready Ogg Opus files under <c>{TempDir}/prepared/</c>.
 /// Survives the yt-dlp work-id cleanup so the publisher can play without a CDN round-trip.
 /// </summary>
 internal static class PreparedAudioCache

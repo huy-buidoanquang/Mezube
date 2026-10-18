@@ -4,7 +4,9 @@ using Mezube.Bot;
 using Mezube.Domain.Entities;
 using Mezube.Music;
 using Mezube.Music.Interactive;
+using Mezube.Media;
 using Mezube.Playback;
+using Mezube.Streaming;
 using System.Buffers;
 using System.Text.Json;
 
@@ -26,36 +28,27 @@ public static class PlayerMessageBuilder
     public static void Configure(BotOptions options)
         => _options = options ?? throw new ArgumentNullException(nameof(options));
 
-    /// <summary>Map SFU publisher failures to a clear user-facing embed.</summary>
+    public static MessageContent PlaybackFailure(Exception ex)
+        => ex is AudioTooLargeException
+            ? CopyrightBlocked()
+            : FromStreamFailure(ex) ?? FromMediaFailure(ex) ?? Awkward();
+
+    /// <summary>Map stream publisher failures to a clear user-facing embed.</summary>
     public static MessageContent? FromStreamFailure(Exception ex)
-    {
-        var message = ex.Message ?? string.Empty;
-        if (Contains(message, "503") || Contains(message, "capacity") || Contains(message, "transport busy"))
-        {
-            return Error(
-                "Audio transport busy",
-                "The SFU audio transport is busy for a moment. Try again shortly.");
-        }
-
-        if (Contains(message, "download_failed") || Contains(message, "404"))
-        {
-            return Error(
-                "Audio missing",
-                "That file isn’t on the CDN anymore. Queue it again so I can re-upload.");
-        }
-
-        if (Contains(message, "publish failed") || Contains(message, "publisher"))
-        {
-            return Error(
-                "Couldn’t start playback",
-                "I couldn’t stream that track. Try another link, or try again shortly.");
-        }
-
-        return null;
-
-        static bool Contains(string haystack, string needle)
-            => haystack.Contains(needle, StringComparison.OrdinalIgnoreCase);
-    }
+        => ex is StreamPublishException failure
+            ? failure.Kind switch
+            {
+                StreamFailureKind.ChannelBusy => Error(
+                    "Channel busy",
+                    "Someone else is live in this channel."),
+                StreamFailureKind.Denied => Error(
+                    "Can’t stream here",
+                    "I can’t stream in that channel."),
+                _ => Error(
+                    "Streaming unavailable",
+                    "Streaming is unavailable right now. Try again shortly."),
+            }
+            : null;
 
     /// <summary>yt-dlp / CDN / local media prep failures.</summary>
     public static MessageContent? FromMediaFailure(Exception ex)
@@ -88,6 +81,13 @@ public static class PlayerMessageBuilder
                 return Error(
                     "Unsupported audio format",
                     "That file isn’t playable as Opus — try a different link.");
+            }
+
+            if (Contains(msg, "404"))
+            {
+                return Error(
+                    "Audio missing",
+                    "That file isn’t on the CDN anymore. Queue it again so I can re-upload.");
             }
         }
 

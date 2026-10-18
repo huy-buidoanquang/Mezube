@@ -2,16 +2,16 @@
 
 Bot phát nhạc cho [Mezon](https://mezon.ai) — prefix `!`, nguồn YouTube (`yt-dlp`) + SoundCloud + direct URL.
 
-- **Streaming only** (`!play`): SFU WebSocket + publisher WebRTC in-process, với CDN **Ogg Opus 48 kHz stereo**.
-- SFU là media transport duy nhất cho audio của stream channel và Mezon voice channel. Mezube chỉ publish audio vào stream channel.
+- **Streaming only** (`!play`): publisher WHIP/WebRTC in-process tới mezon-streaming-server, với CDN **Ogg Opus 48 kHz stereo**.
+- Stream channel chạy trên mezon-streaming-server; SFU chỉ còn cho voice channel. Mezube chỉ publish audio vào stream channel.
 
-Bot chuẩn hóa audio bằng FFmpeg, upload CDN, rồi Mezube đọc Ogg/Opus và gửi RTP audio qua SFU.
+Bot chuẩn hóa audio bằng FFmpeg, upload CDN, rồi Mezube đọc Ogg/Opus và gửi RTP audio qua WHIP tới streaming node (token lấy bằng `GetStreamPlayback`).
 
 ## Yêu cầu
 
 - .NET 10 SDK (deploy) / .NET 10 runtime (chạy framework-dependent)
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) trên PATH
-- [ffmpeg](https://ffmpeg.org/) trên PATH (chuẩn hóa Ogg Opus cho SFU publisher)
+- [ffmpeg](https://ffmpeg.org/) trên PATH (chuẩn hóa Ogg Opus cho stream publisher)
 - NuGet: `Mezon.Net.Sdk` và `SIPSorcery` (publisher WebRTC chạy trực tiếp trong Mezube)
 
 ## Cấu hình
@@ -21,7 +21,7 @@ Chọn môi trường bằng `DOTNET_ENVIRONMENT` / `ASPNETCORE_ENVIRONMENT` = `
 | File | Vai trò |
 |------|---------|
 | `appsettings.json` | Shared defaults (prefix, paths, viz/CDN URLs, logging) — **không** chứa token |
-| `appsettings.dev.json` / `appsettings.prod.json` | Host / SFU / ServerKey theo môi trường |
+| `appsettings.dev.json` / `appsettings.prod.json` | Host / ServerKey theo môi trường |
 | `appsettings.dev.local.json` / `appsettings.prod.local.json` (gitignore) | Secrets máy local — `Mezon:BotId` / `Mezon:Token` |
 
 ```powershell
@@ -46,8 +46,7 @@ dotnet run --project Mezube.csproj
 | `Mezon:BotId` / `Mezon:Token` | Bot credentials |
 | `Mezon:ServerKey` | Gateway Basic-Auth key |
 | `Mezon:Host` / `Mezon:Port` | Dev `dev-mezon.nccsoft.vn:8088`, Prod `gw.mezon.ai:443` |
-| `Mezube:SfuWebSocketUrl` | SFU signaling endpoint `ws://` hoặc `wss://`; bắt buộc cấu hình khi deploy |
-| `Mezube:StreamConnectTimeoutMs` | Timeout kết nối WebSocket/WebRTC publisher |
+| `Mezube:StreamConnectTimeoutMs` | Timeout mỗi lần kết nối WHIP/WebRTC publisher |
 | `Mezube:StreamReconnectBackoffMs` / `StreamReconnectMaxBackoffMs` | Exponential reconnect backoff cơ sở và trần tối đa |
 | `Mezube:StreamReconnectMaxAttempts` | Số lần reconnect liên tiếp tối đa trước khi session báo lỗi và dừng retry |
 | `Mezube:StreamReconnectJitterMs` / `Mezube:StreamReconnectStableResetMs` | Jitter chống retry đồng bộ và khoảng kết nối ổn định để reset bộ đếm |
@@ -60,11 +59,11 @@ dotnet run --project Mezube.csproj
 
 ### Preset gợi ý
 
-- Audio SFU: `PreparedAudioBitrateKbps=128`, wire format cố định Ogg Opus 48 kHz stereo
+- Audio stream: `PreparedAudioBitrateKbps=128`, wire format cố định Ogg Opus 48 kHz stereo
 
-Shutdown bot cancel pump + dispose mọi SFU publisher session.
+Shutdown bot cancel pump + dispose mọi stream publisher session.
 
-Playback audio published to SFU is always normalized by FFmpeg to Ogg/Opus,
+Playback audio published to the streaming server is always normalized by FFmpeg to Ogg/Opus,
 48 kHz stereo; publisher chỉ nhận URL audio đã chuẩn hóa và không tạo/gửi video track.
 
 ## Chạy

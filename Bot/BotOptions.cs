@@ -22,16 +22,11 @@ public sealed class BotOptions
     public string CommandPrefix { get; set; } = "!";
     public long DefaultClanId { get; set; }
     public long DefaultStreamChannelId { get; set; }
-    /// <summary>
-    /// SFU signaling WebSocket endpoint, for example <c>wss://sfu.example/ws</c>.
-    /// Streaming WS uses <c>ws(s)://…/ws</c>.
-    /// </summary>
-    public string SfuWebSocketUrl { get; set; } = string.Empty;
     public int StreamConnectTimeoutMs { get; set; } = 10000;
     public int StreamReconnectBackoffMs { get; set; } = 1000;
-    /// <summary>Maximum number of consecutive reconnect attempts after a failed SFU connection.</summary>
+    /// <summary>Maximum number of consecutive reconnect attempts after a failed stream connection.</summary>
     public int StreamReconnectMaxAttempts { get; set; } = 8;
-    /// <summary>Upper bound for exponential SFU reconnect backoff.</summary>
+    /// <summary>Upper bound for exponential stream reconnect backoff.</summary>
     public int StreamReconnectMaxBackoffMs { get; set; } = 30000;
     /// <summary>Random delay added to reconnects to avoid synchronized retry bursts.</summary>
     public int StreamReconnectJitterMs { get; set; } = 250;
@@ -124,17 +119,6 @@ public sealed class BotOptions
             throw new InvalidOperationException("Mezon:Token is required.");
         }
 
-        if (string.IsNullOrWhiteSpace(SfuWebSocketUrl))
-        {
-            throw new InvalidOperationException("Mezube:SfuWebSocketUrl is required.");
-        }
-
-        if (!Uri.TryCreate(SfuWebSocketUrl, UriKind.Absolute, out var sfuUri)
-            || (sfuUri.Scheme != Uri.UriSchemeWs && sfuUri.Scheme != Uri.UriSchemeWss))
-        {
-            throw new InvalidOperationException("Mezube:SfuWebSocketUrl must be an absolute ws:// or wss:// URI.");
-        }
-
         if (StreamConnectTimeoutMs < 1000
             || StreamReconnectBackoffMs < 1
             || StreamReconnectMaxAttempts < 0
@@ -142,7 +126,7 @@ public sealed class BotOptions
             || StreamReconnectJitterMs < 0
             || StreamReconnectStableResetMs < 0)
         {
-            throw new InvalidOperationException("Mezube SFU connect timeout/reconnect settings have invalid values.");
+            throw new InvalidOperationException("Mezube stream connect timeout/reconnect settings have invalid values.");
         }
 
         if (StreamMaxSessions < 1)

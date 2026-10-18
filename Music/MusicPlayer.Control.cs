@@ -142,7 +142,7 @@ public sealed partial class MusicPlayer
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "SFU pause failed clan={ClanId} paused={Paused}", clanId, paused);
+            _logger.LogWarning(ex, "Stream pause failed clan={ClanId} paused={Paused}", clanId, paused);
             return ControlOutcome.Denied(PlayerMessageBuilder.Error(
                 "Couldn’t pause/resume",
                 "Something went wrong changing playback — try again."));

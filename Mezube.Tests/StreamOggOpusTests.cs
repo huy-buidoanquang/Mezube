@@ -46,6 +46,10 @@ public sealed class StreamOggOpusTests
         => Assert.Equal(expectedSamples, OpusPacket.GetDurationSamples(new[] { toc }));
 
     [Fact]
+    public void Silence_frame_is_one_20_ms_frame()
+        => Assert.Equal(960u, OpusPacket.GetDurationSamples(StreamPublisherSession.SilenceFrame));
+
+    [Fact]
     public async Task Compatible_file_requires_48k_stereo_opus_payload()
     {
         var dir = Path.Combine(Path.GetTempPath(), "mezube-ogg-" + Guid.NewGuid().ToString("N"));

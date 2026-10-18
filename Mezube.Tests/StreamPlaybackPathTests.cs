@@ -70,7 +70,7 @@ public sealed class StreamPlaybackPathTests
     }
 
     [Fact]
-    public async Task Prepare_sfu_ogg_copies_already_compatible_file()
+    public async Task Prepare_stream_ogg_copies_already_compatible_file()
     {
         var dir = Path.Combine(Path.GetTempPath(), "mezube-prep-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
@@ -105,7 +105,9 @@ public sealed class StreamPlaybackPathTests
 
 internal static class StreamOggTestFile
 {
-    public static byte[] Stereo48k(byte[] payload)
+    public static byte[] Stereo48k(byte[] payload) => Stereo48k(new[] { payload });
+
+    public static byte[] Stereo48k(IReadOnlyList<byte[]> packets)
     {
         var head = new byte[19];
         "OpusHead"u8.CopyTo(head.AsSpan());
@@ -113,10 +115,13 @@ internal static class StreamOggTestFile
         head[9] = 2;
         System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(head.AsSpan(12, 4), 48000);
         var tags = "OpusTags\0\0\0\0"u8.ToArray();
-        return Concat(
-            Page(flags: 2, sequence: 0, head),
-            Page(flags: 0, sequence: 1, tags),
-            Page(flags: 4, sequence: 2, payload));
+        var pages = new List<byte[]> { Page(flags: 2, sequence: 0, head), Page(flags: 0, sequence: 1, tags) };
+        for (var i = 0; i < packets.Count; i++)
+        {
+            pages.Add(Page(flags: i == packets.Count - 1 ? (byte)4 : (byte)0, sequence: (uint)(i + 2), packets[i]));
+        }
+
+        return Concat(pages.ToArray());
     }
 
     private static byte[] Concat(params byte[][] parts)

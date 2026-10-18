@@ -12,7 +12,7 @@ using System.Diagnostics;
 namespace Mezube.Media;
 
 /// <summary>
-/// Ensures the SFU publisher gets a local Ogg Opus file (and a CDN URL for restart cache).
+/// Ensures the stream publisher gets a local Ogg Opus file (and a CDN URL for restart cache).
 /// Download/convert live in <see cref="PipelineProcessor"/>; CDN persist is off the play path.
 /// </summary>
 public sealed class PlayableMediaProcessor
@@ -196,13 +196,13 @@ public sealed class PlayableMediaProcessor
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             throw new MediaPrepException(
-                $"Media preparation failed for '{track.Title}'; cannot play without a SFU Ogg Opus file.",
+                $"Media preparation failed for '{track.Title}'; cannot play without an Ogg Opus file.",
                 ex);
         }
 
         if (string.IsNullOrWhiteSpace(prepared.LocalPath) || !File.Exists(prepared.LocalPath))
         {
-            throw new MediaPrepException($"Media preparation failed for '{track.Title}'; cannot play without a SFU Ogg Opus file.");
+            throw new MediaPrepException($"Media preparation failed for '{track.Title}'; cannot play without an Ogg Opus file.");
         }
 
         var storedUrl = identity is { } saved
@@ -369,7 +369,7 @@ public sealed class PlayableMediaProcessor
             return false;
         }
 
-        // The in-process SFU publisher consumes Ogg Opus 48 kHz stereo. Older
+        // The in-process stream publisher consumes Ogg Opus 48 kHz stereo. Older
         // cached .ogg/.opus assets may have a different sample rate/channel
         // layout, so they must be prepared once instead of being trusted by extension.
         return uri.AbsolutePath.Contains(".normalized.", StringComparison.OrdinalIgnoreCase);

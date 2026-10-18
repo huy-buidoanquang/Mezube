@@ -5,7 +5,7 @@ namespace Mezube.Music;
 /// <summary>
 /// One live playback session per clan. Queue Redis keys stay
 /// <c>player:{clanId}:{channelId}</c>; further requests join that bound channel
-/// instead of starting a second SFU publisher.
+/// instead of starting a second stream publisher.
 /// </summary>
 internal static class ClanSessionBinder
 {
@@ -58,7 +58,7 @@ internal static class ClanSessionBinder
 
     /// <summary>
     /// Queue empty: 5 min then default playlist if armed; otherwise 10 min then
-    /// SFU disconnect. After a failed default resume, wait the remaining 5 min.
+    /// stream disconnect. After a failed default resume, wait the remaining 5 min.
     /// !stop already tore the publisher down — keep a short in-memory TTL.
     /// </summary>
     public static TimeSpan IdleDelay(ClanPlaybackSession state)
