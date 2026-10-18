@@ -14,7 +14,7 @@ public enum PlayerDestroyReason
     QueueEmpty,
     UserStop,
     Skip,
-    SfuFailed,
+    StreamFailed,
     /// <summary>Single-track media prep/download failed - keep the SFU session, skip to next.</summary>
     TrackFailed,
     IdleTimeout,

@@ -1,5 +1,5 @@
 using Mezube.Bot;
-using Mezube.Sfu;
+using Mezube.Streaming;
 using Microsoft.Extensions.Logging.Abstractions;
 using System.Net;
 using System.Net.Sockets;
@@ -27,12 +27,12 @@ public sealed class SfuSignalingMuteTests
             var options = new BotOptions
             {
                 SfuWebSocketUrl = $"ws://127.0.0.1:{port}/ws",
-                SfuConnectTimeoutMs = 1000,
-                SfuReconnectMaxAttempts = 0,
+                StreamConnectTimeoutMs = 1000,
+                StreamReconnectMaxAttempts = 0,
             };
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             using var http = new HttpClient();
-            var session = new SfuPublisherSession(options, http, NullLogger.Instance, 42);
+            var session = new StreamPublisherSession(options, http, NullLogger.Instance, 42);
             await session.PauseAsync(paused, timeout.Token);
 
             var start = session.StartAsync("token", _ => Task.FromResult("token"), timeout.Token);

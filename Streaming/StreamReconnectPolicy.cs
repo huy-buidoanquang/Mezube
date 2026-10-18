@@ -1,6 +1,6 @@
-namespace Mezube.Sfu;
+namespace Mezube.Streaming;
 
-internal static class SfuReconnectPolicy
+internal static class StreamReconnectPolicy
 {
     public static TimeSpan GetDelay(
         int attempt,

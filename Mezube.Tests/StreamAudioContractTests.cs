@@ -1,12 +1,12 @@
 using Mezube.Bot;
 using Mezube.Helpers;
-using Mezube.Sfu;
+using Mezube.Streaming;
 using SIPSorcery.Net;
 using System.Text.Json;
 
 namespace Mezube.Tests;
 
-public sealed class SfuAudioContractTests
+public sealed class StreamAudioContractTests
 {
     [Theory]
     [InlineData("https://cdn.example.test/song.ogg", true)]
@@ -45,7 +45,7 @@ public sealed class SfuAudioContractTests
     [Fact]
     public void Publisher_creates_audio_track_without_video_track()
     {
-        using var peerConnection = SfuPublisherSession.CreateAudioPublisherPeerConnection();
+        using var peerConnection = StreamPublisherSession.CreateAudioPublisherPeerConnection();
 
         Assert.NotNull(peerConnection.AudioLocalTrack);
         Assert.Null(peerConnection.VideoLocalTrack);
@@ -54,8 +54,8 @@ public sealed class SfuAudioContractTests
     [Fact]
     public void Full_sfu_offer_produces_same_m_lines_with_video_inactive()
     {
-        using var peerConnection = SfuPublisherSession.CreateAudioPublisherPeerConnection();
-        var answer = SfuPublisherSession.CreateAudioOnlyAnswer(peerConnection, FullSfuOffer);
+        using var peerConnection = StreamPublisherSession.CreateAudioPublisherPeerConnection();
+        var answer = StreamPublisherSession.CreateAudioOnlyAnswer(peerConnection, FullSfuOffer);
         var offer = SDP.ParseSDPDescription(FullSfuOffer);
         var parsedAnswer = SDP.ParseSDPDescription(answer.sdp);
 
@@ -112,7 +112,7 @@ public sealed class SfuAudioContractTests
             }
             """);
 
-        var servers = SfuPublisherSession.ParseIceServers(document.RootElement);
+        var servers = StreamPublisherSession.ParseIceServers(document.RootElement);
 
         Assert.Equal(2, servers.Count);
         Assert.Equal("stun:stun.l.google.com:19302", servers[0].urls);
@@ -126,14 +126,14 @@ public sealed class SfuAudioContractTests
     {
         using var document = JsonDocument.Parse("""{ "type": "joined", "room": "1" }""");
 
-        Assert.Empty(SfuPublisherSession.ParseIceServers(document.RootElement));
+        Assert.Empty(StreamPublisherSession.ParseIceServers(document.RootElement));
     }
 
     [Fact]
     public void Publisher_applies_ice_servers_from_joined()
     {
         var servers = new[] { new RTCIceServer { urls = "stun:stun.l.google.com:19302" } };
-        using var peerConnection = SfuPublisherSession.CreateAudioPublisherPeerConnection(servers);
+        using var peerConnection = StreamPublisherSession.CreateAudioPublisherPeerConnection(servers);
 
         Assert.NotNull(peerConnection.AudioLocalTrack);
         Assert.NotNull(peerConnection.getConfiguration()?.iceServers);

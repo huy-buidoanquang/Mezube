@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 
-namespace Mezube.Sfu;
+namespace Mezube.Streaming;
 
 /// <summary>
 /// Waits until a Stopwatch deadline with ~1 ms error.

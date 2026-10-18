@@ -1,15 +1,15 @@
 using Mezube.Domain.Entities;
 
-namespace Mezube.Sfu;
+namespace Mezube.Streaming;
 
 /// <summary>
 /// Prepared SFU audio: a local Ogg/Opus file (first play / in-process cache) or an HTTP CDN URL.
 /// </summary>
-internal readonly record struct SfuMediaSource(Uri? HttpUri, string? LocalPath)
+internal readonly record struct StreamMediaSource(Uri? HttpUri, string? LocalPath)
 {
     public bool IsLocal => !string.IsNullOrWhiteSpace(LocalPath);
 
-    public static bool TryParse(TrackInfoEntity track, out SfuMediaSource source)
+    public static bool TryParse(TrackInfoEntity track, out StreamMediaSource source)
     {
         if (TryParseLocal(track.LocalMediaPath, out source))
         {
@@ -19,7 +19,7 @@ internal readonly record struct SfuMediaSource(Uri? HttpUri, string? LocalPath)
         return TryParse(track.MediaUrl, out source);
     }
 
-    public static bool TryParse(string? media, out SfuMediaSource source)
+    public static bool TryParse(string? media, out StreamMediaSource source)
     {
         source = default;
         if (string.IsNullOrWhiteSpace(media))
@@ -39,11 +39,11 @@ internal readonly record struct SfuMediaSource(Uri? HttpUri, string? LocalPath)
             return false;
         }
 
-        source = new SfuMediaSource(uri, LocalPath: null);
+        source = new StreamMediaSource(uri, LocalPath: null);
         return true;
     }
 
-    private static bool TryParseLocal(string? path, out SfuMediaSource source)
+    private static bool TryParseLocal(string? path, out StreamMediaSource source)
     {
         source = default;
         if (string.IsNullOrWhiteSpace(path)
@@ -53,7 +53,7 @@ internal readonly record struct SfuMediaSource(Uri? HttpUri, string? LocalPath)
             return false;
         }
 
-        source = new SfuMediaSource(HttpUri: null, path);
+        source = new StreamMediaSource(HttpUri: null, path);
         return true;
     }
 

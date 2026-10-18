@@ -1,4 +1,4 @@
-using Mezube.Sfu;
+using Mezube.Streaming;
 
 namespace Mezube.Tests;
 

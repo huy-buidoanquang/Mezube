@@ -27,7 +27,7 @@ public static class PlayerMessageBuilder
         => _options = options ?? throw new ArgumentNullException(nameof(options));
 
     /// <summary>Map SFU publisher failures to a clear user-facing embed.</summary>
-    public static MessageContent? FromSfuFailure(Exception ex)
+    public static MessageContent? FromStreamFailure(Exception ex)
     {
         var message = ex.Message ?? string.Empty;
         if (Contains(message, "503") || Contains(message, "capacity") || Contains(message, "transport busy"))

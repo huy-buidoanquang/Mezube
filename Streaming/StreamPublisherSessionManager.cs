@@ -12,9 +12,9 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 
-namespace Mezube.Sfu;
+namespace Mezube.Streaming;
 
-public sealed class SfuClientHolder
+public sealed class StreamClientHolder
 {
     private MezonClient? _client;
 
@@ -27,25 +27,25 @@ public sealed class SfuClientHolder
 /// In-process SFU publisher. It owns the signaling WebSocket, the WebRTC
 /// peer connection and the Ogg/Opus playback loop for one stream channel.
 /// </summary>
-public sealed class SfuPublisherSessionManager : IAsyncDisposable
+public sealed class StreamPublisherSessionManager : IAsyncDisposable
 {
     private readonly BotOptions _options;
     private readonly IHttpClientFactory _httpClientFactory;
-    private readonly ILogger<SfuPublisherSessionManager> _logger;
-    private readonly ConcurrentDictionary<long, SfuPublisherSession> _sessions = new();
+    private readonly ILogger<StreamPublisherSessionManager> _logger;
+    private readonly ConcurrentDictionary<long, StreamPublisherSession> _sessions = new();
     private readonly object _gate = new();
 
-    public SfuPublisherSessionManager(
+    public StreamPublisherSessionManager(
         BotOptions options,
         IHttpClientFactory httpClientFactory,
-        ILogger<SfuPublisherSessionManager> logger)
+        ILogger<StreamPublisherSessionManager> logger)
     {
         _options = options;
         _httpClientFactory = httpClientFactory;
         _logger = logger;
     }
 
-    public SfuPublisherSession GetOrCreate(long channelId)
+    public StreamPublisherSession GetOrCreate(long channelId)
     {
         if (channelId == 0)
         {
@@ -59,12 +59,12 @@ public sealed class SfuPublisherSessionManager : IAsyncDisposable
                 return existing;
             }
 
-            if (_sessions.Count >= _options.SfuMaxSessions)
+            if (_sessions.Count >= _options.StreamMaxSessions)
             {
                 throw new InvalidOperationException("SFU publisher session capacity is exhausted.");
             }
 
-            var session = new SfuPublisherSession(
+            var session = new StreamPublisherSession(
                 _options,
                 _httpClientFactory.CreateClient(nameof(MezonCdnUploader)),
                 _logger,
@@ -74,7 +74,7 @@ public sealed class SfuPublisherSessionManager : IAsyncDisposable
         }
     }
 
-    public bool TryGet(long channelId, out SfuPublisherSession session)
+    public bool TryGet(long channelId, out StreamPublisherSession session)
         => _sessions.TryGetValue(channelId, out session!);
 
     public async Task RemoveAndDisposeAsync(long channelId)
@@ -98,7 +98,7 @@ public sealed class SfuPublisherSessionManager : IAsyncDisposable
     public ValueTask DisposeAsync() => new(DisposeAllAsync());
 }
 
-public sealed class SfuPublisherSession : IAsyncDisposable
+public sealed class StreamPublisherSession : IAsyncDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly TimeSpan SendTimeout = TimeSpan.FromSeconds(10);
@@ -114,7 +114,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
     private TaskCompletionSource _connected = NewSignal();
     private Task? _runTask;
     private CancellationTokenSource? _runCts;
-    private DirectSfuConnection? _connection;
+    private StreamConnection? _connection;
     private TaskCompletionSource? _trackEnded;
     private CancellationTokenSource? _trackCts;
     private string? _trackId;
@@ -124,7 +124,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
     private bool _stopped;
     private bool _paused;
 
-    internal SfuPublisherSession(BotOptions options, HttpClient httpClient, ILogger logger, long channelId)
+    internal StreamPublisherSession(BotOptions options, HttpClient httpClient, ILogger logger, long channelId)
     {
         _options = options;
         _httpClient = httpClient;
@@ -158,7 +158,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
         {
             if (_stopped)
             {
-                throw new ObjectDisposedException(nameof(SfuPublisherSession));
+                throw new ObjectDisposedException(nameof(StreamPublisherSession));
             }
 
             _tokenProvider = tokenProvider;
@@ -175,7 +175,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
         try
         {
             await connectedTask.WaitAsync(
-                    TimeSpan.FromMilliseconds(_options.SfuConnectTimeoutMs),
+                    TimeSpan.FromMilliseconds(_options.StreamConnectTimeoutMs),
                     cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -197,7 +197,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
         Func<CancellationToken, Task<string>> tokenProvider,
         CancellationToken cancellationToken)
     {
-        if (!SfuMediaSource.TryParse(mediaUrl, out var media))
+        if (!StreamMediaSource.TryParse(mediaUrl, out var media))
         {
             throw new ArgumentException("SFU playback requires a local .ogg/.opus file or an absolute HTTP(S) media URL.", nameof(mediaUrl));
         }
@@ -206,19 +206,19 @@ public sealed class SfuPublisherSession : IAsyncDisposable
         BeginStream(trackId, media);
     }
 
-    internal void BeginStream(string trackId, SfuMediaSource media)
+    internal void BeginStream(string trackId, StreamMediaSource media)
     {
         if (string.IsNullOrWhiteSpace(trackId))
         {
             throw new ArgumentException("An SFU track id is required.", nameof(trackId));
         }
 
-        DirectSfuConnection? connection;
+        StreamConnection? connection;
         lock (_gate)
         {
             if (_stopped)
             {
-                throw new ObjectDisposedException(nameof(SfuPublisherSession));
+                throw new ObjectDisposedException(nameof(StreamPublisherSession));
             }
 
             _trackCts?.Cancel();
@@ -251,7 +251,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
 
     public async Task PauseAsync(bool paused, CancellationToken cancellationToken)
     {
-        DirectSfuConnection? connection;
+        StreamConnection? connection;
         lock (_gate)
         {
             if (_stopped)
@@ -351,25 +351,25 @@ public sealed class SfuPublisherSession : IAsyncDisposable
             string? refreshedToken = null;
             while (refreshedToken is null && !cancellationToken.IsCancellationRequested)
             {
-                if (reconnectAttempts >= _options.SfuReconnectMaxAttempts)
+                if (reconnectAttempts >= _options.StreamReconnectMaxAttempts)
                 {
                     FailSession(new InvalidOperationException(
-                        $"SFU publisher reconnect limit reached after {_options.SfuReconnectMaxAttempts} attempts."));
+                        $"SFU publisher reconnect limit reached after {_options.StreamReconnectMaxAttempts} attempts."));
                     return;
                 }
 
                 reconnectAttempts++;
                 ResetConnectionSignal();
-                var delay = SfuReconnectPolicy.GetDelay(
+                var delay = StreamReconnectPolicy.GetDelay(
                     reconnectAttempts,
-                    _options.SfuReconnectBackoffMs,
-                    _options.SfuReconnectMaxBackoffMs,
-                    _options.SfuReconnectJitterMs);
+                    _options.StreamReconnectBackoffMs,
+                    _options.StreamReconnectMaxBackoffMs,
+                    _options.StreamReconnectJitterMs);
                 _logger.LogWarning(
                     "SFU publisher reconnect scheduled channel={ChannelId} attempt={Attempt}/{MaxAttempts} delay_ms={DelayMs}",
                     ChannelId,
                     reconnectAttempts,
-                    _options.SfuReconnectMaxAttempts,
+                    _options.StreamReconnectMaxAttempts,
                     (int)delay.TotalMilliseconds);
 
                 try
@@ -425,7 +425,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         RTCPeerConnection? peerConnection = null;
-        DirectSfuConnection? connection = null;
+        StreamConnection? connection = null;
         Exception? failure = null;
         var wasStable = false;
         try
@@ -502,7 +502,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
         {
             wasStable = connection is not null
                 && connection.HasBeenConnected
-                && connection.ConnectedDuration >= TimeSpan.FromMilliseconds(_options.SfuReconnectStableResetMs);
+                && connection.ConnectedDuration >= TimeSpan.FromMilliseconds(_options.StreamReconnectStableResetMs);
             connection?.Close();
             peerConnection?.Dispose();
             lock (_gate)
@@ -585,7 +585,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
         return null;
     }
 
-    private DirectSfuConnection? TryAttachAfterJoined(
+    private StreamConnection? TryAttachAfterJoined(
         ClientWebSocket websocket,
         string payload,
         CancellationToken cancellationToken,
@@ -601,7 +601,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
 
         var iceServers = ParseIceServers(document.RootElement);
         peerConnection = CreateAudioPublisherPeerConnection(iceServers);
-        var connection = new DirectSfuConnection(websocket, peerConnection);
+        var connection = new StreamConnection(websocket, peerConnection);
         lock (_gate)
         {
             if (_stopped)
@@ -623,7 +623,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
         return connection;
     }
 
-    private void AttachConnectionStateHandler(DirectSfuConnection connection, CancellationToken cancellationToken)
+    private void AttachConnectionStateHandler(StreamConnection connection, CancellationToken cancellationToken)
     {
         connection.PeerConnection.onconnectionstatechange += state =>
         {
@@ -682,7 +682,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
     }
 
     private async Task HandleSignalingMessageAsync(
-        DirectSfuConnection connection,
+        StreamConnection connection,
         string payload,
         CancellationToken cancellationToken)
     {
@@ -724,7 +724,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
     }
 
     private async Task AnswerOfferAsync(
-        DirectSfuConnection connection,
+        StreamConnection connection,
         JsonElement message,
         CancellationToken cancellationToken)
     {
@@ -799,7 +799,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
         }
     }
 
-    private async Task StreamAudioAsync(string trackId, SfuMediaSource media, CancellationToken cancellationToken)
+    private async Task StreamAudioAsync(string trackId, StreamMediaSource media, CancellationToken cancellationToken)
     {
         try
         {
@@ -1007,7 +1007,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
         }
     }
 
-    private async Task<DirectSfuConnection> WaitForConnectedConnectionAsync(CancellationToken cancellationToken)
+    private async Task<StreamConnection> WaitForConnectedConnectionAsync(CancellationToken cancellationToken)
     {
         while (true)
         {
@@ -1027,8 +1027,8 @@ public sealed class SfuPublisherSession : IAsyncDisposable
         }
     }
 
-    private async Task<DirectSfuConnection> WaitForReplacementConnectionAsync(
-        DirectSfuConnection previous,
+    private async Task<StreamConnection> WaitForReplacementConnectionAsync(
+        StreamConnection previous,
         CancellationToken cancellationToken)
     {
         while (true)
@@ -1059,7 +1059,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
         }
     }
 
-    private async Task SendMuteAfterConnectAsync(DirectSfuConnection connection, CancellationToken cancellationToken)
+    private async Task SendMuteAfterConnectAsync(StreamConnection connection, CancellationToken cancellationToken)
     {
         bool paused;
         lock (_gate)
@@ -1091,7 +1091,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
     }
 
     private Task SendJsonAsync(
-        DirectSfuConnection connection,
+        StreamConnection connection,
         object message,
         CancellationToken cancellationToken)
         => SendJsonAsync(connection.WebSocket, message, cancellationToken);
@@ -1148,7 +1148,7 @@ public sealed class SfuPublisherSession : IAsyncDisposable
         return Encoding.UTF8.GetString(message.ToArray());
     }
 
-    private DirectSfuConnection? GetConnection()
+    private StreamConnection? GetConnection()
     {
         lock (_gate)
         {
@@ -1272,14 +1272,14 @@ public sealed class SfuPublisherSession : IAsyncDisposable
     private static TaskCompletionSource NewSignal()
         => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    private sealed class DirectSfuConnection : IDisposable
+    private sealed class StreamConnection : IDisposable
     {
         private int _closed;
         private int _declaredMute;
         private long _connectedAtTimestamp;
         private Exception? _failure;
 
-        public DirectSfuConnection(ClientWebSocket websocket, RTCPeerConnection peerConnection)
+        public StreamConnection(ClientWebSocket websocket, RTCPeerConnection peerConnection)
         {
             WebSocket = websocket;
             PeerConnection = peerConnection;

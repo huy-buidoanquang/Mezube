@@ -20,7 +20,7 @@ namespace Mezube.Music;
 public sealed partial class MusicPlayer
 {
     private readonly ITrackResolver _resolver;
-    private readonly SfuStreamingChannelSink _streamingSink;
+    private readonly StreamingChannelSink _streamingSink;
     private readonly BindStore _binds;
     private readonly MusicVizAssets _viz;
     private readonly PlaybackAccess _access;
@@ -44,7 +44,7 @@ public sealed partial class MusicPlayer
 
     public MusicPlayer(
         ITrackResolver resolver,
-        SfuStreamingChannelSink streamingSink,
+        StreamingChannelSink streamingSink,
         BindStore binds,
         MusicVizAssets viz,
         PlaybackAccess access,

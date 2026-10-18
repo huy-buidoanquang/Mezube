@@ -294,7 +294,7 @@ public sealed partial class MusicPlayer
                     {
                         // Keep the WS + listeners across normal EOF; only an
                         // explicit cancellation marked UserStop tears it down here.
-                        if (ShouldStopSfuAfterTrack(trackEndedNaturally, state.LastDestroyReason))
+                        if (ShouldStopStreamAfterTrack(trackEndedNaturally, state.LastDestroyReason))
                         {
                             await _streamingSink.StopAsync(target, CancellationToken.None).ConfigureAwait(false);
                         }
@@ -338,7 +338,7 @@ public sealed partial class MusicPlayer
                     var mediaFailure = IsMediaPrepFailure(ex);
                     state.LastDestroyReason = mediaFailure
                         ? PlayerDestroyReason.TrackFailed
-                        : PlayerDestroyReason.SfuFailed;
+                        : PlayerDestroyReason.StreamFailed;
                     _logger.LogError(ex, "Playback failed for {Title} channel={ChannelId}", track.Title, target.ChannelId);
                     await NotifyPlaybackFailureAsync(state, track, ex).ConfigureAwait(false);
 
@@ -365,7 +365,7 @@ public sealed partial class MusicPlayer
                             _logger.LogDebug(stopEx, "Stop after failure ignored channel={ChannelId}", target.ChannelId);
                         }
 
-                        if (IsSfuInfrastructureFailure(ex))
+                        if (IsStreamInfrastructureFailure(ex))
                         {
                             state.Queue.Clear(clearCurrent: true);
                             break;
@@ -381,7 +381,7 @@ public sealed partial class MusicPlayer
                     {
                         PlayerDestroyReason.Skip => PlayEndReason.Skip,
                         PlayerDestroyReason.UserStop => PlayEndReason.Stop,
-                        PlayerDestroyReason.SfuFailed => PlayEndReason.Error,
+                        PlayerDestroyReason.StreamFailed => PlayEndReason.Error,
                         PlayerDestroyReason.TrackFailed => PlayEndReason.Error,
                         _ => PlayEndReason.Completed,
                     };
@@ -1057,7 +1057,7 @@ public sealed partial class MusicPlayer
             target.ChannelId);
     }
 
-    internal static bool ShouldStopSfuAfterTrack(
+    internal static bool ShouldStopStreamAfterTrack(
         bool trackEndedNaturally,
         PlayerDestroyReason destroyReason)
         => !trackEndedNaturally && destroyReason == PlayerDestroyReason.UserStop;
@@ -1144,7 +1144,7 @@ public sealed partial class MusicPlayer
             var content = ex is AudioTooLargeException
                 ? PlayerMessageBuilder.CopyrightBlocked()
                 : PlayerMessageBuilder.FromMediaFailure(ex)
-                    ?? PlayerMessageBuilder.FromSfuFailure(ex)
+                    ?? PlayerMessageBuilder.FromStreamFailure(ex)
                     ?? PlayerMessageBuilder.Awkward();
             await channel.SendAsync(content).ConfigureAwait(false);
         }
@@ -1177,7 +1177,7 @@ public sealed partial class MusicPlayer
         return false;
     }
 
-    internal static bool IsSfuInfrastructureFailure(Exception ex)
+    internal static bool IsStreamInfrastructureFailure(Exception ex)
     {
         var msg = ex.Message;
         return msg.Contains("SFU", StringComparison.OrdinalIgnoreCase)

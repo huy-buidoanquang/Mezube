@@ -1,7 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using Mezube.Bot;
-using Mezube.Sfu;
+using Mezube.Streaming;
 using Microsoft.Extensions.Logging;
 
 namespace Mezube.Media;
@@ -26,7 +26,7 @@ public sealed class FfmpegProcessor
     /// Prefer copy, then remux (<c>-c:a copy</c>), then libopus transcode.
     /// Compatibility is decided by <see cref="OggOpusReader"/> — the same parser the publisher uses.
     /// </summary>
-    public async Task<string?> PrepareSfuOggAsync(
+    public async Task<string?> PrepareStreamOggAsync(
         string inputPath,
         string outputPath,
         CancellationToken cancellationToken = default)
@@ -40,7 +40,7 @@ public sealed class FfmpegProcessor
             Directory.CreateDirectory(outputDir);
         }
 
-        if (await OggOpusReader.IsSfuCompatibleFileAsync(inputPath, cancellationToken).ConfigureAwait(false))
+        if (await OggOpusReader.IsStreamCompatibleFileAsync(inputPath, cancellationToken).ConfigureAwait(false))
         {
             if (!PathsEqual(inputPath, outputPath))
             {
@@ -61,7 +61,7 @@ public sealed class FfmpegProcessor
 
         var remuxed = await RemuxOpusToOggAsync(inputPath, outputPath, cancellationToken).ConfigureAwait(false);
         if (remuxed is not null
-            && await OggOpusReader.IsSfuCompatibleFileAsync(remuxed, cancellationToken).ConfigureAwait(false))
+            && await OggOpusReader.IsStreamCompatibleFileAsync(remuxed, cancellationToken).ConfigureAwait(false))
         {
             _logger.LogDebug(
                 "Preparing audio master via remux copy inputExt={InputExt} outputExt={OutputExt}",

@@ -105,7 +105,7 @@ public sealed class PipelineProcessor
         string outputPath,
         CancellationToken cancellationToken)
     {
-        var oggPath = await ffmpeg.PrepareSfuOggAsync(inputPath, workPath, cancellationToken)
+        var oggPath = await ffmpeg.PrepareStreamOggAsync(inputPath, workPath, cancellationToken)
             .ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(oggPath) || !File.Exists(oggPath))
         {

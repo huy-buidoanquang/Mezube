@@ -1,9 +1,9 @@
 using System.Buffers.Binary;
-using Mezube.Sfu;
+using Mezube.Streaming;
 
 namespace Mezube.Tests;
 
-public sealed class SfuOggOpusTests
+public sealed class StreamOggOpusTests
 {
     [Fact]
     public async Task Reader_handles_headers_and_packet_split_across_pages()
@@ -54,13 +54,13 @@ public sealed class SfuOggOpusTests
         {
             var stereo = Path.Combine(dir, "ok.ogg");
             await File.WriteAllBytesAsync(stereo, BuildOgg(new byte[] { 0x08, 0x01 }));
-            Assert.True(await OggOpusReader.IsSfuCompatibleFileAsync(stereo, CancellationToken.None));
+            Assert.True(await OggOpusReader.IsStreamCompatibleFileAsync(stereo, CancellationToken.None));
 
             var mono = Path.Combine(dir, "mono.ogg");
             await File.WriteAllBytesAsync(mono, BuildOgg(new byte[] { 0x08, 0x01 }, channels: 1));
-            Assert.False(await OggOpusReader.IsSfuCompatibleFileAsync(mono, CancellationToken.None));
+            Assert.False(await OggOpusReader.IsStreamCompatibleFileAsync(mono, CancellationToken.None));
 
-            Assert.False(await OggOpusReader.IsSfuCompatibleFileAsync(Path.Combine(dir, "missing.ogg"), CancellationToken.None));
+            Assert.False(await OggOpusReader.IsStreamCompatibleFileAsync(Path.Combine(dir, "missing.ogg"), CancellationToken.None));
         }
         finally
         {

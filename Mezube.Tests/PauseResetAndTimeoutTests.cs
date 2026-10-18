@@ -1,6 +1,6 @@
 using Mezube.Bot;
 using Mezube.Music;
-using Mezube.Sfu;
+using Mezube.Streaming;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Mezube.Tests;
@@ -11,11 +11,11 @@ public sealed class PauseResetAndTimeoutTests
     public async Task BeginStream_starts_the_next_track_unpaused()
     {
         using var http = new HttpClient();
-        var session = new SfuPublisherSession(new BotOptions(), http, NullLogger.Instance, 42);
+        var session = new StreamPublisherSession(new BotOptions(), http, NullLogger.Instance, 42);
         await session.PauseAsync(true, CancellationToken.None);
         Assert.True(session.IsPaused);
 
-        session.BeginStream("next", new SfuMediaSource(null, Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.ogg")));
+        session.BeginStream("next", new StreamMediaSource(null, Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.ogg")));
 
         Assert.False(session.IsPaused);
         await session.DisposeAsync();

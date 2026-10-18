@@ -1,14 +1,14 @@
 using Mezube.Domain.Entities;
 using Mezube.Media;
 using Mezube.Music;
-using Mezube.Sfu;
+using Mezube.Streaming;
 using Mezon.Net.Sdk;
 using Mezon.Net.Models;
 using Microsoft.Extensions.Logging;
 
 namespace Mezube.Playback;
 
-public interface ISfuPublisherSink
+public interface IStreamPublisherSink
 {
     Task EndTrackAsync(PlaybackTarget target, CancellationToken cancellationToken = default);
     Task SetPausedAsync(PlaybackTarget target, bool paused, CancellationToken cancellationToken = default);
@@ -16,18 +16,18 @@ public interface ISfuPublisherSink
 }
 
 /// <summary>Publishes prepared Ogg/Opus audio to one SFU room per stream channel.</summary>
-public sealed class SfuStreamingChannelSink : IPlaybackSink, ISfuPublisherSink
+public sealed class StreamingChannelSink : IPlaybackSink, IStreamPublisherSink
 {
-    private readonly SfuPublisherSessionManager _sessions;
-    private readonly SfuClientHolder _holder;
+    private readonly StreamPublisherSessionManager _sessions;
+    private readonly StreamClientHolder _holder;
     private readonly TrackPrepService _prep;
-    private readonly ILogger<SfuStreamingChannelSink> _logger;
+    private readonly ILogger<StreamingChannelSink> _logger;
 
-    public SfuStreamingChannelSink(
-        SfuPublisherSessionManager sessions,
-        SfuClientHolder holder,
+    public StreamingChannelSink(
+        StreamPublisherSessionManager sessions,
+        StreamClientHolder holder,
         TrackPrepService prep,
-        ILogger<SfuStreamingChannelSink> logger)
+        ILogger<StreamingChannelSink> logger)
     {
         _sessions = sessions;
         _holder = holder;
@@ -61,7 +61,7 @@ public sealed class SfuStreamingChannelSink : IPlaybackSink, ISfuPublisherSink
                 PreparedAssetKind.Audio,
                 cancellationToken)
             .ConfigureAwait(false);
-        if (!SfuMediaSource.TryParse(playable, out var media))
+        if (!StreamMediaSource.TryParse(playable, out var media))
         {
             throw new MediaPrepException("SFU stream playback requires a local .ogg/.opus file or an absolute .ogg/.opus URL.");
         }

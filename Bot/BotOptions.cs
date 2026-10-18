@@ -27,17 +27,17 @@ public sealed class BotOptions
     /// Streaming WS uses <c>ws(s)://…/ws</c>.
     /// </summary>
     public string SfuWebSocketUrl { get; set; } = string.Empty;
-    public int SfuConnectTimeoutMs { get; set; } = 10000;
-    public int SfuReconnectBackoffMs { get; set; } = 1000;
+    public int StreamConnectTimeoutMs { get; set; } = 10000;
+    public int StreamReconnectBackoffMs { get; set; } = 1000;
     /// <summary>Maximum number of consecutive reconnect attempts after a failed SFU connection.</summary>
-    public int SfuReconnectMaxAttempts { get; set; } = 8;
+    public int StreamReconnectMaxAttempts { get; set; } = 8;
     /// <summary>Upper bound for exponential SFU reconnect backoff.</summary>
-    public int SfuReconnectMaxBackoffMs { get; set; } = 30000;
+    public int StreamReconnectMaxBackoffMs { get; set; } = 30000;
     /// <summary>Random delay added to reconnects to avoid synchronized retry bursts.</summary>
-    public int SfuReconnectJitterMs { get; set; } = 250;
+    public int StreamReconnectJitterMs { get; set; } = 250;
     /// <summary>How long a connection must stay connected before the retry counter resets.</summary>
-    public int SfuReconnectStableResetMs { get; set; } = 30000;
-    public int SfuMaxSessions { get; set; } = 32;
+    public int StreamReconnectStableResetMs { get; set; } = 30000;
+    public int StreamMaxSessions { get; set; } = 32;
     public string YtDlpPath { get; set; } = "yt-dlp";
     /// <summary>
     /// YouTube Innertube clients for yt-dlp (<c>--extractor-args youtube:player_client=…</c>).
@@ -135,19 +135,19 @@ public sealed class BotOptions
             throw new InvalidOperationException("Mezube:SfuWebSocketUrl must be an absolute ws:// or wss:// URI.");
         }
 
-        if (SfuConnectTimeoutMs < 1000
-            || SfuReconnectBackoffMs < 1
-            || SfuReconnectMaxAttempts < 0
-            || SfuReconnectMaxBackoffMs < SfuReconnectBackoffMs
-            || SfuReconnectJitterMs < 0
-            || SfuReconnectStableResetMs < 0)
+        if (StreamConnectTimeoutMs < 1000
+            || StreamReconnectBackoffMs < 1
+            || StreamReconnectMaxAttempts < 0
+            || StreamReconnectMaxBackoffMs < StreamReconnectBackoffMs
+            || StreamReconnectJitterMs < 0
+            || StreamReconnectStableResetMs < 0)
         {
             throw new InvalidOperationException("Mezube SFU connect timeout/reconnect settings have invalid values.");
         }
 
-        if (SfuMaxSessions < 1)
+        if (StreamMaxSessions < 1)
         {
-            throw new InvalidOperationException("Mezube:SfuMaxSessions must be >= 1.");
+            throw new InvalidOperationException("Mezube:StreamMaxSessions must be >= 1.");
         }
 
         if (string.IsNullOrWhiteSpace(CdnBaseUrl))

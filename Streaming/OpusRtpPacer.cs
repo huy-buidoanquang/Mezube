@@ -1,6 +1,6 @@
 using System.Diagnostics;
 
-namespace Mezube.Sfu;
+namespace Mezube.Streaming;
 
 /// <summary>
 /// Wall-clock RTP pacer for Opus at 48 kHz.

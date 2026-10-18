@@ -1,12 +1,12 @@
 using Mezube.Bot;
 using Mezube.Domain.Entities;
 using Mezube.Media;
-using Mezube.Sfu;
+using Mezube.Streaming;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Mezube.Tests;
 
-public sealed class SfuPlaybackPathTests
+public sealed class StreamPlaybackPathTests
 {
     [Theory]
     [InlineData("https://cdn.example.test/song.normalized.ogg", true)]
@@ -15,7 +15,7 @@ public sealed class SfuPlaybackPathTests
     [InlineData("https://cdn.example.test/song.mp3", false)]
     [InlineData("", false)]
     public void Media_source_parses_http_ogg_opus_only(string url, bool expected)
-        => Assert.Equal(expected, SfuMediaSource.TryParse(url, out _));
+        => Assert.Equal(expected, StreamMediaSource.TryParse(url, out _));
 
     [Fact]
     public void Media_source_does_not_treat_missing_local_ogg_as_ready()
@@ -29,7 +29,7 @@ public sealed class SfuPlaybackPathTests
         };
 
         Assert.False(File.Exists(path));
-        Assert.False(SfuMediaSource.TryParse(track, out _));
+        Assert.False(StreamMediaSource.TryParse(track, out _));
     }
 
     [Fact]
@@ -48,7 +48,7 @@ public sealed class SfuPlaybackPathTests
                 LocalMediaPath = path,
             };
 
-            Assert.True(SfuMediaSource.TryParse(track, out var source));
+            Assert.True(StreamMediaSource.TryParse(track, out var source));
             Assert.True(source.IsLocal);
             Assert.Equal(path, source.LocalPath);
         }
@@ -84,9 +84,9 @@ public sealed class SfuPlaybackPathTests
                 new BotOptions { TempDir = dir, FfmpegPath = Path.Combine(dir, "ffmpeg-missing") },
                 NullLogger<FfmpegProcessor>.Instance);
 
-            var prepared = await ffmpeg.PrepareSfuOggAsync(input, output, CancellationToken.None);
+            var prepared = await ffmpeg.PrepareStreamOggAsync(input, output, CancellationToken.None);
             Assert.Equal(output, prepared);
-            Assert.True(await OggOpusReader.IsSfuCompatibleFileAsync(output, CancellationToken.None));
+            Assert.True(await OggOpusReader.IsStreamCompatibleFileAsync(output, CancellationToken.None));
         }
         finally
         {
@@ -97,13 +97,13 @@ public sealed class SfuPlaybackPathTests
     private static byte[] CompatibleOgg()
     {
         using var stream = new MemoryStream();
-        // Reuse the contract test builder via a file written by SfuOggOpusTests isn't accessible.
-        // Minimal valid stereo 48 kHz stream is produced the same way as SfuOggOpusTests.
-        return SfuOggTestFile.Stereo48k(new byte[] { 0x08, 0x01 });
+        // Reuse the contract test builder via a file written by StreamOggOpusTests isn't accessible.
+        // Minimal valid stereo 48 kHz stream is produced the same way as StreamOggOpusTests.
+        return StreamOggTestFile.Stereo48k(new byte[] { 0x08, 0x01 });
     }
 }
 
-internal static class SfuOggTestFile
+internal static class StreamOggTestFile
 {
     public static byte[] Stereo48k(byte[] payload)
     {
