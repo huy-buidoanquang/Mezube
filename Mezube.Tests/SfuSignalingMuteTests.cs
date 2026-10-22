@@ -59,6 +59,44 @@ public sealed class SfuSignalingMuteTests
         }
     }
 
+    [Fact]
+    public async Task StartAsync_joins_with_media_pool_version_1()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            var options = new BotOptions
+            {
+                SfuWebSocketUrl = $"ws://127.0.0.1:{port}/ws",
+                SfuConnectTimeoutMs = 1000,
+                SfuReconnectMaxAttempts = 0,
+            };
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var http = new HttpClient();
+            var session = new SfuPublisherSession(options, http, NullLogger.Instance, 42);
+
+            var start = session.StartAsync("meet-jwt", _ => Task.FromResult("meet-jwt"), timeout.Token);
+            using var tcp = await listener.AcceptTcpClientAsync(timeout.Token);
+            using var server = await AcceptWebSocketAsync(tcp.GetStream(), timeout.Token);
+            var join = await ReceiveJsonAsync(server, timeout.Token);
+
+            Assert.Equal("join", join.GetProperty("type").GetString());
+            Assert.Equal("42", join.GetProperty("room").GetString());
+            Assert.Equal("meet-jwt", join.GetProperty("token").GetString());
+            Assert.Equal("speaker", join.GetProperty("role").GetString());
+            Assert.Equal(1, join.GetProperty("media_pool_version").GetInt32());
+
+            await Assert.ThrowsAsync<TimeoutException>(() => start);
+            await session.DisposeAsync();
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
     private static async Task<WebSocket> AcceptWebSocketAsync(NetworkStream stream, CancellationToken cancellationToken)
     {
         var request = new List<byte>();

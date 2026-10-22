@@ -441,7 +441,8 @@ public sealed class SfuPublisherSession : IAsyncDisposable
                         type = "join",
                         room = ChannelId.ToString(System.Globalization.CultureInfo.InvariantCulture),
                         token,
-                        role = "speaker"
+                        role = "speaker",
+                        media_pool_version = 1
                     },
                     cancellationToken)
                 .ConfigureAwait(false);

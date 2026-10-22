@@ -71,6 +71,32 @@ public sealed class SfuAudioContractTests
             Assert.Equal(MediaStreamStatusEnum.Inactive, media.MediaStreamStatus));
     }
 
+    [Theory]
+    [InlineData(6, 6, 6)]
+    [InlineData(2, 1, 1)]
+    public void Decoupled_sfu_offer_answer_keeps_every_m_line_with_only_mid_0_sending(int audio, int camera, int screen)
+    {
+        using var peerConnection = SfuPublisherSession.CreateAudioPublisherPeerConnection();
+        var answer = SDP.ParseSDPDescription(
+            SfuPublisherSession.CreateAudioOnlyAnswer(peerConnection, DecoupledSfuOffer(audio, camera, screen)).sdp);
+
+        var expected = new[] { SDPMediaTypesEnum.audio, SDPMediaTypesEnum.video, SDPMediaTypesEnum.video }
+            .Concat(Enumerable.Repeat(SDPMediaTypesEnum.audio, audio))
+            .Concat(Enumerable.Repeat(SDPMediaTypesEnum.video, camera + screen))
+            .ToArray();
+        Assert.Equal(expected.Length, answer.Media.Count);
+        for (var i = 0; i < expected.Length; i++)
+        {
+            Assert.Equal(expected[i], answer.Media[i].Media);
+            Assert.Equal(i.ToString(System.Globalization.CultureInfo.InvariantCulture), answer.Media[i].MediaID);
+        }
+
+        Assert.Equal(MediaStreamStatusEnum.SendOnly, answer.Media[0].MediaStreamStatus);
+        Assert.NotEmpty(answer.Media[0].SsrcAttributes);
+        Assert.All(answer.Media.Skip(1), media =>
+            Assert.Equal(MediaStreamStatusEnum.Inactive, media.MediaStreamStatus));
+    }
+
     [Fact]
     public void Joined_ice_servers_parse_stun_and_turn()
     {
@@ -192,6 +218,88 @@ public sealed class SfuAudioContractTests
         "a=fmtp:99 apt=98",
         string.Empty
     });
+
+    private static string DecoupledSfuOffer(int audio, int camera, int screen)
+    {
+        const uint slotSsrcBase = 0x10000000;
+        var total = 3 + audio + camera + screen;
+        var lines = new List<string>
+        {
+            "v=0",
+            "o=- 1792664000 2 IN IP4 127.0.0.1",
+            "s=-",
+            "t=0 0",
+            "a=group:BUNDLE " + string.Join(' ', Enumerable.Range(0, total)),
+            "a=ice-lite",
+        };
+
+        void Section(int mid, string media, string payloads, string direction, IEnumerable<string> attributes)
+        {
+            lines.Add($"m={media} 7000 UDP/TLS/RTP/SAVPF {payloads}");
+            lines.Add("c=IN IP4 127.0.0.1");
+            lines.Add("a=ice-ufrag:sfuUfrag");
+            lines.Add("a=ice-pwd:sfuPasswordValueGoesHereXXXX");
+            lines.Add("a=fingerprint:sha-256 AA:BB:CC:DD:EE:FF");
+            lines.Add("a=setup:passive");
+            if (mid == 0)
+            {
+                lines.Add("a=candidate:1 1 udp 2130706431 127.0.0.1 7000 typ host");
+                lines.Add("a=end-of-candidates");
+            }
+
+            lines.Add($"a={direction}");
+            lines.Add($"a=mid:{mid}");
+            lines.Add("a=rtcp-mux");
+            lines.AddRange(attributes);
+        }
+
+        string[] Opus() => ["a=rtpmap:111 opus/48000/2", "a=fmtp:111 minptime=10;useinbandfec=1;usedtx=1;maxaveragebitrate=32000"];
+        string[] Vp8() => ["a=rtpmap:96 VP8/90000", "a=rtcp-fb:96 nack", "a=rtcp-fb:96 nack pli", "a=rtcp-fb:96 transport-cc", "a=rtpmap:97 rtx/90000", "a=fmtp:97 apt=96"];
+        string[] Vp9() => ["a=rtpmap:98 VP9/90000", "a=rtcp-fb:98 nack", "a=rtcp-fb:98 nack pli", "a=rtcp-fb:98 transport-cc", "a=fmtp:98 profile-id=0", "a=rtpmap:99 rtx/90000", "a=fmtp:99 apt=98"];
+        const string twcc = "a=extmap:6 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
+        const string sdesMid = "a=extmap:7 urn:ietf:params:rtp-hdrext:sdes:mid";
+        string[] VideoSlot(string msid, int slot, uint offset)
+        {
+            var media = slotSsrcBase + (uint)(8 * slot) + offset;
+            return
+            [
+                $"a=msid:{msid}",
+                $"a=ssrc-group:FID {media} {media + 1}",
+                $"a=ssrc:{media} cname:slot-{slot}",
+                $"a=ssrc:{media} msid:{msid}",
+                $"a=ssrc:{media + 1} cname:slot-{slot}",
+                $"a=ssrc:{media + 1} msid:{msid}",
+            ];
+        }
+
+        Section(0, "audio", "111", "recvonly", [twcc, sdesMid, "a=extmap:8 urn:ietf:params:rtp-hdrext:ssrc-audio-level", .. Opus()]);
+        Section(1, "video", "96 97", "recvonly", [twcc, sdesMid, .. Vp8()]);
+        Section(2, "video", "98 99 96 97", "recvonly", [twcc, sdesMid, .. Vp9(), .. Vp8()]);
+        for (var slot = 0; slot < audio; slot++)
+        {
+            var ssrc = slotSsrcBase + (uint)(8 * slot);
+            Section(3 + slot, "audio", "111", "sendonly",
+            [
+                sdesMid, .. Opus(),
+                $"a=msid:audio-slot-{slot} audio-slot-{slot}",
+                $"a=ssrc:{ssrc} cname:slot-{slot}",
+                $"a=ssrc:{ssrc} msid:audio-slot-{slot} audio-slot-{slot}",
+            ]);
+        }
+
+        for (var slot = 0; slot < camera; slot++)
+        {
+            Section(3 + audio + slot, "video", "96 97", "sendonly", [sdesMid, twcc, .. Vp8(), .. VideoSlot($"camera-slot-{slot} video-slot-{slot}", slot, 1)]);
+        }
+
+        for (var slot = 0; slot < screen; slot++)
+        {
+            Section(3 + audio + camera + slot, "video", "98 99 96 97", "sendonly", [sdesMid, twcc, .. Vp9(), .. Vp8(), .. VideoSlot($"screen-slot-{slot} screen-slot-{slot}", slot, 3)]);
+        }
+
+        lines.Add(string.Empty);
+        return string.Join("\r\n", lines);
+    }
 
     private static BotOptions ValidOptions()
         => new()
