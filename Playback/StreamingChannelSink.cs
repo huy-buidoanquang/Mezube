@@ -2,6 +2,8 @@ using Mezube.Domain.Entities;
 using Mezube.Media;
 using Mezube.Music;
 using Mezube.Streaming;
+using Mezon.Net.Core;
+using Mezon.Net.Models;
 using Mezon.Net.Sdk;
 using Microsoft.Extensions.Logging;
 
@@ -128,11 +130,36 @@ public sealed class StreamingChannelSink : IPlaybackSink, IStreamPublisherSink
         return session.WaitUntilTrackEndedAsync(cancellationToken);
     }
 
-    private static Task<StreamPublishGrant> GetPublishGrantAsync(
+    private static async Task<StreamPublishGrant> GetPublishGrantAsync(
         MezonClient client,
         long channelId,
         CancellationToken cancellationToken)
-        => Task.FromException<StreamPublishGrant>(new StreamPublishException(
-            StreamFailureKind.Unavailable,
-            "Stream publishing needs a Mezon.Net.Sdk release with GetStreamPlayback."));
+    {
+        GetStreamPlaybackResponse playback;
+        try
+        {
+            playback = await client.GetStreamPlaybackAsync(
+                    new GetStreamPlaybackParams(channelId, publish: true),
+                    new RequestOptions { CancelToken = cancellationToken })
+                .ConfigureAwait(false);
+        }
+        catch (MezonApiException ex)
+        {
+            throw new StreamPublishException(
+                StreamPublishException.ForApiCode(ex.RawCode),
+                $"Stream publish grant was refused with code {ex.RawCode}.",
+                ex);
+        }
+
+        return ToPublishGrant(playback.WhipUrl, playback.Token);
+    }
+
+    internal static StreamPublishGrant ToPublishGrant(string whipUrl, string token)
+        => Uri.TryCreate(whipUrl, UriKind.Absolute, out var url)
+            && (url.Scheme == Uri.UriSchemeHttps || url.Scheme == Uri.UriSchemeHttp)
+            && !string.IsNullOrEmpty(token)
+                ? new StreamPublishGrant(url, token)
+                : throw new StreamPublishException(
+                    StreamFailureKind.Unavailable,
+                    "The stream publish grant has no usable WHIP URL or token.");
 }

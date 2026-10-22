@@ -1,5 +1,6 @@
 using Mezube.Media;
 using Mezube.Music;
+using Mezube.Playback;
 using Mezube.Streaming;
 using Mezube.Ui;
 using System.Text.Json;
@@ -34,6 +35,25 @@ public sealed class StreamFailureTests
     [InlineData(503, StreamFailureKind.Unavailable)]
     public void Api_code_maps_to_a_failure_kind(int code, StreamFailureKind expected)
         => Assert.Equal(expected, StreamPublishException.ForApiCode(code));
+
+    [Fact]
+    public void Publish_grant_keeps_an_absolute_whip_url_and_its_token()
+    {
+        var grant = StreamingChannelSink.ToPublishGrant("https://streaming.example/whip/42", "jwt");
+
+        Assert.Equal(new Uri("https://streaming.example/whip/42"), grant.WhipUrl);
+        Assert.Equal("jwt", grant.Token);
+    }
+
+    [Theory]
+    [InlineData("", "jwt")]
+    [InlineData("/whip/42", "jwt")]
+    [InlineData("wss://streaming.example/whip/42", "jwt")]
+    [InlineData("https://streaming.example/whip/42", "")]
+    public void Unusable_publish_grant_is_unavailable(string whipUrl, string token)
+        => Assert.Equal(
+            StreamFailureKind.Unavailable,
+            Assert.Throws<StreamPublishException>(() => StreamingChannelSink.ToPublishGrant(whipUrl, token)).Kind);
 
     [Theory]
     [InlineData(StreamFailureKind.ChannelBusy, "Someone else is live in this channel.")]
