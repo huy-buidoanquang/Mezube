@@ -10,7 +10,7 @@ using Mezube.Helpers;
 using Mezube.Infrastructure.Caching;
 using Mezube.Infrastructure.Caching.Snapshots;
 using Mezube.Music;
-using Mezube.Sfu;
+using Mezube.Streaming;
 using Mezube.Ui;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -26,7 +26,7 @@ public sealed class MezubeBot : BackgroundService
     private readonly BotOptions _options;
     private readonly MusicPlayer _player;
     private readonly BindStore _binds;
-    private readonly SfuClientHolder _streamingHolder;
+    private readonly StreamClientHolder _streamingHolder;
     private readonly MusicVizAssets _viz;
     private readonly IClanSettingsService _clanSettings;
     private readonly MezonEntityCacheBridge _entityCache;
@@ -45,7 +45,7 @@ public sealed class MezubeBot : BackgroundService
         BotOptions options,
         MusicPlayer player,
         BindStore binds,
-        SfuClientHolder streamingHolder,
+        StreamClientHolder streamingHolder,
         MusicVizAssets viz,
         IClanSettingsService clanSettings,
         MezonEntityCacheBridge entityCache,
@@ -412,7 +412,7 @@ public sealed class MezubeBot : BackgroundService
         };
 
         _logger.LogInformation(
-            "Logging in bot {BotId} to {Host}:{Port} with SFU audio publisher",
+            "Logging in bot {BotId} to {Host}:{Port} with stream audio publisher",
             _options.BotId,
             _options.Host,
             _options.Port);

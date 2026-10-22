@@ -81,7 +81,7 @@ public sealed class ClanPlaybackSessionTests
     [Theory]
     [InlineData(PlayerDestroyReason.UserStop)]
     [InlineData(PlayerDestroyReason.QueueEmpty)]
-    [InlineData(PlayerDestroyReason.SfuFailed)]
+    [InlineData(PlayerDestroyReason.StreamFailed)]
     [InlineData(PlayerDestroyReason.TrackFailed)]
     [InlineData(PlayerDestroyReason.IdleTimeout)]
     [InlineData(PlayerDestroyReason.ModeConflict)]
@@ -110,13 +110,13 @@ public sealed class ClanPlaybackSessionTests
 
     [Fact]
     public void Natural_eof_never_selects_sfu_stop_even_if_reason_is_stale()
-        => Assert.False(MusicPlayer.ShouldStopSfuAfterTrack(
+        => Assert.False(MusicPlayer.ShouldStopStreamAfterTrack(
             trackEndedNaturally: true,
             PlayerDestroyReason.UserStop));
 
     [Fact]
     public void Explicit_stop_cancellation_selects_sfu_stop()
-        => Assert.True(MusicPlayer.ShouldStopSfuAfterTrack(
+        => Assert.True(MusicPlayer.ShouldStopStreamAfterTrack(
             trackEndedNaturally: false,
             PlayerDestroyReason.UserStop));
 

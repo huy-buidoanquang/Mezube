@@ -1,7 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using Mezube.Bot;
-using Mezube.Sfu;
+using Mezube.Streaming;
 using Microsoft.Extensions.Logging;
 
 namespace Mezube.Media;
@@ -22,11 +22,11 @@ public sealed class FfmpegProcessor
     public bool IsAvailable => _available.Value;
 
     /// <summary>
-    /// Produce the SFU wire format (Ogg Opus 48 kHz stereo) at <paramref name="outputPath"/>.
+    /// Produce the stream wire format (Ogg Opus 48 kHz stereo) at <paramref name="outputPath"/>.
     /// Prefer copy, then remux (<c>-c:a copy</c>), then libopus transcode.
     /// Compatibility is decided by <see cref="OggOpusReader"/> — the same parser the publisher uses.
     /// </summary>
-    public async Task<string?> PrepareSfuOggAsync(
+    public async Task<string?> PrepareStreamOggAsync(
         string inputPath,
         string outputPath,
         CancellationToken cancellationToken = default)
@@ -40,7 +40,7 @@ public sealed class FfmpegProcessor
             Directory.CreateDirectory(outputDir);
         }
 
-        if (await OggOpusReader.IsSfuCompatibleFileAsync(inputPath, cancellationToken).ConfigureAwait(false))
+        if (await OggOpusReader.IsStreamCompatibleFileAsync(inputPath, cancellationToken).ConfigureAwait(false))
         {
             if (!PathsEqual(inputPath, outputPath))
             {
@@ -61,7 +61,7 @@ public sealed class FfmpegProcessor
 
         var remuxed = await RemuxOpusToOggAsync(inputPath, outputPath, cancellationToken).ConfigureAwait(false);
         if (remuxed is not null
-            && await OggOpusReader.IsSfuCompatibleFileAsync(remuxed, cancellationToken).ConfigureAwait(false))
+            && await OggOpusReader.IsStreamCompatibleFileAsync(remuxed, cancellationToken).ConfigureAwait(false))
         {
             _logger.LogDebug(
                 "Preparing audio master via remux copy inputExt={InputExt} outputExt={OutputExt}",
@@ -109,7 +109,7 @@ public sealed class FfmpegProcessor
             Directory.CreateDirectory(outputDir);
         }
 
-        // The SFU publisher consumes one canonical wire format. Keep these
+        // The stream publisher consumes one canonical wire format. Keep these
         // values fixed even if the legacy media configuration is customized.
         var outputSettings = new PreparedAudioSettings(
             _options.PreparedAudioBitrateKbps,
@@ -122,7 +122,7 @@ public sealed class FfmpegProcessor
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        // SFU publisher input is normalized to Ogg Opus 48 kHz stereo.
+        // Stream publisher input is normalized to Ogg Opus 48 kHz stereo.
         psi.ArgumentList.Add("-y");
         psi.ArgumentList.Add("-hide_banner");
         psi.ArgumentList.Add("-nostdin");

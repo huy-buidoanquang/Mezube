@@ -1,13 +1,13 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 
-namespace Mezube.Sfu;
+namespace Mezube.Streaming;
 
 /// <summary>
 /// Waits until a Stopwatch deadline with ~1 ms error.
 /// <see cref="Task.Delay"/> on Windows uses the ~15.6 ms timer interrupt; that
 /// jitter is what turns a 20 ms Opus cadence into clustered arrivals after a
-/// long listen. The SFU forwards audio immediately (no jitter buffer, no RTX),
+/// long listen. The streaming server forwards audio immediately (no jitter buffer, no RTX),
 /// so the publisher has to hit the deadline itself.
 /// </summary>
 internal static class HighResolutionWait

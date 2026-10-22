@@ -3,7 +3,7 @@ using Mezube.Bot;
 using Mezube.Domain.Entities;
 using Mezube.Helpers;
 using Mezube.Infrastructure.Persistence;
-using Mezube.Sfu;
+using Mezube.Streaming;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using System.Collections.Concurrent;
@@ -12,7 +12,7 @@ using System.Diagnostics;
 namespace Mezube.Media;
 
 /// <summary>
-/// Ensures the SFU publisher gets a local Ogg Opus file (and a CDN URL for restart cache).
+/// Ensures the stream publisher gets a local Ogg Opus file (and a CDN URL for restart cache).
 /// Download/convert live in <see cref="PipelineProcessor"/>; CDN persist is off the play path.
 /// </summary>
 public sealed class PlayableMediaProcessor
@@ -97,7 +97,7 @@ public sealed class PlayableMediaProcessor
             }
 
             var cachedUrl = stored?.PlayableUrl;
-            if (stored is not null && IsPreparedSfuAudioUrl(cachedUrl))
+            if (stored is not null && IsPreparedStreamAudioUrl(cachedUrl))
             {
                 var cacheKey = PlayableCacheKey(kind, id.Source, id.ExternalId);
                 if (_cache.TryGetValue(cacheKey, out CachedPlayable? fresh) && fresh is not null)
@@ -149,7 +149,7 @@ public sealed class PlayableMediaProcessor
 
         if (!NeedsRepackage(track.MediaUrl, _options.CdnBaseUrl))
         {
-            if (!IsPreparedSfuAudioUrl(track.MediaUrl))
+            if (!IsPreparedStreamAudioUrl(track.MediaUrl))
             {
                 // Fall through to full prep — never persist a non-CDN URL as playable.
             }
@@ -196,19 +196,19 @@ public sealed class PlayableMediaProcessor
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             throw new MediaPrepException(
-                $"Media preparation failed for '{track.Title}'; cannot play without a SFU Ogg Opus file.",
+                $"Media preparation failed for '{track.Title}'; cannot play without an Ogg Opus file.",
                 ex);
         }
 
         if (string.IsNullOrWhiteSpace(prepared.LocalPath) || !File.Exists(prepared.LocalPath))
         {
-            throw new MediaPrepException($"Media preparation failed for '{track.Title}'; cannot play without a SFU Ogg Opus file.");
+            throw new MediaPrepException($"Media preparation failed for '{track.Title}'; cannot play without an Ogg Opus file.");
         }
 
         var storedUrl = identity is { } saved
             ? (await _store.TryGetAsync(saved.Source, saved.ExternalId, cancellationToken).ConfigureAwait(false))?.PlayableUrl
             : null;
-        var mediaUrl = IsPreparedSfuAudioUrl(storedUrl) ? storedUrl! : track.MediaUrl;
+        var mediaUrl = IsPreparedStreamAudioUrl(storedUrl) ? storedUrl! : track.MediaUrl;
         _logger.LogInformation(
             "Playable local Ogg ready for {Title} kind={Kind} elapsedMs={ElapsedMs}",
             track.Title,
@@ -223,7 +223,7 @@ public sealed class PlayableMediaProcessor
     /// </summary>
     public void ScheduleCdnPersist(MezonClient client, TrackInfoEntity track, PreparedAssetKind kind)
     {
-        if (IsPreparedSfuAudioUrl(track.MediaUrl))
+        if (IsPreparedStreamAudioUrl(track.MediaUrl))
         {
             return;
         }
@@ -323,7 +323,7 @@ public sealed class PlayableMediaProcessor
             ? PreparedAudioCache.GetPath(_options.TempDir, id.Source, id.ExternalId)
             : track.LocalMediaPath;
         if (string.IsNullOrWhiteSpace(localPath)
-            || !await OggOpusReader.IsSfuCompatibleFileAsync(localPath, cancellationToken).ConfigureAwait(false))
+            || !await OggOpusReader.IsStreamCompatibleFileAsync(localPath, cancellationToken).ConfigureAwait(false))
         {
             return null;
         }
@@ -336,7 +336,7 @@ public sealed class PlayableMediaProcessor
             cdnUrl = stored?.PlayableUrl;
             await _store.TouchPlayedAsync(storedId.Source, storedId.ExternalId, cancellationToken)
                 .ConfigureAwait(false);
-            if (IsPreparedSfuAudioUrl(cdnUrl))
+            if (IsPreparedStreamAudioUrl(cdnUrl))
             {
                 _cache.Set(
                     PlayableCacheKey(PreparedAssetKind.Audio, storedId.Source, storedId.ExternalId),
@@ -345,7 +345,7 @@ public sealed class PlayableMediaProcessor
             }
         }
 
-        var mediaUrl = IsPreparedSfuAudioUrl(cdnUrl) ? cdnUrl! : track.MediaUrl;
+        var mediaUrl = IsPreparedStreamAudioUrl(cdnUrl) ? cdnUrl! : track.MediaUrl;
         return WithMediaUrl(track, mediaUrl, localPath, identity?.ExternalId ?? track.ExternalId, track.SourceBytes);
     }
 
@@ -361,7 +361,7 @@ public sealed class PlayableMediaProcessor
             : mapped;
     }
 
-    private static bool IsPreparedSfuAudioUrl(string? rawUrl)
+    private static bool IsPreparedStreamAudioUrl(string? rawUrl)
     {
         if (!PlayableUrlHelper.IsPreparedAudioUrl(rawUrl)
             || !Uri.TryCreate(rawUrl, UriKind.Absolute, out var uri))
@@ -369,7 +369,7 @@ public sealed class PlayableMediaProcessor
             return false;
         }
 
-        // The in-process SFU publisher consumes Ogg Opus 48 kHz stereo. Older
+        // The in-process stream publisher consumes Ogg Opus 48 kHz stereo. Older
         // cached .ogg/.opus assets may have a different sample rate/channel
         // layout, so they must be prepared once instead of being trusted by extension.
         return uri.AbsolutePath.Contains(".normalized.", StringComparison.OrdinalIgnoreCase);

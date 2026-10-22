@@ -1,6 +1,6 @@
 using Mezube.Bot;
 using Mezube.Media;
-using Mezube.Sfu;
+using Mezube.Streaming;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Mezube.Tests;
@@ -28,7 +28,7 @@ public sealed class AtomicPreparedOggTests : IDisposable
         var input = Path.Combine(_dir, "mezube_w.ogg");
         var work = Path.Combine(_dir, "mezube_w.normalized.ogg");
         var output = Path.Combine(_dir, "prepared", "youtube_x.normalized.ogg");
-        await File.WriteAllBytesAsync(input, SfuOggTestFile.Stereo48k([0x08, 0x01]));
+        await File.WriteAllBytesAsync(input, StreamOggTestFile.Stereo48k([0x08, 0x01]));
 
         var result = await PipelineProcessor.EnsureOggAsync(
             Ffmpeg(Path.Combine(_dir, "ffmpeg-missing")),
@@ -39,7 +39,7 @@ public sealed class AtomicPreparedOggTests : IDisposable
 
         Assert.Equal(output, result);
         Assert.False(File.Exists(work));
-        Assert.True(await OggOpusReader.IsSfuCompatibleFileAsync(output, CancellationToken.None));
+        Assert.True(await OggOpusReader.IsStreamCompatibleFileAsync(output, CancellationToken.None));
     }
 
     [Fact]

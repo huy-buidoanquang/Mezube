@@ -1,6 +1,6 @@
 using System.Buffers.Binary;
 
-namespace Mezube.Sfu;
+namespace Mezube.Streaming;
 
 internal sealed class OggOpusReader
 {
@@ -21,9 +21,9 @@ internal sealed class OggOpusReader
 
     /// <summary>
     /// True when the file is Ogg Opus 48 kHz stereo (mapping family 0) with at least
-    /// one audio packet — the exact contract <see cref="SfuPublisherSession"/> sends as RTP.
+    /// one audio packet — the exact contract <see cref="StreamPublisherSession"/> sends as RTP.
     /// </summary>
-    internal static async Task<bool> IsSfuCompatibleFileAsync(string path, CancellationToken cancellationToken)
+    internal static async Task<bool> IsStreamCompatibleFileAsync(string path, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
         {
@@ -39,7 +39,7 @@ internal sealed class OggOpusReader
                 FileShare.Read,
                 bufferSize: 4096,
                 FileOptions.Asynchronous);
-            return await IsSfuCompatibleAsync(stream, cancellationToken).ConfigureAwait(false);
+            return await IsStreamCompatibleAsync(stream, cancellationToken).ConfigureAwait(false);
         }
         catch (InvalidDataException)
         {
@@ -51,7 +51,7 @@ internal sealed class OggOpusReader
         }
     }
 
-    internal static async Task<bool> IsSfuCompatibleAsync(Stream stream, CancellationToken cancellationToken)
+    internal static async Task<bool> IsStreamCompatibleAsync(Stream stream, CancellationToken cancellationToken)
     {
         var reader = new OggOpusReader(stream);
         var packet = await reader.ReadPacketAsync(cancellationToken).ConfigureAwait(false);

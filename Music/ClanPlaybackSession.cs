@@ -55,7 +55,7 @@ public sealed class ClanPlaybackSession : IDisposable
     {
         if (LastDestroyReason is PlayerDestroyReason.UserStop
             or PlayerDestroyReason.QueueEmpty
-            or PlayerDestroyReason.SfuFailed
+            or PlayerDestroyReason.StreamFailed
             or PlayerDestroyReason.TrackFailed
             or PlayerDestroyReason.IdleTimeout
             or PlayerDestroyReason.ModeConflict

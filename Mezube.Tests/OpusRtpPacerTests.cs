@@ -1,4 +1,4 @@
-using Mezube.Sfu;
+using Mezube.Streaming;
 
 namespace Mezube.Tests;
 
@@ -37,26 +37,12 @@ public sealed class OpusRtpPacerTests
     }
 
     [Fact]
-    public async Task Pause_freezes_the_playout_clock()
-    {
-        var pacer = new OpusRtpPacer();
-        pacer.Start();
-        pacer.Account(960);
-        pacer.Pause();
-        var due = pacer.DueIn;
-        await Task.Delay(50);
-
-        Assert.InRange(Math.Abs(pacer.DueIn.TotalMilliseconds - due.TotalMilliseconds), 0, 3);
-        Assert.False(pacer.IsRunning);
-    }
-
-    [Fact]
-    public void Reset_starts_a_new_timeline()
+    public void Start_begins_a_new_timeline()
     {
         var pacer = new OpusRtpPacer();
         pacer.Start();
         pacer.Account(960 * 10);
-        pacer.Reset();
+        pacer.Start();
         pacer.Account(960);
 
         Assert.InRange(pacer.DueIn.TotalMilliseconds, 18, 20);
@@ -71,32 +57,28 @@ public sealed class OpusRtpPacerTests
     }
 
     [Fact]
-    public async Task ReleaseCatchUp_after_stall_keeps_the_next_frame_on_cadence()
+    public void LagSamples_is_zero_while_on_schedule()
     {
         var pacer = new OpusRtpPacer();
         pacer.Start();
-        pacer.Account(960);
-        await Task.Delay(80);
+        pacer.Account(960 * 10);
 
-        Assert.True(pacer.Behind > OpusRtpPacer.MaxCatchUp);
-        Assert.Equal(TimeSpan.Zero, pacer.DueIn);
-        Assert.True(pacer.ReleaseCatchUp());
-        Assert.InRange(pacer.Behind.TotalMilliseconds, 0, 5);
-
-        pacer.Account(960);
-        Assert.InRange(pacer.DueIn.TotalMilliseconds, 18, 22);
+        Assert.Equal(0u, pacer.LagSamples());
     }
 
     [Fact]
-    public async Task Soft_behind_does_not_drop_lag()
+    public async Task LagSamples_after_a_stall_moves_the_timeline_back_to_wall_clock()
     {
         var pacer = new OpusRtpPacer();
         pacer.Start();
         pacer.Account(960);
-        await Task.Delay(25);
+        await Task.Delay(150);
 
-        Assert.True(pacer.Behind > TimeSpan.Zero);
-        Assert.True(pacer.Behind <= OpusRtpPacer.MaxCatchUp);
-        Assert.False(pacer.ReleaseCatchUp());
+        var lag = pacer.LagSamples();
+        Assert.True(lag >= 960 * 4, $"lag {lag}");
+        Assert.Equal(0u, lag % 960);
+
+        pacer.Account(lag);
+        Assert.InRange(pacer.Behind, TimeSpan.Zero, OpusRtpPacer.MaxCatchUp + TimeSpan.FromMilliseconds(25));
     }
 }

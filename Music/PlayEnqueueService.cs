@@ -109,7 +109,7 @@ public sealed class PlayEnqueueService
 
                 // The request was accepted and now owns the session again.
                 // Do not let a previous !stop/idle/failure reason make the
-                // next natural EOF tear down SFU.
+                // next natural EOF tear down the stream.
                 state.ResetTerminalDestroyReason();
 
                 if (interruptDefault)
@@ -230,7 +230,7 @@ public sealed class PlayEnqueueService
         Action<Exception>? onError = null)
     {
         var ct = state.PrepCts?.Token ?? CancellationToken.None;
-        // Bot playback is SFU audio-only. Keep the legacy video preparation
+        // Bot playback is audio-only. Keep the legacy video preparation
         // available for unrelated callers, but never schedule it for a queue
         // item that can reach the playback pump.
         _prep.StartBackgroundPrep(client, play.Track, PreparedAssetKind.Audio, ct, onError);

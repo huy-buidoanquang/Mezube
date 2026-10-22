@@ -8,7 +8,7 @@ namespace Mezube.Media;
 
     /// <summary>
     /// Uploads media via Mezon presigned URL to Cloudflare R2 (single PUT or multipart),
-    /// returning a public CDN URL the SFU publisher can fetch.
+    /// returning a public CDN URL the stream publisher can fetch.
     /// </summary>
 public sealed class MezonCdnUploader
 {
@@ -194,7 +194,7 @@ public sealed class MezonCdnUploader
         return (publicUrl, totalBytes);
     }
 
-    /// <summary>True if a previously cached playable URL still responds to the SFU publisher fetch.</summary>
+    /// <summary>True if a previously cached playable URL still responds to the stream publisher fetch.</summary>
     public async Task<bool> IsReachableAsync(string url, CancellationToken cancellationToken = default)
     {
         try

@@ -1,6 +1,6 @@
 using Mezube.Bot;
 using Mezube.Music;
-using Mezube.Sfu;
+using Mezube.Streaming;
 using Microsoft.Extensions.Logging.Abstractions;
 using System.Net;
 using System.Net.Sockets;
@@ -14,32 +14,32 @@ public sealed class MediaFailureClassificationTests
     [InlineData("bad-ogg", true)]
     [InlineData("cdn-404", true)]
     [InlineData("missing-file", true)]
-    [InlineData("sfu-unreachable", false)]
-    [InlineData("sfu-lost-during-track", false)]
+    [InlineData("stream-unreachable", false)]
+    [InlineData("stream-lost-during-track", false)]
     public async Task Playback_failure_is_classified_by_source(string source, bool mediaFailure)
     {
         var failure = await CaptureFailureAsync(source);
 
         Assert.Equal(mediaFailure, MusicPlayer.IsMediaPrepFailure(failure));
-        Assert.Equal(!mediaFailure, MusicPlayer.IsSfuInfrastructureFailure(failure));
+        Assert.Equal(!mediaFailure, MusicPlayer.IsStreamInfrastructureFailure(failure));
     }
 
     private static async Task<Exception> CaptureFailureAsync(string source) => source switch
     {
-        "bad-ogg" => SfuPublisherSession.ToTrackFailure(await CaptureAsync(async () =>
+        "bad-ogg" => StreamPublisherSession.ToTrackFailure(await CaptureAsync(async () =>
         {
             var packets = Channel.CreateBounded<byte[]>(4);
             packets.Writer.TryComplete(await CaptureAsync(async () =>
                 await new OggOpusReader(new MemoryStream(new byte[64])).ReadPacketAsync(CancellationToken.None)));
             await packets.Reader.WaitToReadAsync();
         })),
-        "cdn-404" => SfuPublisherSession.ToTrackFailure(await CaptureAsync(() =>
+        "cdn-404" => StreamPublisherSession.ToTrackFailure(await CaptureAsync(() =>
         {
             using var response = new HttpResponseMessage(HttpStatusCode.NotFound);
             response.EnsureSuccessStatusCode();
             return Task.CompletedTask;
         })),
-        "missing-file" => SfuPublisherSession.ToTrackFailure(await CaptureAsync(() =>
+        "missing-file" => StreamPublisherSession.ToTrackFailure(await CaptureAsync(() =>
         {
             using var file = new FileStream(
                 Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.ogg"),
@@ -47,10 +47,8 @@ public sealed class MediaFailureClassificationTests
                 FileAccess.Read);
             return Task.CompletedTask;
         })),
-        "sfu-unreachable" => await StartAgainstClosedPortAsync(),
-        "sfu-lost-during-track" => SfuPublisherSession.ToTrackFailure(new InvalidOperationException(
-            "SFU publisher reconnect is no longer available.",
-            await StartAgainstClosedPortAsync())),
+        "stream-unreachable" => await StartAgainstClosedPortAsync(),
+        "stream-lost-during-track" => StreamPublisherSession.ToTrackFailure(new InvalidOperationException("sender stopped")),
         _ => throw new ArgumentOutOfRangeException(nameof(source)),
     };
 
@@ -63,15 +61,16 @@ public sealed class MediaFailureClassificationTests
 
         var options = new BotOptions
         {
-            SfuWebSocketUrl = $"ws://127.0.0.1:{port}/ws",
-            SfuConnectTimeoutMs = 15000,
-            SfuReconnectMaxAttempts = 0,
+            StreamConnectTimeoutMs = 15000,
+            StreamReconnectMaxAttempts = 0,
         };
         using var http = new HttpClient();
-        var session = new SfuPublisherSession(options, http, NullLogger.Instance, 42);
+        var session = new StreamPublisherSession(options, http, NullLogger.Instance, 42);
         try
         {
-            return await CaptureAsync(() => session.StartAsync("token", _ => Task.FromResult("token"), CancellationToken.None));
+            return await CaptureAsync(() => session.StartAsync(
+                _ => Task.FromResult(new StreamPublishGrant(new Uri($"http://127.0.0.1:{port}/whip/42"), "token")),
+                CancellationToken.None));
         }
         finally
         {

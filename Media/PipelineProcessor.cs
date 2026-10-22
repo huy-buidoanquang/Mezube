@@ -8,7 +8,7 @@ namespace Mezube.Media;
 public sealed record PipelineResult(long? SourceBytes, string LocalPath);
 
 /// <summary>
-/// Prepare stages: download to temp → convert to SFU Ogg.
+/// Prepare stages: download to temp → convert to stream Ogg.
 /// CDN upload is owned by <see cref="PlayableMediaProcessor"/> so playback is not blocked on it.
 /// </summary>
 public sealed class PipelineProcessor
@@ -105,7 +105,7 @@ public sealed class PipelineProcessor
         string outputPath,
         CancellationToken cancellationToken)
     {
-        var oggPath = await ffmpeg.PrepareSfuOggAsync(inputPath, workPath, cancellationToken)
+        var oggPath = await ffmpeg.PrepareStreamOggAsync(inputPath, workPath, cancellationToken)
             .ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(oggPath) || !File.Exists(oggPath))
         {

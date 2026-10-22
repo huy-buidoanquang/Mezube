@@ -6,7 +6,7 @@ public sealed class TrackInfoEntity
     public required string Title { get; init; }
     public required string MediaUrl { get; init; }
     /// <summary>
-    /// In-process SFU-ready Ogg path. Preferred over <see cref="MediaUrl"/> for playback
+    /// In-process stream-ready Ogg path. Preferred over <see cref="MediaUrl"/> for playback
     /// so the publisher does not HTTP-GET a file this process just wrote.
     /// </summary>
     public string? LocalMediaPath { get; init; }
